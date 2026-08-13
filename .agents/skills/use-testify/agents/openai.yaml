@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use Testify"
+  short_description: "Write focused, diagnosable Go tests"
+  default_prompt: "Use $use-testify to write or review these Go tests."

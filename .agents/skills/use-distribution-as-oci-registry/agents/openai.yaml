@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use Distribution as OCI Registry"
+  short_description: "Deploy and verify a reproducible private OCI registry"
+  default_prompt: "Use $use-distribution-as-oci-registry to create a reproducible Docker Compose registry deployment and verify push and pull."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use Docker Buildx for Building"
+  short_description: "Inspect, build, load, and smoke-test images with Buildx"
+  default_prompt: "Use $use-docker-buildx-for-building to inspect this repository, build the target component image, and verify it locally."

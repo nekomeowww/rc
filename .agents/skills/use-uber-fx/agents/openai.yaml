@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use Uber Fx"
+  short_description: "Apply consistent Uber Fx wiring patterns"
+  default_prompt: "Use $use-uber-fx to wire this Go package with consistent fx constructors, modules, and run entrypoints."

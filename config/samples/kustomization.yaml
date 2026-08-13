@@ -1,0 +1,5 @@
+## Append samples of your project ##
+resources:
+- configs_v1alpha1_agentcredential.yaml
+- configs_v1alpha1_credential.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

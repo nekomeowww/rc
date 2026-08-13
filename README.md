@@ -70,6 +70,22 @@ make undeploy
 
 Following the options to release and provide this solution to the users.
 
+Tagged releases publish:
+
+- `rcctl` archives for Linux, macOS, and Windows on the GitHub Releases page.
+- The multi-platform operator image at `ghcr.io/nekomeowww/rc`.
+- A consolidated Kubebuilder installer named `install.yaml` as a release asset.
+
+Install the latest released operator with:
+
+```sh
+kubectl apply -f https://github.com/nekomeowww/rc/releases/latest/download/install.yaml
+```
+
+The OpenAI Codex CLI runtime image is versioned independently at
+`ghcr.io/nekomeowww/rc/openai-codex-cli`. Maintainers publish it with the
+dedicated `Release OpenAI Codex CLI image` workflow.
+
 ### By providing a bundle with all YAML files
 
 1. Build the installer for the image built and published in the registry:
@@ -132,4 +148,3 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-

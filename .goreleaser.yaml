@@ -1,0 +1,47 @@
+version: 2
+
+project_name: rcctl
+
+before:
+  hooks:
+    - make build-installer IMG={{ .Env.CONTROLLER_IMAGE }}:{{ .Version }}
+
+builds:
+  - id: rcctl
+    main: ./cmd/rcctl
+    binary: rcctl
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - ids:
+      - rcctl
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+
+release:
+  extra_files:
+    - glob: dist/install.yaml

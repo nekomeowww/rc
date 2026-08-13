@@ -1,0 +1,83 @@
+name: Release OpenAI Codex CLI image
+
+on:
+  workflow_dispatch:
+    inputs:
+      codex_version:
+        description: Version of @openai/codex to publish
+        required: true
+        default: '0.147.0'
+        type: string
+
+concurrency: ${{ github.workflow }}-${{ inputs.codex_version }}
+
+permissions: {}
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - name: Validate Codex version
+        env:
+          CODEX_VERSION: ${{ inputs.codex_version }}
+        shell: bash
+        run: |
+          if [[ ! "${CODEX_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "codex_version must be a semantic version without a leading v." >&2
+            exit 1
+          fi
+
+      - name: Clone the code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Generate image metadata
+        uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}/openai-codex-cli
+          flavor: |
+            latest=true
+          tags: |
+            type=raw,value=${{ inputs.codex_version }}
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish OpenAI Codex CLI
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: images/openai-codex-cli
+          file: images/openai-codex-cli/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            CODEX_VERSION=${{ inputs.codex_version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Attest the OpenAI Codex CLI image
+        uses: actions/attest@v4
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/openai-codex-cli
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

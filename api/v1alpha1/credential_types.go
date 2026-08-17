@@ -24,17 +24,20 @@ import (
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
-// CredentialType describes how a consumer interprets credential data.
-// +kubebuilder:validation:Enum=SSHPrivateKey;APIKey;OAuth
+// CredentialType describes how a consumer presents credential data to a
+// remote system.
+// +kubebuilder:validation:Enum=SSHPrivateKey;HTTPBasicAuth;HTTPBearerToken;HTTPHeaders
 type CredentialType string
 
 const (
 	// CredentialTypeSSHPrivateKey identifies an SSH private key.
 	CredentialTypeSSHPrivateKey CredentialType = "SSHPrivateKey"
-	// CredentialTypeAPIKey identifies an API key.
-	CredentialTypeAPIKey CredentialType = "APIKey"
-	// CredentialTypeOAuth identifies OAuth credential data.
-	CredentialTypeOAuth CredentialType = "OAuth"
+	// CredentialTypeHTTPBasicAuth identifies HTTP Basic authentication data.
+	CredentialTypeHTTPBasicAuth CredentialType = "HTTPBasicAuth"
+	// CredentialTypeHTTPBearerToken identifies an HTTP Bearer token.
+	CredentialTypeHTTPBearerToken CredentialType = "HTTPBearerToken"
+	// CredentialTypeHTTPHeaders identifies named HTTP header values.
+	CredentialTypeHTTPHeaders CredentialType = "HTTPHeaders"
 )
 
 // SecretKeyReference selects one data entry from a Secret in the same
@@ -51,16 +54,84 @@ type SecretKeyReference struct {
 	Key string `json:"key"`
 }
 
+// SSHPrivateKeyCredential identifies the private key used for SSH
+// authentication.
+type SSHPrivateKeyCredential struct {
+	// privateKeyRef selects the private key from a Secret in the same namespace.
+	// +required
+	PrivateKeyRef SecretKeyReference `json:"privateKeyRef"`
+}
+
+// HTTPBasicAuthCredential identifies the username and secret password or token
+// used for HTTP Basic authentication.
+type HTTPBasicAuthCredential struct {
+	// username is presented as the HTTP Basic authentication username.
+	// +kubebuilder:validation:MinLength=1
+	// +required
+	Username string `json:"username"`
+
+	// passwordRef selects the password or token from a Secret in the same
+	// namespace.
+	// +required
+	PasswordRef SecretKeyReference `json:"passwordRef"`
+}
+
+// HTTPBearerTokenCredential identifies the token presented through the HTTP
+// Authorization header using the Bearer scheme.
+type HTTPBearerTokenCredential struct {
+	// tokenRef selects the Bearer token from a Secret in the same namespace.
+	// +required
+	TokenRef SecretKeyReference `json:"tokenRef"`
+}
+
+// HTTPHeader identifies one HTTP header whose value comes from a Secret.
+type HTTPHeader struct {
+	// name is the HTTP header name.
+	// +kubebuilder:validation:Pattern="^[A-Za-z][A-Za-z0-9-]*$"
+	// +required
+	Name string `json:"name"`
+
+	// valueRef selects the header value from a Secret in the same namespace.
+	// +required
+	ValueRef SecretKeyReference `json:"valueRef"`
+}
+
+// HTTPHeadersCredential identifies named secret values presented as HTTP
+// request headers.
+type HTTPHeadersCredential struct {
+	// headers are the HTTP headers presented to the remote system.
+	// +kubebuilder:validation:MinItems=1
+	// +listType=map
+	// +listMapKey=name
+	// +required
+	Headers []HTTPHeader `json:"headers"`
+}
+
 // CredentialSpec defines the desired state of Credential.
+// +kubebuilder:validation:XValidation:rule="self.type == 'SSHPrivateKey' ? has(self.sshPrivateKey) : !has(self.sshPrivateKey)",message="sshPrivateKey must be set exactly when type is SSHPrivateKey"
+// +kubebuilder:validation:XValidation:rule="self.type == 'HTTPBasicAuth' ? has(self.httpBasicAuth) : !has(self.httpBasicAuth)",message="httpBasicAuth must be set exactly when type is HTTPBasicAuth"
+// +kubebuilder:validation:XValidation:rule="self.type == 'HTTPBearerToken' ? has(self.httpBearerToken) : !has(self.httpBearerToken)",message="httpBearerToken must be set exactly when type is HTTPBearerToken"
+// +kubebuilder:validation:XValidation:rule="self.type == 'HTTPHeaders' ? has(self.httpHeaders) : !has(self.httpHeaders)",message="httpHeaders must be set exactly when type is HTTPHeaders"
 type CredentialSpec struct {
-	// type describes how consumers interpret the referenced secret data.
+	// type describes how consumers present the referenced secret data.
 	// +required
 	Type CredentialType `json:"type"`
 
-	// secretKeyRef selects the credential data from a Secret in the same
-	// namespace as this Credential.
-	// +required
-	SecretKeyRef SecretKeyReference `json:"secretKeyRef"`
+	// sshPrivateKey configures SSH private key authentication.
+	// +optional
+	SSHPrivateKey *SSHPrivateKeyCredential `json:"sshPrivateKey,omitempty"`
+
+	// httpBasicAuth configures HTTP Basic authentication.
+	// +optional
+	HTTPBasicAuth *HTTPBasicAuthCredential `json:"httpBasicAuth,omitempty"`
+
+	// httpBearerToken configures HTTP Bearer token authentication.
+	// +optional
+	HTTPBearerToken *HTTPBearerTokenCredential `json:"httpBearerToken,omitempty"`
+
+	// httpHeaders configures named secret HTTP request headers.
+	// +optional
+	HTTPHeaders *HTTPHeadersCredential `json:"httpHeaders,omitempty"`
 }
 
 // CredentialStatus defines the observed state of Credential.

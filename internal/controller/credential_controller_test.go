@@ -30,11 +30,18 @@ import (
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
 )
 
+const (
+	credentialTestHTTPSecretName   = "git-http"
+	credentialTestSSHPrivateKeyKey = "ssh-privatekey"
+	credentialTestSSHSecretName    = "git-ssh"
+	credentialTestTokenKey         = "token"
+)
+
 var _ = Describe("Credential Controller", func() {
 	Context("When reconciling a resource", func() {
 		const (
 			resourceName      = "test-resource"
-			resourceNamespace = "default"
+			resourceNamespace = testNamespace
 		)
 
 		ctx := context.Background()
@@ -56,9 +63,11 @@ var _ = Describe("Credential Controller", func() {
 					},
 					Spec: configsv1alpha1.CredentialSpec{
 						Type: configsv1alpha1.CredentialTypeSSHPrivateKey,
-						SecretKeyRef: configsv1alpha1.SecretKeyReference{
-							Name: "git-ssh",
-							Key:  "ssh-privatekey",
+						SSHPrivateKey: &configsv1alpha1.SSHPrivateKeyCredential{
+							PrivateKeyRef: configsv1alpha1.SecretKeyReference{
+								Name: credentialTestSSHSecretName,
+								Key:  credentialTestSSHPrivateKeyKey,
+							},
 						},
 					},
 				}
@@ -89,24 +98,100 @@ var _ = Describe("Credential Controller", func() {
 			persisted := &configsv1alpha1.Credential{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, persisted)).To(Succeed())
 			Expect(persisted.Spec.Type).To(Equal(configsv1alpha1.CredentialTypeSSHPrivateKey))
-			Expect(persisted.Spec.SecretKeyRef).To(Equal(configsv1alpha1.SecretKeyReference{
-				Name: "git-ssh",
-				Key:  "ssh-privatekey",
+			Expect(persisted.Spec.SSHPrivateKey).NotTo(BeNil())
+			Expect(persisted.Spec.SSHPrivateKey.PrivateKeyRef).To(Equal(configsv1alpha1.SecretKeyReference{
+				Name: credentialTestSSHSecretName,
+				Key:  credentialTestSSHPrivateKeyKey,
 			}))
 		})
+	})
+
+	It("accepts each supported credential type with its matching payload", func() {
+		credentials := []*configsv1alpha1.Credential{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "http-basic", Namespace: testNamespace},
+				Spec: configsv1alpha1.CredentialSpec{
+					Type: configsv1alpha1.CredentialTypeHTTPBasicAuth,
+					HTTPBasicAuth: &configsv1alpha1.HTTPBasicAuthCredential{
+						Username: "git",
+						PasswordRef: configsv1alpha1.SecretKeyReference{
+							Name: credentialTestHTTPSecretName,
+							Key:  credentialTestTokenKey,
+						},
+					},
+				},
+			},
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "http-bearer", Namespace: testNamespace},
+				Spec: configsv1alpha1.CredentialSpec{
+					Type: configsv1alpha1.CredentialTypeHTTPBearerToken,
+					HTTPBearerToken: &configsv1alpha1.HTTPBearerTokenCredential{
+						TokenRef: configsv1alpha1.SecretKeyReference{
+							Name: credentialTestHTTPSecretName,
+							Key:  credentialTestTokenKey,
+						},
+					},
+				},
+			},
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "http-headers", Namespace: testNamespace},
+				Spec: configsv1alpha1.CredentialSpec{
+					Type: configsv1alpha1.CredentialTypeHTTPHeaders,
+					HTTPHeaders: &configsv1alpha1.HTTPHeadersCredential{
+						Headers: []configsv1alpha1.HTTPHeader{
+							{
+								Name: "X-Internal-Token",
+								ValueRef: configsv1alpha1.SecretKeyReference{
+									Name: credentialTestHTTPSecretName,
+									Key:  credentialTestTokenKey,
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		for _, credential := range credentials {
+			Expect(k8sClient.Create(ctx, credential)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, credential)).To(Succeed())
+		}
 	})
 
 	It("rejects an unsupported credential type", func() {
 		credential := &configsv1alpha1.Credential{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "unsupported-type",
-				Namespace: "default",
+				Namespace: testNamespace,
 			},
 			Spec: configsv1alpha1.CredentialSpec{
 				Type: "Password",
-				SecretKeyRef: configsv1alpha1.SecretKeyReference{
-					Name: "password",
-					Key:  "password",
+				HTTPBasicAuth: &configsv1alpha1.HTTPBasicAuthCredential{
+					Username: "git",
+					PasswordRef: configsv1alpha1.SecretKeyReference{
+						Name: "password",
+						Key:  "password",
+					},
+				},
+			},
+		}
+
+		Expect(k8sClient.Create(ctx, credential)).NotTo(Succeed())
+	})
+
+	It("rejects a credential payload that does not match its type", func() {
+		credential := &configsv1alpha1.Credential{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "mismatched-payload",
+				Namespace: testNamespace,
+			},
+			Spec: configsv1alpha1.CredentialSpec{
+				Type: configsv1alpha1.CredentialTypeHTTPBearerToken,
+				SSHPrivateKey: &configsv1alpha1.SSHPrivateKeyCredential{
+					PrivateKeyRef: configsv1alpha1.SecretKeyReference{
+						Name: credentialTestSSHSecretName,
+						Key:  credentialTestSSHPrivateKeyKey,
+					},
 				},
 			},
 		}

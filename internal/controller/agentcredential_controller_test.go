@@ -36,7 +36,7 @@ var _ = Describe("AgentCredential Controller", func() {
 	Context("When reconciling a resource", func() {
 		const (
 			resourceName      = "test-resource"
-			resourceNamespace = "default"
+			resourceNamespace = testNamespace
 			agentSecretName   = "agent-auth"
 		)
 
@@ -103,7 +103,7 @@ var _ = Describe("AgentCredential Controller", func() {
 		agentCredential := &configsv1alpha1.AgentCredential{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "unsupported-agent",
-				Namespace: "default",
+				Namespace: testNamespace,
 			},
 			Spec: configsv1alpha1.AgentCredentialSpec{
 				Agent: "other",

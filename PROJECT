@@ -6,6 +6,7 @@ cliVersion: 4.15.0
 domain: rc.ayaka.io
 layout:
 - go.kubebuilder.io/v4
+multigroup: true
 projectName: rc
 repo: github.com/nekomeowww/rc
 resources:
@@ -26,5 +27,32 @@ resources:
   group: configs
   kind: Credential
   path: github.com/nekomeowww/rc/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: rc.ayaka.io
+  group: repositories
+  kind: Repository
+  path: github.com/nekomeowww/rc/api/repositories/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: rc.ayaka.io
+  group: repositories
+  kind: RepositoryExec
+  path: github.com/nekomeowww/rc/api/repositories/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: rc.ayaka.io
+  group: repositories
+  kind: Worktree
+  path: github.com/nekomeowww/rc/api/repositories/v1alpha1
   version: v1alpha1
 version: "3"

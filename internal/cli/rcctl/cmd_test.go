@@ -25,3 +25,17 @@ func TestCommandTreeContainsAgentCredentialImport(t *testing.T) {
 	assert.Contains(t, output.String(), "--context string")
 	assert.Contains(t, output.String(), "--namespace string")
 }
+
+func TestCommandTreeContainsRepositoryExec(t *testing.T) {
+	t.Parallel()
+
+	command := NewCommand()
+	output := new(bytes.Buffer)
+	command.SetOut(output)
+	command.SetErr(output)
+	command.SetArgs([]string{"repo", "exec", "--help"})
+
+	require.NoError(t, command.Execute(), "render Repository Exec command help")
+	assert.Contains(t, output.String(), "exec REPOSITORY -- COMMAND [ARG...]")
+	assert.Contains(t, output.String(), "--wait")
+}

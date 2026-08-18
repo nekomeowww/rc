@@ -1,0 +1,14 @@
+apiVersion: repositories.rc.ayaka.io/v1alpha1
+kind: RepositoryExec
+metadata:
+  labels:
+    app.kubernetes.io/name: rc
+    app.kubernetes.io/managed-by: kustomize
+  name: repositoryexec-sample
+spec:
+  repositoryRef:
+    name: repository-sample
+  command:
+    - git
+    - init
+    - .

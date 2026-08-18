@@ -60,6 +60,11 @@ type SSHPrivateKeyCredential struct {
 	// privateKeyRef selects the private key from a Secret in the same namespace.
 	// +required
 	PrivateKeyRef SecretKeyReference `json:"privateKeyRef"`
+
+	// knownHostsRef selects trusted SSH host keys from a Secret in the same
+	// namespace.
+	// +required
+	KnownHostsRef SecretKeyReference `json:"knownHostsRef"`
 }
 
 // HTTPBasicAuthCredential identifies the username and secret password or token

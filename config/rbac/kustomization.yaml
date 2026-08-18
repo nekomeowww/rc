@@ -22,6 +22,15 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the rc itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
+- repositories_worktree_admin_role.yaml
+- repositories_worktree_editor_role.yaml
+- repositories_worktree_viewer_role.yaml
+- repositories_repositoryexec_admin_role.yaml
+- repositories_repositoryexec_editor_role.yaml
+- repositories_repositoryexec_viewer_role.yaml
+- repositories_repository_admin_role.yaml
+- repositories_repository_editor_role.yaml
+- repositories_repository_viewer_role.yaml
 - credential_admin_role.yaml
 - credential_editor_role.yaml
 - credential_viewer_role.yaml

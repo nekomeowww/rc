@@ -1,0 +1,233 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: worktrees.repositories.rc.ayaka.io
+spec:
+  group: repositories.rc.ayaka.io
+  names:
+    kind: Worktree
+    listKind: WorktreeList
+    plural: worktrees
+    singular: worktree
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .spec.repositoryRef.name
+      name: Repository
+      type: string
+    - jsonPath: .status.volumeClaimName
+      name: Volume
+      type: string
+    - jsonPath: .status.worktreePath
+      name: Path
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of Worktree
+            properties:
+              branch:
+                description: branch creates a new local branch in the child Git repository.
+                maxLength: 1024
+                minLength: 1
+                type: string
+              detach:
+                description: detach creates a detached HEAD worktree.
+                type: boolean
+              lock:
+                description: lock keeps the native Git worktree locked after creation.
+                type: boolean
+              lockReason:
+                description: lockReason records why the native Git worktree is locked.
+                maxLength: 1024
+                type: string
+              noCheckout:
+                description: noCheckout creates the worktree metadata without populating
+                  files.
+                type: boolean
+              orphan:
+                description: orphan creates an unborn branch.
+                type: boolean
+              ref:
+                description: ref is the commit-ish checked out by the new worktree.
+                maxLength: 1024
+                minLength: 1
+                type: string
+              repositoryRef:
+                description: repositoryRef selects the Repository parent PVC to clone.
+                properties:
+                  name:
+                    description: name is the name of the Repository.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              resetBranch:
+                description: |-
+                  resetBranch creates or resets a local branch in the child Git repository.
+                  This is the destructive -B equivalent.
+                maxLength: 1024
+                minLength: 1
+                type: string
+              storage:
+                description: storage optionally overrides the Repository storage settings.
+                properties:
+                  accessModes:
+                    description: |-
+                      accessModes controls how workloads may mount the child volume. When
+                      omitted, the controller requests ReadWriteMany so a workload and a
+                      parallel inspection Pod can mount the worktree together.
+                    items:
+                      type: string
+                    type: array
+                  size:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: size is the requested capacity of the child volume.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                    x-kubernetes-validations:
+                    - message: size must be greater than zero
+                      rule: quantity(self).isGreaterThan(quantity('0'))
+                  storageClassName:
+                    description: storageClassName is the StorageClass used to provision
+                      the child volume.
+                    minLength: 1
+                    type: string
+                type: object
+            required:
+            - repositoryRef
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable; recreate the Worktree to change its source
+                or Git add options
+              rule: self == oldSelf
+            - message: branch and resetBranch are mutually exclusive
+              rule: '!(has(self.branch) && has(self.resetBranch))'
+            - message: lockReason requires lock=true
+              rule: '!has(self.lockReason) || (has(self.lock) && self.lock)'
+          status:
+            description: status defines the observed state of Worktree
+            properties:
+              conditions:
+                description: conditions represent the current state of the Worktree
+                  resource.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              jobName:
+                description: jobName is the bootstrap Job that ran git worktree add.
+                type: string
+              observedGeneration:
+                description: |-
+                  observedGeneration is the latest Worktree API generation reflected by
+                  this status. It is Kubernetes object bookkeeping, not a Repository data
+                  generation.
+                format: int64
+                type: integer
+              sourceVolumeClaimName:
+                description: |-
+                  sourceVolumeClaimName is the parent PVC cloned when this Worktree was
+                  created.
+                type: string
+              volumeClaimName:
+                description: volumeClaimName is the child PVC containing the independent
+                  Git copy.
+                type: string
+              worktreePath:
+                description: |-
+                  worktreePath is the path inside the child PVC containing the native Git
+                  worktree.
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    selectableFields:
+    - jsonPath: .spec.repositoryRef.name
+    served: true
+    storage: true
+    subresources:
+      status: {}

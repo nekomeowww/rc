@@ -1,0 +1,11 @@
+apiVersion: repositories.rc.ayaka.io/v1alpha1
+kind: Worktree
+metadata:
+  labels:
+    app.kubernetes.io/name: rc
+    app.kubernetes.io/managed-by: kustomize
+  name: worktree-sample
+spec:
+  repositoryRef:
+    name: repository-sample
+  branch: feature/sample

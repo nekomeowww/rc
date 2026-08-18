@@ -32,6 +32,7 @@ import (
 
 const (
 	credentialTestHTTPSecretName   = "git-http"
+	credentialTestKnownHostsKey    = "known_hosts"
 	credentialTestSSHPrivateKeyKey = "ssh-privatekey"
 	credentialTestSSHSecretName    = "git-ssh"
 	credentialTestTokenKey         = "token"
@@ -68,6 +69,10 @@ var _ = Describe("Credential Controller", func() {
 								Name: credentialTestSSHSecretName,
 								Key:  credentialTestSSHPrivateKeyKey,
 							},
+							KnownHostsRef: configsv1alpha1.SecretKeyReference{
+								Name: credentialTestSSHSecretName,
+								Key:  credentialTestKnownHostsKey,
+							},
 						},
 					},
 				}
@@ -102,6 +107,10 @@ var _ = Describe("Credential Controller", func() {
 			Expect(persisted.Spec.SSHPrivateKey.PrivateKeyRef).To(Equal(configsv1alpha1.SecretKeyReference{
 				Name: credentialTestSSHSecretName,
 				Key:  credentialTestSSHPrivateKeyKey,
+			}))
+			Expect(persisted.Spec.SSHPrivateKey.KnownHostsRef).To(Equal(configsv1alpha1.SecretKeyReference{
+				Name: credentialTestSSHSecretName,
+				Key:  credentialTestKnownHostsKey,
 			}))
 		})
 	})
@@ -187,6 +196,27 @@ var _ = Describe("Credential Controller", func() {
 			},
 			Spec: configsv1alpha1.CredentialSpec{
 				Type: configsv1alpha1.CredentialTypeHTTPBearerToken,
+				SSHPrivateKey: &configsv1alpha1.SSHPrivateKeyCredential{
+					PrivateKeyRef: configsv1alpha1.SecretKeyReference{
+						Name: credentialTestSSHSecretName,
+						Key:  credentialTestSSHPrivateKeyKey,
+					},
+					KnownHostsRef: configsv1alpha1.SecretKeyReference{
+						Name: credentialTestSSHSecretName,
+						Key:  credentialTestKnownHostsKey,
+					},
+				},
+			},
+		}
+
+		Expect(k8sClient.Create(ctx, credential)).NotTo(Succeed())
+	})
+
+	It("requires trusted host keys for an SSH private key", func() {
+		credential := &configsv1alpha1.Credential{
+			ObjectMeta: metav1.ObjectMeta{Name: "ssh-without-known-hosts", Namespace: testNamespace},
+			Spec: configsv1alpha1.CredentialSpec{
+				Type: configsv1alpha1.CredentialTypeSSHPrivateKey,
 				SSHPrivateKey: &configsv1alpha1.SSHPrivateKeyCredential{
 					PrivateKeyRef: configsv1alpha1.SecretKeyReference{
 						Name: credentialTestSSHSecretName,

@@ -5,6 +5,38 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
   - configs.rc.ayaka.io
   resources:
   - agentcredentials
@@ -29,6 +61,38 @@ rules:
   resources:
   - agentcredentials/status
   - credentials/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - repositories.rc.ayaka.io
+  resources:
+  - repositories
+  - repositoryexecs
+  - worktrees
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - repositories.rc.ayaka.io
+  resources:
+  - repositories/finalizers
+  - repositoryexecs/finalizers
+  - worktrees/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - repositories.rc.ayaka.io
+  resources:
+  - repositories/status
+  - repositoryexecs/status
+  - worktrees/status
   verbs:
   - get
   - patch

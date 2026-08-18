@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
+	"github.com/samber/lo"
 )
 
 const (
@@ -53,10 +54,7 @@ func NewImporter(kubeClient client.Client, scheme *runtime.Scheme) *Importer {
 
 // ImportAgent creates or updates the AgentCredential and its owned Secret.
 func (importer *Importer) ImportAgent(ctx context.Context, request ImportAgentRequest) (ImportResult, error) {
-	if request.Namespace == "" {
-		return ImportResult{}, errors.New("namespace is required")
-	}
-	if request.Agent != configsv1alpha1.AgentTypeCodex {
+	if !lo.Contains([]configsv1alpha1.AgentType{configsv1alpha1.AgentTypeCodex}, request.Agent) {
 		return ImportResult{}, fmt.Errorf("unsupported agent %q", request.Agent)
 	}
 	if len(request.Data) == 0 {
@@ -94,12 +92,15 @@ func (importer *Importer) ImportAgent(ctx context.Context, request ImportAgentRe
 		if secret.Labels == nil {
 			secret.Labels = make(map[string]string)
 		}
+
 		secret.Labels["app.kubernetes.io/managed-by"] = "rcctl"
 		secret.Type = corev1.SecretTypeOpaque
 		if secret.Data == nil {
 			secret.Data = make(map[string][]byte)
 		}
+
 		secret.Data[codexSecretKey] = append([]byte(nil), request.Data...)
+
 		return controllerutil.SetControllerReference(agentCredential, secret, importer.scheme)
 	})
 	if err != nil {

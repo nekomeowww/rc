@@ -1,5 +1,7 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
+# Image used by Repository and Worktree bootstrap and Exec Jobs.
+REPOSITORY_WORKER_IMG ?= ghcr.io/nekomeowww/rc-repository-worker:latest
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -127,6 +129,14 @@ docker-build: ## Build docker image with the manager.
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
+
+.PHONY: docker-build-repository-worker
+docker-build-repository-worker: ## Build the Repository and Worktree worker image.
+	$(CONTAINER_TOOL) build -f Dockerfile.repository-worker -t ${REPOSITORY_WORKER_IMG} .
+
+.PHONY: docker-push-repository-worker
+docker-push-repository-worker: ## Push the Repository and Worktree worker image.
+	$(CONTAINER_TOOL) push ${REPOSITORY_WORKER_IMG}
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:

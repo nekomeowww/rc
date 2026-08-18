@@ -4,6 +4,9 @@
 resources:
 - bases/configs.rc.ayaka.io_agentcredentials.yaml
 - bases/configs.rc.ayaka.io_credentials.yaml
+- bases/repositories.rc.ayaka.io_repositories.yaml
+- bases/repositories.rc.ayaka.io_repositoryexecs.yaml
+- bases/repositories.rc.ayaka.io_worktrees.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

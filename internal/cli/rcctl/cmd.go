@@ -18,6 +18,8 @@ func NewCommand() *cobra.Command {
 		SilenceUsage:  true,
 	}
 	root.AddGroup(&cobra.Group{ID: command.CredentialsGroup, Title: "Credential Commands:"})
+	root.AddGroup(&cobra.Group{ID: command.RepositoriesGroup, Title: "Repository Commands:"})
+	root.AddGroup(&cobra.Group{ID: command.WorktreesGroup, Title: "Worktree Commands:"})
 	kubeconfigFlags.AddFlags(root.PersistentFlags())
 	commands.Register(root, kubeconfigFlags)
 	return root

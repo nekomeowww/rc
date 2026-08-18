@@ -2,4 +2,7 @@
 resources:
 - configs_v1alpha1_agentcredential.yaml
 - configs_v1alpha1_credential.yaml
+- repositories_v1alpha1_repository.yaml
+- repositories_v1alpha1_repositoryexec.yaml
+- repositories_v1alpha1_worktree.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

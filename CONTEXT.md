@@ -1,9 +1,39 @@
-# Remote Credentials
+# rc
 
-This context names the credential resources managed by rc without exposing the
-secret material itself.
+This context names the repository and credential concepts managed by rc.
 
 ## Language
+
+### Repositories
+
+**Repository**:
+A named, persistent Git parent PVC whose content can be used to create
+independent Worktrees.
+
+**Repository Sync**:
+A request to make the Repository parent PVC match its configured remote and Git
+Ref, replacing local changes in that parent PVC.
+_Avoid_: Pull, refresh
+
+**Git Ref**:
+The configured full Git reference or commit that determines a Repository's
+synchronized content. When absent, it means the remote's default branch.
+
+**Repository Exec**:
+A user-requested execution of an arbitrary command against a Repository.
+_Avoid_: Repository Run
+
+**Worktree**:
+An independent child PVC cloned from a Repository parent PVC. The child owns a
+complete Git repository and contains a native Git worktree created with
+`git worktree add`; its reflog, stash, refs, and working files are independent
+from the parent.
+
+**Worktree Exec**:
+A user-requested execution of an arbitrary command against a Worktree child
+PVC.
+
+### Remote Credentials
 
 **Agent Credential**:
 A credential file for a specific agent type, represented by a reference to one

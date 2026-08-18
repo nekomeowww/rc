@@ -1,0 +1,9 @@
+FROM alpine:3.22
+
+RUN apk add --no-cache ca-certificates git git-lfs openssh-client \
+    && addgroup -g 65532 -S rc \
+    && adduser -u 65532 -S -D -G rc rc \
+    && git config --system --add safe.directory /repository
+
+USER 65532:65532
+WORKDIR /repository

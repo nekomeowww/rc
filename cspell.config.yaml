@@ -1,0 +1,36 @@
+version: "0.2"
+ignorePaths: []
+dictionaryDefinitions: []
+dictionaries: []
+words:
+  - apierrors
+  - apimachinery
+  - appsv1
+  - ayaka
+  - batchv1
+  - clientset
+  - configsv1alpha1
+  - controllerutil
+  - corev1
+  - execrepository
+  - finalizer
+  - finalizers
+  - gomega
+  - importcredential
+  - kubebuilder
+  - kubeconfig
+  - metav1
+  - nekomeowww
+  - onsi
+  - persistentvolumeclaims
+  - rcctl
+  - repositoriesv1alpha1
+  - repositoryexec
+  - repositoryexecs
+  - repositoryservice
+  - Seccomp
+  - utilrand
+  - Worktree
+  - worktrees
+ignoreWords: []
+import: []

@@ -31,6 +31,48 @@ func WorktreeName(repositoryName, branch, ref string, detach, orphan bool) strin
 	return normalizeWorktreeName(base)
 }
 
+// RepositoryName derives a stable Kubernetes name from a Git remote URL.
+// The hostname is part of the name so repositories with the same path on
+// different Git hosts do not collide.
+func RepositoryName(remoteURL string) (string, error) {
+	selector, err := parseRepositorySelector(remoteURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid Git URL %q: %w", remoteURL, err)
+	}
+	if !selector.hasHost || selector.host == "" || selector.path == "" {
+		return "", fmt.Errorf("invalid Git URL %q: repository URL must include a host and path", remoteURL)
+	}
+
+	return normalizeRepositoryName(selector.host + "/" + selector.path), nil
+}
+
+func normalizeRepositoryName(value string) string {
+	var builder strings.Builder
+	previousDash := false
+	for _, character := range strings.ToLower(value) {
+		if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') {
+			builder.WriteRune(character)
+			previousDash = false
+			continue
+		}
+		if !previousDash {
+			builder.WriteByte('-')
+			previousDash = true
+		}
+	}
+
+	name := strings.Trim(builder.String(), "-")
+	if len(name) > 253 {
+		digest := fmt.Sprintf("%x", sha256.Sum256([]byte(value)))[:12]
+		name = strings.Trim(name[:253-len(digest)-1], "-") + "-" + digest
+	}
+	if errors := validation.IsDNS1123Subdomain(name); len(errors) > 0 {
+		return "repository-" + fmt.Sprintf("%x", sha256.Sum256([]byte(value)))[:12]
+	}
+
+	return name
+}
+
 func normalizeWorktreeName(value string) string {
 	var builder strings.Builder
 	previousDash := false

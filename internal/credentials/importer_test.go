@@ -14,6 +14,8 @@ import (
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
 )
 
+const githubTestSecretName = "github-com-auth"
+
 func TestImportAgentCreatesAndUpdatesCredentialObjects(t *testing.T) {
 	t.Parallel()
 	const namespace = "agents"
@@ -86,4 +88,61 @@ func TestImportAgentRejectsUnsupportedAgent(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Empty(t, result)
+}
+
+func TestImportGitHubCreatesAndUpdatesCredentialObjects(t *testing.T) {
+	t.Parallel()
+	const namespace = "repositories"
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme), "register core Kubernetes types")
+	require.NoError(t, configsv1alpha1.AddToScheme(scheme), "register rc API types")
+
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	importer := NewImporter(kubeClient, scheme)
+	request := ImportGitHubRequest{
+		Namespace: namespace,
+		Hostname:  "github.com",
+		Token:     "ghp_first",
+	}
+
+	result, err := importer.ImportGitHub(context.Background(), request)
+	require.NoError(t, err, "import GitHub credential")
+	assert.Equal(t, "github-com", result.CredentialName)
+	assert.Equal(t, "github-com-auth", result.SecretName)
+	assert.Equal(t, "password", result.SecretKey)
+
+	credential := &configsv1alpha1.Credential{}
+	require.NoError(t, kubeClient.Get(context.Background(), types.NamespacedName{
+		Namespace: namespace,
+		Name:      "github-com",
+	}, credential), "get imported Credential")
+	assert.Equal(t, configsv1alpha1.CredentialTypeHTTPBasicAuth, credential.Spec.Type)
+	assert.Equal(t, "git", credential.Spec.HTTPBasicAuth.Username)
+	assert.Equal(t, configsv1alpha1.SecretKeyReference{
+		Name: githubTestSecretName,
+		Key:  "password",
+	}, credential.Spec.HTTPBasicAuth.PasswordRef)
+
+	secret := &corev1.Secret{}
+	require.NoError(t, kubeClient.Get(context.Background(), types.NamespacedName{
+		Namespace: namespace,
+		Name:      githubTestSecretName,
+	}, secret), "get imported Secret")
+	assert.Equal(t, []byte("ghp_first"), secret.Data["password"])
+	require.Len(t, secret.OwnerReferences, 1, "Secret is owned by Credential")
+	assert.Equal(t, "github-com", secret.OwnerReferences[0].Name)
+
+	secret.Data["preserved"] = []byte("keep")
+	require.NoError(t, kubeClient.Update(context.Background(), secret), "add unrelated Secret data")
+	request.Token = "ghp_second"
+	_, err = importer.ImportGitHub(context.Background(), request)
+	require.NoError(t, err, "repeat import updates existing objects")
+
+	require.NoError(t, kubeClient.Get(context.Background(), types.NamespacedName{
+		Namespace: namespace,
+		Name:      githubTestSecretName,
+	}, secret), "get updated Secret")
+	assert.Equal(t, []byte("ghp_second"), secret.Data["password"])
+	assert.Equal(t, []byte("keep"), secret.Data["preserved"], "preserve unrelated Secret data")
 }

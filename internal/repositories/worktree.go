@@ -98,7 +98,7 @@ func (c *WorktreeClient) Wait(ctx context.Context, worktree *repositoriesv1alpha
 		}
 		if condition.Status == metav1.ConditionFalse {
 			switch condition.Reason {
-			case "RepositoryNotFound", "VolumeClaimConflict", "VolumeClaimSpecChanged", "BootstrapFailed", "BootstrapJobConflict":
+			case "RepositoryNotFound", "VolumeClaimConflict", "VolumeClaimSpecChanged", bootstrapFailedReason, "BootstrapJobConflict":
 				return false, fmt.Errorf("worktree failed: %s", condition.Message)
 			}
 			return false, nil

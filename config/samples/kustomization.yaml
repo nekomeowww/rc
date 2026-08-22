@@ -5,4 +5,7 @@ resources:
 - repositories_v1alpha1_repository.yaml
 - repositories_v1alpha1_repositoryexec.yaml
 - repositories_v1alpha1_worktree.yaml
+- workspaces_v1alpha1_workspaceenvironment.yaml
+- workspaces_v1alpha1_workspace.yaml
+- workspaces_v1alpha1_agentprocess.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

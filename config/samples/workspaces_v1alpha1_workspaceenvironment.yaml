@@ -1,0 +1,13 @@
+apiVersion: workspaces.rc.ayaka.io/v1alpha1
+kind: WorkspaceEnvironment
+metadata:
+  labels:
+    app.kubernetes.io/name: rc
+    app.kubernetes.io/managed-by: kustomize
+  name: workspaceenvironment-sample
+spec:
+  image: ghcr.io/nekomeowww/rc/runner:latest
+  storage:
+    storageClassName: truenas-nfs
+    size: 20Gi
+  editorIdleTimeout: 10m

@@ -1,0 +1,29 @@
+# Build rcctl and rc-kube for Workspace runtime Pods and Repository/Worktree Jobs.
+FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+COPY go.mod go.mod
+COPY go.sum go.sum
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o /out/rcctl cmd/rcctl/main.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o /out/rc-kube cmd/rc-kube/main.go
+
+FROM debian:bookworm-slim
+LABEL org.opencontainers.image.source="https://github.com/nekomeowww/rc" \
+      org.opencontainers.image.title="rc runner"
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends bash ca-certificates curl git git-lfs libatomic1 openssh-client sudo \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 1000 agent \
+    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash agent \
+    && groupadd --gid 65532 rc \
+    && useradd --uid 65532 --gid 65532 --create-home --shell /bin/bash rc \
+    && git config --system --add safe.directory '*'
+COPY --from=builder /out/rcctl /usr/local/bin/rcctl
+COPY --from=builder /out/rc-kube /usr/local/bin/rc-kube
+USER 1000:1000
+WORKDIR /workspace
+ENTRYPOINT ["rc-kube"]

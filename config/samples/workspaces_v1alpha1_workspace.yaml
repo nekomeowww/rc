@@ -1,0 +1,17 @@
+apiVersion: workspaces.rc.ayaka.io/v1alpha1
+kind: Workspace
+metadata:
+  labels:
+    app.kubernetes.io/name: rc
+    app.kubernetes.io/managed-by: kustomize
+  name: workspace-sample
+spec:
+  desiredState: Running
+  environmentRef:
+    name: workspaceenvironment-sample
+  mounts:
+    - name: rc
+      path: rc
+      worktreeRef:
+        name: worktree-sample
+  defaultWorkingDirectory: /workspace/rc

@@ -23,6 +23,9 @@ func main() {
 	}
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "rcctl: error: %v\n", err)
+		if exitError, ok := err.(interface{ ExitCode() int }); ok {
+			os.Exit(exitError.ExitCode())
+		}
 		os.Exit(2)
 	}
 }

@@ -13,5 +13,6 @@ func Register(root *cobra.Command, kubeconfigFlags *kubeconfig.Flags) {
 	command := NewCommand()
 	command.AddCommand(clonerepository.NewCommand(kubeconfigFlags))
 	command.AddCommand(execrepository.NewCommand(kubeconfigFlags))
+	command.AddCommand(newListCommand(kubeconfigFlags))
 	root.AddCommand(command)
 }

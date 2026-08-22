@@ -73,7 +73,10 @@ Following the options to release and provide this solution to the users.
 Tagged releases publish:
 
 - `rcctl` archives for Linux, macOS, and Windows on the GitHub Releases page.
-- The multi-platform operator image at `ghcr.io/nekomeowww/rc`.
+- The multi-platform controller image at
+  `ghcr.io/nekomeowww/rc/controller`.
+- The multi-platform runner image at `ghcr.io/nekomeowww/rc/runner`. The same
+  runner is used by Repository and Worktree Jobs and by blank Workspaces.
 - A consolidated Kubebuilder installer named `install.yaml` as a release asset.
 
 Install the latest released operator with:
@@ -82,16 +85,23 @@ Install the latest released operator with:
 kubectl apply -f https://github.com/nekomeowww/rc/releases/latest/download/install.yaml
 ```
 
-The OpenAI Codex CLI runtime image is versioned independently at
+The OpenAI Codex CLI environment image is versioned independently at
 `ghcr.io/nekomeowww/rc/openai-codex-cli`. Maintainers publish it with the
 dedicated `Release OpenAI Codex CLI image` workflow.
+
+The controller and runner packages must be public so a default rc installation
+can start runtime Pods without registry credentials. GitHub Container Registry
+creates a newly published package as private, so maintainers must make each
+package public after its first release.
 
 ### By providing a bundle with all YAML files
 
 1. Build the installer for the image built and published in the registry:
 
 ```sh
-make build-installer IMG=<some-registry>/rc:tag
+make build-installer \
+  IMG=<some-registry>/rc/controller:tag \
+  RUNNER_IMG=<some-registry>/rc/runner:tag
 ```
 
 **NOTE:** The makefile target mentioned above generates an 'install.yaml'

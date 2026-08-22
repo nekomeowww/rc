@@ -52,7 +52,7 @@ var _ = Describe("Repository Controller", func() {
 		Expect(k8sClient.Create(ctx, repository)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, repository)).To(Succeed()) })
 
-		reconciler := &RepositoryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), WorkerImage: "repository-worker:test"}
+		reconciler := &RepositoryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: "ghcr.io/example/rc/runner:test"}
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -74,7 +74,7 @@ var _ = Describe("Repository Controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 		bootstrapJob := new(batchv1.Job)
 		Expect(k8sClient.Get(ctx, keyWithName(repositoryBootstrapJobName(repository)), bootstrapJob)).To(Succeed())
-		Expect(bootstrapJob.Spec.Template.Spec.Containers[0].Image).To(Equal("repository-worker:test"))
+		Expect(bootstrapJob.Spec.Template.Spec.Containers[0].Image).To(Equal("ghcr.io/example/rc/runner:test"))
 		Expect(bootstrapJob.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ClaimName).To(Equal(repositoryName))
 		Expect(bootstrapJob.Spec.Template.Spec.Containers[0].Args).To(ContainElement(testRemoteURL))
 
@@ -153,7 +153,7 @@ var _ = Describe("Repository Controller", func() {
 			},
 		}
 
-		job := repositoryBootstrapJob(repository, "repository-worker:test", credential)
+		job := repositoryBootstrapJob(repository, "ghcr.io/example/rc/runner:test", credential)
 		container := job.Spec.Template.Spec.Containers[0]
 		Expect(container.Env).To(ContainElement(corev1.EnvVar{
 			Name:  "GIT_SSH_COMMAND",

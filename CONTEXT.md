@@ -1,6 +1,7 @@
 # rc
 
-This context names the repository and credential concepts managed by rc.
+This context names the repository, credential, and workspace runtime concepts
+managed by rc.
 
 ## Language
 
@@ -78,3 +79,60 @@ _Avoid_: OAuth credential
 **Secret Key Reference**:
 The name of a same-namespace Secret and the key of the data entry containing the
 credential material.
+
+### Workspace Runtime
+
+**Workspace Environment**:
+A reusable development environment from which Workspaces receive their runner
+image, user home, toolchains, and installed user-level tools.
+_Avoid_: Workspace Template
+
+**Runner Image**:
+The execution image containing `rc-kube`, `rcctl`, Git, a shell, certificates,
+and common system tools. The default Runner Image is shared by Repository and
+Worktree Jobs and blank Workspace runtimes; Environment images retain the same
+runtime contract while adding development toolchains.
+_Avoid_: Repository worker image, Workspace base image
+
+**Environment Draft**:
+The mutable working copy of a Workspace Environment that can be edited and
+tested without changing the environment used by new Workspaces.
+
+**Environment Commit**:
+The operation that promotes an Environment Draft to the current Environment
+Revision.
+_Avoid_: Publish environment
+
+**Environment Revision**:
+A committed state of a Workspace Environment. Existing Workspaces retain the
+revision from which they were created when a later revision is committed.
+
+**Workspace**:
+A named, persistent development machine that combines an optional reusable
+environment or blank home with code mounts, configuration, credentials, and
+compute capacity for concurrent Agent Processes.
+_Avoid_: Agent Pod, workspace template
+
+**Temporary Workspace**:
+A Workspace created by rcctl because a run explicitly requests `--temporary`
+or declares topology without selecting an existing Workspace. It has the same
+persistence and cleanup rules as any other Workspace.
+_Avoid_: Ephemeral Workspace
+
+**Workspace Mount**:
+A named association between a Workspace path and either a writable Worktree or
+a read-only Repository.
+
+**Agent Process**:
+An rc-managed, at-most-once command running against a Workspace or Environment
+Draft. It may use a terminal, but it is not an agent-native session.
+_Avoid_: Agent Exec as a distinct resource, agent session
+
+**Agent Exec**:
+The short CLI operation for running a non-terminal Agent Process synchronously.
+It is not a separate Kubernetes resource kind.
+
+**Agent Home**:
+Persistent configuration, cache, and session state shared by Agent Processes
+that use the same Agent Type and Agent Credential in one Workspace. Credential
+material is not part of the Agent Home.

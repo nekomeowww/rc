@@ -4,7 +4,7 @@ project_name: rcctl
 
 before:
   hooks:
-    - make build-installer IMG={{ .Env.CONTROLLER_IMAGE }}:{{ .Version }}
+    - make build-installer IMG={{ .Env.CONTROLLER_IMAGE }}:{{ .Version }} RUNNER_IMG={{ .Env.RUNNER_IMAGE }}:{{ .Version }}
 
 builds:
   - id: rcctl

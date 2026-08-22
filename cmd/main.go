@@ -37,8 +37,11 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
+	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
 	"github.com/nekomeowww/rc/internal/controller"
 	repositoriescontroller "github.com/nekomeowww/rc/internal/controller/repositories"
+	workspacescontroller "github.com/nekomeowww/rc/internal/controller/workspaces"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -52,6 +55,7 @@ func init() {
 
 	utilruntime.Must(configsv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(repositoriesv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(workspacesv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -62,15 +66,15 @@ func main() {
 	var webhookCertPath, webhookCertName, webhookCertKey string
 	var enableLeaderElection bool
 	var probeAddr string
-	var repositoryWorkerImage string
+	var runnerImage string
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.StringVar(&repositoryWorkerImage, "repository-worker-image", "ghcr.io/nekomeowww/rc-repository-worker:latest",
-		"The container image used by Repository and Worktree bootstrap and Exec Jobs.")
+	flag.StringVar(&runnerImage, "runner-image", "ghcr.io/nekomeowww/rc/runner:latest",
+		"The image used by Repository and Worktree Jobs and blank Workspace runtimes.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -183,6 +187,12 @@ func main() {
 		setupLog.Error(err, "Failed to start manager")
 		os.Exit(1)
 	}
+	podExecutor, err := processruntime.NewKubernetesPodExecutor(mgr.GetConfig())
+	if err != nil {
+		setupLog.Error(err, "Failed to create Agent Process Pod executor")
+		os.Exit(1)
+	}
+	processRuntime := processruntime.NewKubeRuntime(podExecutor)
 
 	if err := (&controller.AgentCredentialReconciler{
 		Client: mgr.GetClient(),
@@ -201,7 +211,7 @@ func main() {
 	if err := (&repositoriescontroller.RepositoryReconciler{
 		Client:      mgr.GetClient(),
 		Scheme:      mgr.GetScheme(),
-		WorkerImage: repositoryWorkerImage,
+		RunnerImage: runnerImage,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "repositories-repository")
 		os.Exit(1)
@@ -209,7 +219,7 @@ func main() {
 	if err := (&repositoriescontroller.RepositoryExecReconciler{
 		Client:      mgr.GetClient(),
 		Scheme:      mgr.GetScheme(),
-		WorkerImage: repositoryWorkerImage,
+		RunnerImage: runnerImage,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "repositories-repositoryexec")
 		os.Exit(1)
@@ -217,9 +227,32 @@ func main() {
 	if err := (&repositoriescontroller.WorktreeReconciler{
 		Client:      mgr.GetClient(),
 		Scheme:      mgr.GetScheme(),
-		WorkerImage: repositoryWorkerImage,
+		RunnerImage: runnerImage,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "repositories-worktree")
+		os.Exit(1)
+	}
+	if err := (&workspacescontroller.WorkspaceEnvironmentReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "workspaces-workspaceenvironment")
+		os.Exit(1)
+	}
+	if err := (&workspacescontroller.WorkspaceReconciler{
+		Client:      mgr.GetClient(),
+		Scheme:      mgr.GetScheme(),
+		RunnerImage: runnerImage,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "workspaces-workspace")
+		os.Exit(1)
+	}
+	if err := (&workspacescontroller.AgentProcessReconciler{
+		Client:  mgr.GetClient(),
+		Scheme:  mgr.GetScheme(),
+		Runtime: processRuntime,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "workspaces-agentprocess")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

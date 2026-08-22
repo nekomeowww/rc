@@ -7,6 +7,9 @@ resources:
 - bases/repositories.rc.ayaka.io_repositories.yaml
 - bases/repositories.rc.ayaka.io_repositoryexecs.yaml
 - bases/repositories.rc.ayaka.io_worktrees.yaml
+- bases/workspaces.rc.ayaka.io_workspaceenvironments.yaml
+- bases/workspaces.rc.ayaka.io_workspaces.yaml
+- bases/workspaces.rc.ayaka.io_agentprocesses.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

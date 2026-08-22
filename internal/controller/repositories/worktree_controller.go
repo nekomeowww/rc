@@ -57,7 +57,7 @@ const (
 type WorktreeReconciler struct {
 	client.Client
 	Scheme      *runtime.Scheme
-	WorkerImage string
+	RunnerImage string
 }
 
 // +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=worktrees,verbs=get;list;watch;create;update;patch;delete
@@ -140,7 +140,7 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	err = r.Get(ctx, jobKey, job)
 	if errors.IsNotFound(err) {
-		job = worktreeBootstrapJob(worktree, claim.Name, r.WorkerImage)
+		job = worktreeBootstrapJob(worktree, claim.Name, r.RunnerImage)
 		err := controllerutil.SetControllerReference(worktree, job, r.Scheme)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("set Worktree owner on bootstrap Job: %w", err)
@@ -306,7 +306,7 @@ func worktreeBootstrapJobName(worktree *repositoriesv1alpha1.Worktree) string {
 	return worktree.Name[:63-len(worktreeBootstrapJobSuffix)-len(digest)-1] + "-" + digest + worktreeBootstrapJobSuffix
 }
 
-func worktreeBootstrapJob(worktree *repositoriesv1alpha1.Worktree, claimName, workerImage string) *batchv1.Job {
+func worktreeBootstrapJob(worktree *repositoriesv1alpha1.Worktree, claimName, runnerImage string) *batchv1.Job {
 	gitArgs := []string{"worktree", "add"}
 	if worktree.Spec.Branch != "" {
 		gitArgs = append(gitArgs, "-b", worktree.Spec.Branch)
@@ -369,7 +369,7 @@ func worktreeBootstrapJob(worktree *repositoriesv1alpha1.Worktree, claimName, wo
 					},
 					Containers: []corev1.Container{{
 						Name:       "bootstrap",
-						Image:      workerImage,
+						Image:      runnerImage,
 						Command:    []string{"sh"},
 						Args:       append([]string{"-ceu", worktreeBootstrapScript, "worktree-bootstrap"}, gitArgs...),
 						WorkingDir: "/repository",
@@ -440,8 +440,8 @@ func (r *WorktreeReconciler) setWorktreeStatus(ctx context.Context, worktree *re
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *WorktreeReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if r.WorkerImage == "" {
-		return fmt.Errorf("worktree worker image must not be empty")
+	if r.RunnerImage == "" {
+		return fmt.Errorf("worktree runner image must not be empty")
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&repositoriesv1alpha1.Worktree{}).

@@ -7,7 +7,11 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - configmaps
   - persistentvolumeclaims
+  - pods
+  - secrets
+  - serviceaccounts
   verbs:
   - create
   - delete
@@ -19,13 +23,17 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - pods
+  - events
   verbs:
   - get
   - list
-  - patch
-  - update
   - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/exec
+  verbs:
+  - create
 - apiGroups:
   - batch
   resources:
@@ -66,6 +74,30 @@ rules:
   - patch
   - update
 - apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  - roles
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - repositories.rc.ayaka.io
   resources:
   - repositories
@@ -93,6 +125,38 @@ rules:
   - repositories/status
   - repositoryexecs/status
   - worktrees/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - workspaces.rc.ayaka.io
+  resources:
+  - agentprocesses
+  - workspaceenvironments
+  - workspaces
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - workspaces.rc.ayaka.io
+  resources:
+  - agentprocesses/finalizers
+  - workspaceenvironments/finalizers
+  - workspaces/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - workspaces.rc.ayaka.io
+  resources:
+  - agentprocesses/status
+  - workspaceenvironments/status
+  - workspaces/status
   verbs:
   - get
   - patch

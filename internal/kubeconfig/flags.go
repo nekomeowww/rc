@@ -36,12 +36,19 @@ func (flags *Flags) AddFlags(flagSet *pflag.FlagSet) {
 // Resolve loads a REST config and namespace using explicit flags, in-cluster
 // configuration, KUBECONFIG, and the default kubeconfig in that order.
 func (flags *Flags) Resolve() (*rest.Config, string, error) {
+	config, namespace, _, err := flags.ResolveWithIdentity()
+	return config, namespace, err
+}
+
+// ResolveWithIdentity also returns the kubectl context name used to scope XDG
+// defaults. In-cluster callers use the stable "in-cluster" identity.
+func (flags *Flags) ResolveWithIdentity() (*rest.Config, string, string, error) {
 	// NOTICE: This precedence is adapted from BaizeAI/dataset, but rcctl keeps
 	// explicit-path errors instead of silently falling back to another cluster.
 	// https://github.com/BaizeAI/dataset/blob/298e3ce6a397fd63f48052d656a70a52ba17befa/pkg/clients/kubeconfig.go#L10-L41
 	if flags.kubeconfig == "" && flags.context == "" {
 		if config, err := rest.InClusterConfig(); err == nil {
-			return rest.AddUserAgent(config, "rcctl"), flags.inClusterNamespace(), nil
+			return rest.AddUserAgent(config, "rcctl"), flags.inClusterNamespace(), "in-cluster", nil
 		}
 	}
 
@@ -54,16 +61,27 @@ func (flags *Flags) Resolve() (*rest.Config, string, error) {
 	config, err := loader.ClientConfig()
 	if err != nil {
 		if clientcmd.IsEmptyConfig(err) {
-			return nil, "", errors.New("no Kubernetes configuration found; set --kubeconfig or KUBECONFIG")
+			return nil, "", "", errors.New("no Kubernetes configuration found; set --kubeconfig or KUBECONFIG")
 		}
-		return nil, "", fmt.Errorf("load Kubernetes configuration: %w", err)
+		return nil, "", "", fmt.Errorf("load Kubernetes configuration: %w", err)
 	}
 	namespace, _, err := loader.Namespace()
 	if err != nil {
-		return nil, "", fmt.Errorf("resolve Kubernetes namespace: %w", err)
+		return nil, "", "", fmt.Errorf("resolve Kubernetes namespace: %w", err)
+	}
+	rawConfig, err := loader.RawConfig()
+	if err != nil {
+		return nil, "", "", fmt.Errorf("resolve Kubernetes context identity: %w", err)
+	}
+	contextName := flags.context
+	if contextName == "" {
+		contextName = rawConfig.CurrentContext
+	}
+	if contextName == "" {
+		contextName = "default"
 	}
 
-	return rest.AddUserAgent(config, "rcctl"), namespace, nil
+	return rest.AddUserAgent(config, "rcctl"), namespace, contextName, nil
 }
 
 func (flags *Flags) inClusterNamespace() string {

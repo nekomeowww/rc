@@ -21,7 +21,7 @@ var _ = Describe("Worktree Controller", func() {
 		const (
 			repositoryName = "worktree-parent"
 			worktreeName   = "worktree-child"
-			workerImage    = "repository-worker:test"
+			runnerImage    = "ghcr.io/example/rc/runner:test"
 		)
 		repository := readyRepository(repositoryName)
 		Expect(k8sClient.Create(ctx, repository)).To(Succeed())
@@ -39,7 +39,7 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(k8sClient.Create(ctx, worktree)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, worktree)).To(Succeed()) })
 
-		reconciler := &WorktreeReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), WorkerImage: workerImage}
+		reconciler := &WorktreeReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: runnerImage}
 		key := types.NamespacedName{Name: worktreeName, Namespace: testNamespace}
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		Expect(err).NotTo(HaveOccurred())
@@ -82,7 +82,7 @@ var _ = Describe("Worktree Controller", func() {
 		job := new(batchv1.Job)
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: worktreeBootstrapJobName(worktree), Namespace: testNamespace}, job)).To(Succeed())
 		container := job.Spec.Template.Spec.Containers[0]
-		Expect(container.Image).To(Equal(workerImage))
+		Expect(container.Image).To(Equal(runnerImage))
 		Expect(container.Args).To(ContainElement("worktree"))
 		Expect(container.Args).To(ContainElement("add"))
 		Expect(container.Args).To(ContainElement("-b"))

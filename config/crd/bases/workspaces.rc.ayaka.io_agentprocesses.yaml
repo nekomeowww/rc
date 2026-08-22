@@ -1,0 +1,304 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: agentprocesses.workspaces.rc.ayaka.io
+spec:
+  group: workspaces.rc.ayaka.io
+  names:
+    kind: AgentProcess
+    listKind: AgentProcessList
+    plural: agentprocesses
+    singular: agentprocess
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.targetRef.name
+      name: Target
+      type: string
+    - jsonPath: .spec.tty
+      name: TTY
+      type: boolean
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.exitCode
+      name: Exit
+      type: integer
+    - jsonPath: .status.startedAt
+      name: Started
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: AgentProcess is the Schema for the agentprocesses API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of AgentProcess
+            properties:
+              agentCredentialRef:
+                description: agentCredentialRef selects one Workspace AgentCredential.
+                properties:
+                  name:
+                    description: name is the metadata.name of the referenced resource.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              agentType:
+                description: agentType selects a recognized adapter such as codex.
+                type: string
+              command:
+                description: command is the exact argv executed by rc-kube.
+                items:
+                  type: string
+                minItems: 1
+                type: array
+              credentialRefs:
+                description: credentialRefs explicitly exposes named generic Credentials.
+                items:
+                  description: LocalReference selects an rc resource in the same namespace.
+                  properties:
+                    name:
+                      description: name is the metadata.name of the referenced resource.
+                      minLength: 1
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              desiredState:
+                default: Running
+                description: desiredState requests process start or one-way termination.
+                enum:
+                - Running
+                - Stopped
+                type: string
+              env:
+                description: env maps variables to keys in envSecretRef.
+                items:
+                  description: ProcessEnvironmentVariable references one value in
+                    the temporary env Secret.
+                  properties:
+                    key:
+                      description: key is the data key in envSecretRef. It defaults
+                        to name.
+                      type: string
+                    name:
+                      description: name is the environment variable name.
+                      pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              envSecretRef:
+                description: envSecretRef selects the temporary Secret holding caller
+                  environment.
+                properties:
+                  name:
+                    description: name is the metadata.name of the referenced resource.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              targetRef:
+                description: targetRef selects the owning runtime.
+                properties:
+                  kind:
+                    description: |-
+                      kind is Workspace or WorkspaceEnvironment. Environment targets always
+                      address the mutable draft.
+                    enum:
+                    - Workspace
+                    - WorkspaceEnvironment
+                    type: string
+                  name:
+                    description: name is the target metadata.name in the same namespace.
+                    minLength: 1
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+              tty:
+                description: tty allocates a PTY and enables interactive attach.
+                type: boolean
+              workingDirectory:
+                description: workingDirectory overrides the target default.
+                type: string
+            required:
+            - command
+            - targetRef
+            type: object
+            x-kubernetes-validations:
+            - message: process execution fields are immutable
+              rule: self.targetRef == oldSelf.targetRef && self.command == oldSelf.command
+                && has(self.workingDirectory) == has(oldSelf.workingDirectory) &&
+                (!has(self.workingDirectory) || self.workingDirectory == oldSelf.workingDirectory)
+                && has(self.tty) == has(oldSelf.tty) && (!has(self.tty) || self.tty
+                == oldSelf.tty) && has(self.envSecretRef) == has(oldSelf.envSecretRef)
+                && (!has(self.envSecretRef) || self.envSecretRef == oldSelf.envSecretRef)
+                && has(self.env) == has(oldSelf.env) && (!has(self.env) || self.env
+                == oldSelf.env) && has(self.agentType) == has(oldSelf.agentType) &&
+                (!has(self.agentType) || self.agentType == oldSelf.agentType) && has(self.agentCredentialRef)
+                == has(oldSelf.agentCredentialRef) && (!has(self.agentCredentialRef)
+                || self.agentCredentialRef == oldSelf.agentCredentialRef) && has(self.credentialRefs)
+                == has(oldSelf.credentialRefs) && (!has(self.credentialRefs) || self.credentialRefs
+                == oldSelf.credentialRefs)
+            - message: a stopped process cannot return to Running
+              rule: 'has(oldSelf.desiredState) && oldSelf.desiredState == ''Stopped''
+                ? has(self.desiredState) && self.desiredState == ''Stopped'' : true'
+          status:
+            description: status defines the observed state of AgentProcess
+            properties:
+              attachedClients:
+                description: attachedClients is the latest supervisor client count.
+                format: int32
+                type: integer
+              completedAt:
+                description: completedAt is when the process reached a terminal phase.
+                format: date-time
+                type: string
+              conditions:
+                description: |-
+                  conditions represent the current state of the AgentProcess resource.
+                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
+
+                  Standard condition types include:
+                  - "Available": the resource is fully functional
+                  - "Progressing": the resource is being created or updated
+                  - "Degraded": the resource failed to reach or maintain its desired state
+
+                  The status of each condition is one of True, False, or Unknown.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              exitCode:
+                description: exitCode is the child process exit code when one was
+                  observed.
+                format: int32
+                type: integer
+              observedGeneration:
+                description: observedGeneration is the latest generation reflected
+                  by status.
+                format: int64
+                type: integer
+              phase:
+                description: phase is the process lifecycle state.
+                enum:
+                - Pending
+                - Starting
+                - Running
+                - Succeeded
+                - Failed
+                - Stopped
+                - Lost
+                type: string
+              runtimePodName:
+                description: runtimePodName is the Pod that owns the original process.
+                type: string
+              runtimePodUID:
+                description: |-
+                  runtimePodUID prevents a replacement Pod from being mistaken for the
+                  original process owner.
+                type: string
+              startedAt:
+                description: startedAt is when rc-kube acknowledged ownership.
+                format: date-time
+                type: string
+              terminationReason:
+                description: terminationReason describes why the process ended.
+                type: string
+              transcriptPath:
+                description: transcriptPath is relative to the target persistent home.
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    selectableFields:
+    - jsonPath: .spec.targetRef.name
+    served: true
+    storage: true
+    subresources:
+      status: {}

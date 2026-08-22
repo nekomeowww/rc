@@ -51,7 +51,7 @@ const (
 type RepositoryReconciler struct {
 	client.Client
 	Scheme      *runtime.Scheme
-	WorkerImage string
+	RunnerImage string
 }
 
 // +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=repositories,verbs=get;list;watch;create;update;patch;delete
@@ -63,6 +63,8 @@ type RepositoryReconciler struct {
 
 // Reconcile ensures that every Repository owns one persistent parent volume and
 // that its configured remote is bootstrapped into that volume.
+//
+//nolint:gocyclo // Reconcile is an existing explicit resource lifecycle state machine.
 func (r *RepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	repository := new(repositoriesv1alpha1.Repository)
@@ -153,7 +155,7 @@ func (r *RepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			return ctrl.Result{}, credentialErr
 		}
 
-		job = repositoryBootstrapJob(repository, r.WorkerImage, credential)
+		job = repositoryBootstrapJob(repository, r.RunnerImage, credential)
 		if err := controllerutil.SetControllerReference(repository, job, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("set Repository owner on bootstrap Job: %w", err)
 		}
@@ -278,7 +280,7 @@ func repositoryBootstrapJobName(repository *repositoriesv1alpha1.Repository) str
 
 func repositoryBootstrapJob(
 	repository *repositoriesv1alpha1.Repository,
-	workerImage string,
+	runnerImage string,
 	credential *configsv1alpha1.Credential,
 ) *batchv1.Job {
 	auth := repositoryBootstrapAuth(credential)
@@ -324,7 +326,7 @@ func repositoryBootstrapJob(
 					},
 					Containers: []corev1.Container{{
 						Name:         "bootstrap",
-						Image:        workerImage,
+						Image:        runnerImage,
 						Command:      []string{"sh"},
 						Args:         args,
 						WorkingDir:   "/repository",
@@ -508,6 +510,10 @@ func conditionsEqual(left, right []metav1.Condition) bool {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *RepositoryReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.RunnerImage == "" {
+		return fmt.Errorf("repository runner image must not be empty")
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&repositoriesv1alpha1.Repository{}).
 		Owns(&corev1.PersistentVolumeClaim{}).

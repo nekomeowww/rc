@@ -22,6 +22,15 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the rc itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
+- workspaces_agentprocess_admin_role.yaml
+- workspaces_agentprocess_editor_role.yaml
+- workspaces_agentprocess_viewer_role.yaml
+- workspaces_workspace_admin_role.yaml
+- workspaces_workspace_editor_role.yaml
+- workspaces_workspace_viewer_role.yaml
+- workspaces_workspaceenvironment_admin_role.yaml
+- workspaces_workspaceenvironment_editor_role.yaml
+- workspaces_workspaceenvironment_viewer_role.yaml
 - repositories_worktree_admin_role.yaml
 - repositories_worktree_editor_role.yaml
 - repositories_worktree_viewer_role.yaml

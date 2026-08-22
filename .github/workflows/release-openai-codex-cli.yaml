@@ -8,8 +8,12 @@ on:
         required: true
         default: '0.147.0'
         type: string
+      runner_version:
+        description: Released rc runner version to extend
+        required: true
+        type: string
 
-concurrency: ${{ github.workflow }}-${{ inputs.codex_version }}
+concurrency: ${{ github.workflow }}-${{ inputs.codex_version }}-${{ inputs.runner_version }}
 
 permissions: {}
 
@@ -29,6 +33,16 @@ jobs:
         run: |
           if [[ ! "${CODEX_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
             echo "codex_version must be a semantic version without a leading v." >&2
+            exit 1
+          fi
+
+      - name: Validate runner version
+        env:
+          RUNNER_VERSION: ${{ inputs.runner_version }}
+        shell: bash
+        run: |
+          if [[ ! "${RUNNER_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "runner_version must be a semantic version without a leading v." >&2
             exit 1
           fi
 
@@ -70,6 +84,7 @@ jobs:
           push: true
           build-args: |
             CODEX_VERSION=${{ inputs.codex_version }}
+            RUNNER_IMAGE=ghcr.io/${{ github.repository }}/runner:${{ inputs.runner_version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

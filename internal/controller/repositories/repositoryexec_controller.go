@@ -49,7 +49,7 @@ const (
 type RepositoryExecReconciler struct {
 	client.Client
 	Scheme      *runtime.Scheme
-	WorkerImage string
+	RunnerImage string
 }
 
 // +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=repositoryexecs,verbs=get;list;watch;create;update;patch;delete
@@ -116,7 +116,7 @@ func (r *RepositoryExecReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
-	job = repositoryExecJob(exec, repository, r.WorkerImage)
+	job = repositoryExecJob(exec, repository, r.RunnerImage)
 	if err := controllerutil.SetControllerReference(exec, job, r.Scheme); err != nil {
 		return ctrl.Result{}, fmt.Errorf("set RepositoryExec owner on Job: %w", err)
 	}
@@ -157,7 +157,7 @@ func (r *RepositoryExecReconciler) repositoryHasActiveExec(
 func repositoryExecJob(
 	exec *repositoriesv1alpha1.RepositoryExec,
 	repository *repositoriesv1alpha1.Repository,
-	workerImage string,
+	runnerImage string,
 ) *batchv1.Job {
 	backoffLimit := int32(0)
 	ttlSecondsAfterFinished := repositoryExecJobTTLSeconds
@@ -200,7 +200,7 @@ func repositoryExecJob(
 							// owner-approved, non-exfiltrating credential boundary before
 							// Repository Sync consumes Credential resources.
 							Name:       "exec",
-							Image:      workerImage,
+							Image:      runnerImage,
 							Command:    command,
 							Args:       args,
 							WorkingDir: workerMountPath,
@@ -304,8 +304,8 @@ func jobFinished(job *batchv1.Job) bool {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *RepositoryExecReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if r.WorkerImage == "" {
-		return fmt.Errorf("repository exec worker image must not be empty")
+	if r.RunnerImage == "" {
+		return fmt.Errorf("repository exec runner image must not be empty")
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).

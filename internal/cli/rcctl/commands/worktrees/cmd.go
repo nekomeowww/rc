@@ -1,10 +1,16 @@
 package worktrees
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"slices"
+	"strings"
+	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -33,11 +39,85 @@ type addOptions struct {
 	wait         bool
 }
 
+type worktreeListRow struct {
+	name       string
+	ready      bool
+	repository string
+	volume     string
+	path       string
+}
+
 // Register attaches Worktree commands to the root command.
 func Register(root *cobra.Command, kubeconfigFlags *kubeconfig.Flags) {
 	worktreeCommand := NewCommand()
 	worktreeCommand.AddCommand(newAddCommand(kubeconfigFlags))
+	worktreeCommand.AddCommand(newListCommand(kubeconfigFlags))
 	root.AddCommand(worktreeCommand)
+}
+
+func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
+	return &cobra.Command{
+		Use: "list", Aliases: []string{"ls"}, Short: "List Worktrees in the current namespace", Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			config, namespace, err := kubeconfigFlags.Resolve()
+			if err != nil {
+				return err
+			}
+			scheme := runtime.NewScheme()
+			if err := repositoriesv1alpha1.AddToScheme(scheme); err != nil {
+				return fmt.Errorf("register Repository API types: %w", err)
+			}
+			kubeClient, err := client.New(config, client.Options{Scheme: scheme})
+			if err != nil {
+				return fmt.Errorf("create Kubernetes client: %w", err)
+			}
+
+			return runWorktreeList(cmd.Context(), cmd.OutOrStdout(), kubeClient, namespace)
+		},
+	}
+}
+
+func runWorktreeList(ctx context.Context, output io.Writer, kubeClient client.Client, namespace string) error {
+	list := new(repositoriesv1alpha1.WorktreeList)
+	if err := kubeClient.List(ctx, list, client.InNamespace(namespace)); err != nil {
+		return fmt.Errorf("list Worktrees: %w", err)
+	}
+	writer := tabwriter.NewWriter(output, 0, 4, 2, ' ', 0)
+	if _, err := fmt.Fprintln(writer, "NAME\tREADY\tREPOSITORY\tVOLUME\tPATH"); err != nil {
+		return err
+	}
+	for _, row := range worktreeListRows(list.Items) {
+		if _, err := fmt.Fprintf(writer, "%s\t%t\t%s\t%s\t%s\n", row.name, row.ready, row.repository, row.volume, row.path); err != nil {
+			return err
+		}
+	}
+
+	return writer.Flush()
+}
+
+func worktreeListRows(worktrees []repositoriesv1alpha1.Worktree) []worktreeListRow {
+	rows := make([]worktreeListRow, 0, len(worktrees))
+	for index := range worktrees {
+		worktree := &worktrees[index]
+		rows = append(rows, worktreeListRow{
+			name: worktree.Name, ready: meta.IsStatusConditionTrue(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady),
+			repository: worktreeValueOrDash(worktree.Spec.RepositoryRef.Name), volume: worktreeValueOrDash(worktree.Status.VolumeClaimName),
+			path: worktreeValueOrDash(worktree.Status.WorktreePath),
+		})
+	}
+	slices.SortFunc(rows, func(left worktreeListRow, right worktreeListRow) int {
+		return strings.Compare(left.name, right.name)
+	})
+
+	return rows
+}
+
+func worktreeValueOrDash(value string) string {
+	if value == "" {
+		return "-"
+	}
+
+	return value
 }
 
 // NewCommand creates the Worktree command group.

@@ -14,6 +14,8 @@ import (
 	repositoryservice "github.com/nekomeowww/rc/internal/repositories"
 )
 
+const defaultRepositorySize = "20Gi"
+
 type cloneOptions struct {
 	name          string
 	storageClass  string
@@ -40,12 +42,11 @@ func NewCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	flags := command.Flags()
 	flags.StringVar(&options.name, "name", "", "Repository metadata.name; derive it from the Git host and path when omitted")
 	flags.StringVar(&options.storageClass, "storage-class", "", "StorageClass for the Repository parent PVC")
-	flags.StringVar(&options.size, "size", "", "Requested size of the Repository parent PVC")
+	flags.StringVar(&options.size, "size", defaultRepositorySize, "Requested size of the Repository parent PVC")
 	flags.StringVar(&options.ref, "ref", "", "Full Git ref or commit to synchronize")
 	flags.StringVar(&options.credentialRef, "credential-ref", "", "Credential resource name for the Git remote")
 	flags.BoolVar(&options.wait, "wait", true, "Wait for Repository bootstrap to complete")
 	_ = command.MarkFlagRequired("storage-class")
-	_ = command.MarkFlagRequired("size")
 
 	return command
 }

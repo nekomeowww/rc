@@ -36,7 +36,7 @@ var _ = Describe("RepositoryExec Controller", func() {
 		const (
 			execName       = "repository-exec-command"
 			repositoryName = "repository-for-exec"
-			workerImage    = "repository-worker:test"
+			runnerImage    = "ghcr.io/example/rc/runner:test"
 		)
 		ctx := context.Background()
 		repository := readyRepository(repositoryName)
@@ -55,7 +55,7 @@ var _ = Describe("RepositoryExec Controller", func() {
 		Expect(k8sClient.Create(ctx, exec)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, exec)).To(Succeed()) })
 
-		reconciler := &RepositoryExecReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), WorkerImage: workerImage}
+		reconciler := &RepositoryExecReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: runnerImage}
 		execKey := types.NamespacedName{Name: execName, Namespace: testNamespace}
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: execKey})
 		Expect(err).NotTo(HaveOccurred())
@@ -63,7 +63,7 @@ var _ = Describe("RepositoryExec Controller", func() {
 		job := new(batchv1.Job)
 		Expect(k8sClient.Get(ctx, execKey, job)).To(Succeed())
 		container := job.Spec.Template.Spec.Containers[0]
-		Expect(container.Image).To(Equal(workerImage))
+		Expect(container.Image).To(Equal(runnerImage))
 		Expect(container.Command).To(Equal([]string{testGitExecutable}))
 		Expect(container.Args).To(Equal([]string{testStatusArgument, "--short"}))
 		Expect(container.WorkingDir).To(Equal(workerMountPath))

@@ -1,7 +1,7 @@
-# Image URL to use all building/pushing image targets
-IMG ?= controller:latest
-# Image used by Repository and Worktree bootstrap and Exec Jobs.
-REPOSITORY_WORKER_IMG ?= ghcr.io/nekomeowww/rc-repository-worker:latest
+# Controller image used by deployment targets.
+IMG ?= ghcr.io/nekomeowww/rc/controller:latest
+# Shared image used by Repository and Worktree Jobs and Workspace runtimes.
+RUNNER_IMG ?= ghcr.io/nekomeowww/rc/runner:latest
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -111,9 +111,10 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 ##@ Build
 
 .PHONY: build
-build: manifests generate fmt vet ## Build manager and rcctl binaries.
+build: manifests generate fmt vet ## Build manager, rcctl, and rc-kube binaries.
 	go build -o bin/manager cmd/main.go
 	go build -o bin/rcctl cmd/rcctl/main.go
+	go build -o bin/rc-kube cmd/rc-kube/main.go
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
@@ -130,13 +131,13 @@ docker-build: ## Build docker image with the manager.
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
 
-.PHONY: docker-build-repository-worker
-docker-build-repository-worker: ## Build the Repository and Worktree worker image.
-	$(CONTAINER_TOOL) build -f Dockerfile.repository-worker -t ${REPOSITORY_WORKER_IMG} .
+.PHONY: docker-build-runner
+docker-build-runner: ## Build the shared Repository, Worktree, and Workspace runner image.
+	$(CONTAINER_TOOL) build -f Dockerfile.runner -t ${RUNNER_IMG} .
 
-.PHONY: docker-push-repository-worker
-docker-push-repository-worker: ## Push the Repository and Worktree worker image.
-	$(CONTAINER_TOOL) push ${REPOSITORY_WORKER_IMG}
+.PHONY: docker-push-runner
+docker-push-runner: ## Push the shared runner image.
+	$(CONTAINER_TOOL) push ${RUNNER_IMG}
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
@@ -147,18 +148,22 @@ docker-push-repository-worker: ## Push the Repository and Worktree worker image.
 PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
-	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
-	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name rc-builder
 	$(CONTAINER_TOOL) buildx use rc-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
+	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile .
 	- $(CONTAINER_TOOL) buildx rm rc-builder
-	rm Dockerfile.cross
+
+.PHONY: docker-buildx-runner
+docker-buildx-runner: ## Build and push the shared runner image for cross-platform support
+	- $(CONTAINER_TOOL) buildx create --name rc-builder
+	$(CONTAINER_TOOL) buildx use rc-builder
+	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${RUNNER_IMG} -f Dockerfile.runner .
+	- $(CONTAINER_TOOL) buildx rm rc-builder
 
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
 	mkdir -p dist
-	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
+	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG} runner=${RUNNER_IMG}
 	"$(KUSTOMIZE)" build config/default > dist/install.yaml
 
 ##@ Deployment
@@ -179,7 +184,7 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 
 .PHONY: deploy
 deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
-	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
+	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG} runner=${RUNNER_IMG}
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" apply -f -
 
 .PHONY: undeploy

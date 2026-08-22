@@ -42,7 +42,8 @@ jobs:
           version: v2.15.2
           args: release --clean
         env:
-          CONTROLLER_IMAGE: ghcr.io/${{ github.repository }}
+          CONTROLLER_IMAGE: ghcr.io/${{ github.repository }}/controller
+          RUNNER_IMAGE: ghcr.io/${{ github.repository }}/runner
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   docker:
@@ -54,6 +55,14 @@ jobs:
       contents: read
       attestations: write
       id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: controller
+            dockerfile: Dockerfile
+          - component: runner
+            dockerfile: Dockerfile.runner
     steps:
       - name: Clone the code
         uses: actions/checkout@v6
@@ -64,7 +73,7 @@ jobs:
         uses: docker/metadata-action@v5
         id: meta
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ghcr.io/${{ github.repository }}/${{ matrix.component }}
           flavor: |
             latest=true
           tags: |
@@ -85,12 +94,12 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and publish the operator
+      - name: Build and publish ${{ matrix.component }}
         id: push
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -98,9 +107,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Attest the operator image
+      - name: Attest ${{ matrix.component }} image
         uses: actions/attest@v4
         with:
-          subject-name: ghcr.io/${{ github.repository }}
+          subject-name: ghcr.io/${{ github.repository }}/${{ matrix.component }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true

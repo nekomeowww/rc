@@ -61,3 +61,17 @@ func TestCommandTreeContainsRepositoryClone(t *testing.T) {
 	assert.Contains(t, output.String(), "--credential-ref string")
 	assert.Contains(t, output.String(), "--name string")
 }
+
+func TestCommandTreeContainsWorkspaceRuntimeCommands(t *testing.T) {
+	t.Parallel()
+	command := NewCommand()
+	output := new(bytes.Buffer)
+	command.SetOut(output)
+	command.SetErr(output)
+	command.SetArgs([]string{helpArgument})
+
+	require.NoError(t, command.Execute(), "render root help")
+	assert.Contains(t, output.String(), "env")
+	assert.Contains(t, output.String(), "workspace")
+	assert.Contains(t, output.String(), "agent")
+}

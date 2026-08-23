@@ -36,6 +36,12 @@ const runnerTestNamespace = "development"
 
 const runnerTestImage = "workspace:test"
 
+const runnerTestExistingWorkspace = "existing"
+
+const runnerTestDefaultWorkspace = "default"
+
+const runnerTestWorkspaceReadyReason = "WorkspaceReady"
+
 func TestRunnerRejectsRepositoryRequirementMissingFromExistingWorkspace(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
@@ -43,9 +49,9 @@ func TestRunnerRejectsRepositoryRequirementMissingFromExistingWorkspace(t *testi
 	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme), "register Repository API types")
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
 	workspace := &workspacesv1alpha1.Workspace{
-		ObjectMeta: metav1.ObjectMeta{Name: "existing", Namespace: runnerTestNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: runnerTestExistingWorkspace, Namespace: runnerTestNamespace},
 		Status: workspacesv1alpha1.WorkspaceStatus{Conditions: []metav1.Condition{{
-			Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionTrue, Reason: "WorkspaceReady",
+			Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionTrue, Reason: runnerTestWorkspaceReadyReason,
 		}}},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace).Build()
@@ -112,6 +118,55 @@ func TestRunnerCreatesGeneratedWorkspaceAndWorktreeForRepository(t *testing.T) {
 	assertions.Equal("codex-generated", worktree.Labels[GeneratedWorkspaceLabel], "label cascade ownership")
 }
 
+func TestRunnerCreatesMountlessWorkspaceWhenNoCodeSourceIsSelected(t *testing.T) {
+	t.Parallel()
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	scheme := runtime.NewScheme()
+	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme), "register Repository API types")
+	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
+	defaultWorkspace := &workspacesv1alpha1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{Name: runnerTestDefaultWorkspace, Namespace: runnerTestNamespace},
+		Spec: workspacesv1alpha1.WorkspaceSpec{Mounts: []workspacesv1alpha1.WorkspaceMount{{
+			Name: "rc", Path: "rc", WorktreeRef: &workspacesv1alpha1.LocalReference{Name: "rc-main"},
+		}}},
+		Status: workspacesv1alpha1.WorkspaceStatus{Conditions: []metav1.Condition{{
+			Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionTrue, Reason: runnerTestWorkspaceReadyReason,
+		}}},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(defaultWorkspace).Build()
+	runner := &Runner{Client: kubeClient, NameGenerator: func(string) string { return "codex-mountless" }}
+
+	result, err := runner.Prepare(context.Background(), RunRequest{
+		Namespace: runnerTestNamespace, DefaultWorkspace: defaultWorkspace.Name, Image: runnerTestImage,
+	})
+	requirements.NoError(err, "prepare mountless Workspace")
+	assertions.True(result.Created, "create an independent generated Workspace")
+	assertions.Equal("codex-mountless", result.Workspace.Name, "do not select the default Workspace")
+	assertions.Empty(result.Workspace.Spec.Mounts, "do not mount Repositories or Worktrees")
+}
+
+func TestRunRequestUsesDefaultWorkspaceOnlyForCodeRequirements(t *testing.T) {
+	t.Parallel()
+
+	testCases := map[string]struct {
+		request   RunRequest
+		generated bool
+	}{
+		"NoMountSelector":   {request: RunRequest{DefaultWorkspace: runnerTestDefaultWorkspace}, generated: true},
+		"Repository":        {request: RunRequest{DefaultWorkspace: runnerTestDefaultWorkspace, Repositories: []MountRequest{{Name: "rc"}}}},
+		"Worktree":          {request: RunRequest{DefaultWorkspace: runnerTestDefaultWorkspace, Worktrees: []MountRequest{{Name: "rc-main"}}}},
+		"ExplicitWorkspace": {request: RunRequest{Workspace: runnerTestExistingWorkspace}, generated: false},
+		"Temporary":         {request: RunRequest{DefaultWorkspace: runnerTestDefaultWorkspace, Temporary: true, Repositories: []MountRequest{{Name: "rc"}}}, generated: true},
+	}
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, testCase.generated, testCase.request.UsesGeneratedWorkspace(), "resolve generated Workspace selection")
+		})
+	}
+}
+
 func TestRunnerTreatsCredentialsAsRequirementsForExistingWorkspace(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
@@ -119,8 +174,8 @@ func TestRunnerTreatsCredentialsAsRequirementsForExistingWorkspace(t *testing.T)
 	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme), "register Repository API types")
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
 	workspace := &workspacesv1alpha1.Workspace{
-		ObjectMeta: metav1.ObjectMeta{Name: "existing", Namespace: runnerTestNamespace},
-		Status:     workspacesv1alpha1.WorkspaceStatus{Conditions: []metav1.Condition{{Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionTrue, Reason: "WorkspaceReady"}}},
+		ObjectMeta: metav1.ObjectMeta{Name: runnerTestExistingWorkspace, Namespace: runnerTestNamespace},
+		Status:     workspacesv1alpha1.WorkspaceStatus{Conditions: []metav1.Condition{{Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionTrue, Reason: runnerTestWorkspaceReadyReason}}},
 	}
 	runner := &Runner{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace).Build()}
 	_, err := runner.Prepare(context.Background(), RunRequest{Namespace: workspace.Namespace, Workspace: workspace.Name, CredentialRefs: []string{"github"}})

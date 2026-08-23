@@ -65,6 +65,13 @@ type RunRequest struct {
 	NamePrefix                   string
 }
 
+// UsesGeneratedWorkspace reports whether a request needs an independent
+// Workspace instead of an explicitly or implicitly selected existing one.
+func (request RunRequest) UsesGeneratedWorkspace() bool {
+	return request.Workspace == "" && (request.Temporary || request.DefaultWorkspace == "" ||
+		(len(request.Repositories) == 0 && len(request.Worktrees) == 0))
+}
+
 type RunTarget struct {
 	Workspace *workspacesv1alpha1.Workspace
 	Created   bool
@@ -77,7 +84,7 @@ type Runner struct {
 
 func (runner *Runner) Prepare(ctx context.Context, request RunRequest) (RunTarget, error) {
 	workspaceName := request.Workspace
-	if workspaceName == "" && !request.Temporary {
+	if workspaceName == "" && !request.UsesGeneratedWorkspace() {
 		workspaceName = request.DefaultWorkspace
 	}
 	if workspaceName != "" {

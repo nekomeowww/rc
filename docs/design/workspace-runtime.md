@@ -571,13 +571,15 @@ for process environment variables.
 The resolution rules for `agent run` and `agent exec` are:
 
 1. An explicit `--workspace <name>` must name an existing Ready Workspace.
-2. Without that flag, an existing configured default Workspace is used.
+2. Without that flag, an existing configured default Workspace is used only
+   when at least one `--repo` or `--worktree` requirement is supplied.
 3. Environment, Repository, and Worktree arguments supplied with an existing
    Workspace are requirements, not mutations: `--environment` must match and
    each code resource must already be represented by a matching mount. A
    mismatch stops the run; `--repo` does not create a Worktree in this case.
-4. If neither an explicit nor default Workspace is selected, valid topology
-   arguments may create a generated Workspace.
+4. With no explicit Workspace and no Repository or Worktree requirement, rcctl
+   creates a generated Workspace with no code mounts, even when a default
+   Workspace exists.
 5. `--temporary` explicitly requests a generated Workspace even when a default
    exists.
 6. An explicitly named missing Workspace is always an error and is never

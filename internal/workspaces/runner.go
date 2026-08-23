@@ -161,6 +161,15 @@ func (runner *Runner) validateExistingTarget(ctx context.Context, workspace *wor
 			return fmt.Errorf("workspace %q does not reference Credential %q", workspace.Name, requirement)
 		}
 	}
+	for name, required := range request.Resources.Limits {
+		available, exists := workspace.Spec.Resources.Limits[name]
+		if !exists {
+			available, exists = workspace.Spec.Resources.Requests[name]
+		}
+		if !exists || available.Cmp(required) < 0 {
+			return fmt.Errorf("workspace %q does not provide requested resource %s=%s", workspace.Name, name, required.String())
+		}
+	}
 
 	return nil
 }

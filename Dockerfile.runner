@@ -11,19 +11,90 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o /out/rcctl cmd/rcctl/main.go
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o /out/rc-kube cmd/rc-kube/main.go
 
-FROM debian:bookworm-slim
+FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS tool-downloader
+ARG TARGETARCH
+ARG MISE_VERSION=2026.8.11
+ARG MISE_SHA256_AMD64=8e0c3d18e71956a0fb15f55069966bbf1d6139aa8f809f1b88897ea7ef6cf196
+ARG MISE_SHA256_ARM64=fefd580d2c6a8169762f40ce5019a61de5b2dcf0b38c5d428ef6b97d5ce76fba
+ARG PROTO_VERSION=0.61.0
+ARG PROTO_SHA256_AMD64=25ed099eeac477427800c12af45c546fc983aa2e090ff10b8fd8f69471022da1
+ARG PROTO_SHA256_ARM64=df8037aa9ada8e54a1c6ee719fc11187f9800f09d46737beced490cd7d7f3d38
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) \
+            mise_arch=x64; \
+            mise_sha256="${MISE_SHA256_AMD64}"; \
+            proto_target=x86_64-unknown-linux-gnu; \
+            proto_sha256="${PROTO_SHA256_AMD64}" \
+            ;; \
+        arm64) \
+            mise_arch=arm64; \
+            mise_sha256="${MISE_SHA256_ARM64}"; \
+            proto_target=aarch64-unknown-linux-gnu; \
+            proto_sha256="${PROTO_SHA256_ARM64}" \
+            ;; \
+        *) \
+            echo "Unsupported target architecture: ${TARGETARCH}" >&2; \
+            exit 1 \
+            ;; \
+    esac; \
+    curl -fsSLo /tmp/mise.tar.xz \
+        "https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/mise-v${MISE_VERSION}-linux-${mise_arch}.tar.xz"; \
+    echo "${mise_sha256}  /tmp/mise.tar.xz" | sha256sum --check --strict; \
+    mkdir -p /tmp/mise; \
+    tar -xJf /tmp/mise.tar.xz -C /tmp/mise --strip-components=2 mise/bin/mise; \
+    install -Dm755 /tmp/mise/mise /out/mise; \
+    curl -fsSLo /tmp/proto.tar.xz \
+        "https://github.com/moonrepo/proto/releases/download/v${PROTO_VERSION}/proto_cli-${proto_target}.tar.xz"; \
+    echo "${proto_sha256}  /tmp/proto.tar.xz" | sha256sum --check --strict; \
+    mkdir -p /tmp/proto; \
+    tar -xJf /tmp/proto.tar.xz -C /tmp/proto --strip-components=1; \
+    install -Dm755 /tmp/proto/proto /out/proto; \
+    install -Dm755 /tmp/proto/proto-shim /out/proto-shim
+
+FROM node:26-bookworm-slim
+ARG COREPACK_VERSION=0.35.0
 LABEL org.opencontainers.image.source="https://github.com/nekomeowww/rc" \
       org.opencontainers.image.title="rc runner"
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash ca-certificates curl git git-lfs libatomic1 openssh-client sudo \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        btop \
+        ca-certificates \
+        curl \
+        gcc \
+        git \
+        git-lfs \
+        gzip \
+        htop \
+        libatomic1 \
+        make \
+        openssh-client \
+        procps \
+        ripgrep \
+        sudo \
+        tar \
+        unzip \
+        wget \
+        xz-utils \
+        zip \
+    && npm install --global "corepack@${COREPACK_VERSION}" \
+    && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --gid 1000 agent \
-    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash agent \
+    && usermod --login agent --home /home/agent --move-home --shell /bin/bash node \
+    && groupmod --new-name agent node \
     && groupadd --gid 65532 rc \
     && useradd --uid 65532 --gid 65532 --create-home --shell /bin/bash rc \
     && git config --system --add safe.directory '*'
 COPY --from=builder /out/rcctl /usr/local/bin/rcctl
 COPY --from=builder /out/rc-kube /usr/local/bin/rc-kube
+COPY --from=tool-downloader /out/mise /usr/local/bin/mise
+COPY --from=tool-downloader /out/proto /usr/local/bin/proto
+COPY --from=tool-downloader /out/proto-shim /usr/local/bin/proto-shim
 ENV SHELL=/bin/bash
 USER 1000:1000
 WORKDIR /workspace

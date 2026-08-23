@@ -214,8 +214,9 @@ references to its code, configuration, and credentials.
   a later image or revision change only makes the Workspace `Outdated`;
 - without one, the Workspace receives a blank home volume and uses the rc base
   Workspace image. The base contains `rc-kube`, `rcctl`, a shell, Git, CA
-  certificates, and common system tools, but does not promise Node.js, Python,
-  Rust, or another language toolchain.
+  certificates, Node.js with Corepack, common build and archive tools, and the
+  proto and mise tool-version managers. It does not promise Python, Rust, or
+  another language toolchain.
 
 The stable filesystem layout is:
 

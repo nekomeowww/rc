@@ -146,6 +146,8 @@ docker-push-runner: ## Push the shared runner image.
 # - be able to push the image to your registry (i.e. if you do not set a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
 # To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
 PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
+# proto publishes Linux binaries for amd64 and arm64, matching the runner release workflow.
+RUNNER_PLATFORMS ?= linux/arm64,linux/amd64
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
 	- $(CONTAINER_TOOL) buildx create --name rc-builder
@@ -157,7 +159,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 docker-buildx-runner: ## Build and push the shared runner image for cross-platform support
 	- $(CONTAINER_TOOL) buildx create --name rc-builder
 	$(CONTAINER_TOOL) buildx use rc-builder
-	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${RUNNER_IMG} -f Dockerfile.runner .
+	$(CONTAINER_TOOL) buildx build --push --platform=$(RUNNER_PLATFORMS) --tag ${RUNNER_IMG} -f Dockerfile.runner .
 	- $(CONTAINER_TOOL) buildx rm rc-builder
 
 .PHONY: build-installer

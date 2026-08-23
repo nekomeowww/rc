@@ -90,7 +90,8 @@ rc publishes two core images under one product path:
 
 - `ghcr.io/nekomeowww/rc/controller` contains the distroless manager; and
 - `ghcr.io/nekomeowww/rc/runner` contains `rc-kube`, `rcctl`, the shell, Git,
-  certificates, SSH, and the system tools required by runtime processes.
+  certificates, SSH, the LobeHub CLI (`lh`, `lobe`, and `lobehub`), and the
+  system tools required by runtime processes.
 
 The runner image is shared by blank Workspace runtimes, Repository bootstrap
 and Exec Jobs, and Worktree bootstrap Jobs. These operations still run in

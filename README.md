@@ -76,7 +76,8 @@ Tagged releases publish:
 - The multi-platform controller image at
   `ghcr.io/nekomeowww/rc/controller`.
 - The multi-platform runner image at `ghcr.io/nekomeowww/rc/runner`. The same
-  runner is used by Repository and Worktree Jobs and by blank Workspaces.
+  runner is used by Repository and Worktree Jobs and by blank Workspaces. It
+  includes the LobeHub CLI as `lh`, `lobe`, and `lobehub`.
 - A consolidated Kubebuilder installer named `install.yaml` as a release asset.
 
 Install the latest released operator with:

@@ -21,10 +21,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"slices"
 	"strings"
-	"syscall"
 	"time"
 
 	"golang.org/x/term"
@@ -303,7 +301,7 @@ func (processes *ProcessClient) prepareLocalTerminal(ctx context.Context, target
 	resizeSignals := make(chan os.Signal, 1)
 	stopResize := make(chan struct{})
 	resizeDone := make(chan struct{})
-	signal.Notify(resizeSignals, syscall.SIGWINCH)
+	stopResizeNotifications := subscribeTerminalResize(resizeSignals)
 	go func() {
 		defer close(resizeDone)
 		for {
@@ -319,7 +317,7 @@ func (processes *ProcessClient) prepareLocalTerminal(ctx context.Context, target
 	}()
 
 	return uint16(rows), uint16(columns), func() {
-		signal.Stop(resizeSignals)
+		stopResizeNotifications()
 		close(stopResize)
 		<-resizeDone
 		_ = term.Restore(int(inputFile.Fd()), state)

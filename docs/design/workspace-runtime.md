@@ -74,7 +74,7 @@ rc is split into three programs:
   Kubebuilder manager entry can continue to build this binary without moving
   the scaffolded manager files.
 - `rc-kube` runs inside Workspace and Environment editor Pods. It supervises
-  processes, owns PTYs, keeps terminal state, and serves local attach requests.
+  processes, owns PTYs and transcripts, and serves local attach requests.
 - `rcctl` is the user-facing CLI. It is also present in the Workspace image so
   a running agent can manage rc resources in its namespace.
 
@@ -145,6 +145,13 @@ PVC cloning is a required storage primitive, not an optimization. Source and
 target StorageClasses must support cloning and use compatible volume modes. If
 they do not, Environment draft creation or Workspace creation fails with an
 explicit condition and reason. rc never falls back to a copy Job.
+
+Repository, Worktree, Environment, and Workspace Pods use the same UID, GID,
+and fsGroup (`1000`) for persistent storage. They set
+`fsGroupChangePolicy: OnRootMismatch`, so a clone whose root ownership already
+matches does not trigger a recursive ownership walk. This is required for
+small-file-heavy repositories on network filesystems, where an unnecessary
+recursive chmod/chown can dominate startup time.
 
 The editor Pod remains available for ten minutes after its final process exits
 so a coding agent can issue consecutive `env exec` commands without repeated
@@ -243,6 +250,10 @@ silently replaces the other.
 An automatically created Worktree starts from the Repository synchronized ref
 on a unique `rc/<workspace>/<mount>` branch. It remains an ordinary Worktree
 resource and is not deleted automatically when its creating process finishes.
+Because its PVC is already an isolated CSI clone with a complete working tree,
+the generated Worktree reuses the clone root and creates only the unique branch;
+it does not create a second nested checkout. Explicitly created Worktrees retain
+native `git worktree add` behavior and its advanced flags.
 
 One Worktree may be mounted read-write by only one running Workspace at a time.
 Processes inside that Workspace may use it concurrently. Multiple Workspaces
@@ -372,17 +383,22 @@ to `/run/rc/credentials`.
 ### Terminal and attach behavior
 
 `agent run` defaults to a PTY and `agent exec` defaults to non-terminal I/O. A
-PTY process supports bracketed input, resize, signals, and terminal rendering;
-client disconnect leaves the PTY and process owned by `rc-kube`.
+PTY process supports bracketed input, resize, signals, and an unmodified
+terminal byte stream; client disconnect leaves the PTY and process owned by
+`rc-kube`.
 
 Multiple clients may attach read-write to one process. The supervisor
 serializes their input. The client that most recently produces keyboard,
 mouse, paste, or focus interaction becomes foreground and determines the
-shared PTY size. The server retains canonical terminal state and renders for
-each client's viewport instead of broadcasting an untracked raw byte stream.
-`rc-kube` uses a VT10x-compatible in-memory emulator for that screen state.
-Each attach has a stable client ID and remembered viewport. Slow clients are
-explicitly disconnected instead of silently losing output.
+shared PTY size. `rc-kube` appends bytes read from the PTY master to the bounded
+transcript and broadcasts those exact same bytes to attached clients without
+parsing or rendering them. Attach first replays that raw transcript and then
+follows live output without a gap. The attach request carries the client's
+initial size so registration and the first PTY resize happen atomically before
+its input is forwarded. Each attach has a stable client ID and remembered
+viewport. Because one PTY has one size, background clients do not receive an
+independently rendered viewport. Slow clients are explicitly disconnected
+instead of silently losing output.
 
 `rcctl agent resume <id>` means reconnect to that rc-managed live process. It
 does not refer to a Codex or other agent-native session ID. If the process or
@@ -399,12 +415,12 @@ separate operation.
 Terminal output is appended to the target persistent volume and is not stored
 in CR status. It may contain source code, command output, and secrets printed by
 the process, so the Workspace volume is sensitive data. Log storage has a
-configurable bound and reports truncation. The live terminal screen used for
-multi-client rendering is memory-only; the append-only transcript survives
-process exit and runtime restarts. When the target runtime exists, `agent logs`
-reads through `rc-kube`. Otherwise the controller creates a short-lived read-
-only helper Pod that mounts only the target log volume. The helper does not
-mount Worktrees or Credentials and does not change the target desired state.
+configurable bound and reports truncation. The append-only raw transcript is
+also used to seed a newly attached terminal and survives process exit and
+runtime restarts. When the target runtime exists, `agent logs` reads through
+`rc-kube`. Otherwise the controller creates a short-lived read-only helper Pod
+that mounts only the target log volume. The helper does not mount Worktrees or
+Credentials and does not change the target desired state.
 
 ## Credentials and Agent homes
 
@@ -445,7 +461,8 @@ Commands inherit the environment of the calling `rcctl` process by default.
 and `--env-file` provide selective input and explicit overrides.
 
 Automatic pass-through excludes values that describe the caller's local paths,
-terminal, Kubernetes client, or agent runtime:
+terminal, Kubernetes client, shell integration, IDE session, or agent runtime.
+This includes well-known names and families such as:
 
 ```text
 PATH
@@ -460,14 +477,38 @@ _
 KUBECONFIG
 KUBERNETES_*
 XDG_RUNTIME_DIR
+XDG_*
 SSH_AUTH_SOCK
+TMP
+TEMP
+TMPDIR
 TERM
 COLORTERM
+TERM_*
 LINES
 COLUMNS
-CODEX_HOME
+ATUIN_*
+CODEX_*
+GEMINI_CLI_IDE_*
+GHOSTTY_*
+HOMEBREW_*
+MISE_*
+NIX_*
+STARSHIP_*
+SWIFTLY_*
+VSCODE_*
+VOLTA_*
+XPC_*
+__*
 RC_*
 ```
+
+Names that conventionally point at host filesystem locations are also
+excluded, including names ending in `_PATH`, `_DIR`, `_HOME`, `_ROOT`,
+`_PREFIX`, `_FILE`, or `_SOCK`, plus conventional path variables such as
+`FPATH`, `GOPATH`, `MANPATH`, `PYTHONPATH`, and `PYTHONSTARTUP`. Host runtime
+hooks such as `GIT_ASKPASS` and `NODE_OPTIONS` are excluded for the same
+reason.
 
 These names are not protected. An explicit `--env` may add any of them back.
 The effective precedence is target runtime defaults, Workspace configuration,
@@ -559,6 +600,9 @@ mounts a Worktree from that existing Repository. There is no
 The initial Workspace and process commands are expected to include:
 
 ```text
+rcctl repo clone <url> [--with-submodules] [--recursive-submodules]
+rcctl repo delete <name>
+
 rcctl workspace create <name>
 rcctl workspace mount repo <repository> [mount options]
 rcctl workspace mount worktree <repository>/<worktree> [mount options]
@@ -576,6 +620,15 @@ rcctl agent logs <id>
 rcctl agent stop <id>
 rcctl agent delete <id>
 ```
+
+Repository clone does not initialize submodules by default.
+`--with-submodules` initializes direct submodules;
+`--recursive-submodules` initializes nested submodules and implies
+`--with-submodules`. These map to an optional `spec.submodules` object whose
+`recursive` field controls traversal depth.
+`repo delete` (also available as `repo remove` and `repo rm`) deletes the
+Repository resource; Kubernetes garbage collection deletes its owned parent
+PVC and bootstrap Jobs.
 
 `workspace mount repo` creates and mounts a writable Worktree by default. Its
 explicit `--read-only` form mounts the Repository parent itself. Topology
@@ -781,8 +834,8 @@ exactly.
 
 ### 7. Complete terminal and log access
 
-Add multiple attached clients, foreground resize arbitration, per-client
-rendering, reconnect, list metadata, transcript reads, and the suspended-target
+Add multiple attached clients, foreground resize arbitration, raw PTY stream
+broadcast, reconnect, list metadata, transcript reads, and the suspended-target
 helper Pod. Add Workspace port-forward after runtime Pod discovery is stable.
 
 ### 8. Add cleanup and end-to-end coverage
@@ -811,6 +864,6 @@ These choices can be made while implementing their owning stage without
 changing the resource and lifecycle contract above.
 
 The implementation uses a versioned, line-delimited JSON handshake for local
-`rc-kube` control requests, a raw byte stream after attach acknowledgement,
-and `github.com/hinshun/vt10x` for canonical in-memory terminal state. Durable
-transcripts remain bounded append-only byte logs rather than terminal events.
+`rc-kube` control requests and a raw byte stream after attach acknowledgement.
+Durable transcripts remain bounded append-only byte logs rather than terminal
+events; rc does not emulate or re-render the child terminal.

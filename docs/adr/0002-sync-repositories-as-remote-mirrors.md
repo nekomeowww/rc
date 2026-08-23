@@ -10,6 +10,13 @@ remote default branch when no ref is configured), resets the Repository parent
 PVC with `git reset --hard`, and removes untracked and ignored files with
 `git clean -ffdx`.
 
+Submodules are opt-in. When `spec.submodules` is present, sync initializes
+direct submodules at the commits recorded by the synchronized checkout. Setting
+`spec.submodules.recursive` also synchronizes and initializes nested
+submodules. Submodule fetches inherit the Repository Credential; a failed
+requested submodule leaves the Repository not ready rather than publishing
+incomplete source state.
+
 This deliberately discards local changes in the parent instead of merging or
 rebasing them. Repository Exec remains the explicit mechanism for arbitrary Git
 workflows. Existing Worktrees are independent child PVCs and are not changed by

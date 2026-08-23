@@ -93,11 +93,11 @@ func TestSupervisorSupportsConcurrentReadOnlyAttaches(t *testing.T) {
 	wait.Add(2)
 	go func() {
 		defer wait.Done()
-		_ = supervisor.Attach(context.Background(), request.ID, "first", nil, &first)
+		_ = supervisor.Attach(context.Background(), request.ID, "first", nil, &first, 0, 0)
 	}()
 	go func() {
 		defer wait.Done()
-		_ = supervisor.Attach(context.Background(), request.ID, "second", nil, &second)
+		_ = supervisor.Attach(context.Background(), request.ID, "second", nil, &second, 0, 0)
 	}()
 	wait.Wait()
 	assertions.Equal("shared", first.String(), "first client receives terminal output")

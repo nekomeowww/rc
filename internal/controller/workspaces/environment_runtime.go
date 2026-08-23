@@ -30,6 +30,7 @@ import (
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
+	"github.com/nekomeowww/rc/internal/runtimepolicy"
 )
 
 const (
@@ -141,8 +142,6 @@ func (r *AgentProcessReconciler) resolveEnvironmentProcessTarget(ctx context.Con
 }
 
 func environmentEditorPod(environment *workspacesv1alpha1.WorkspaceEnvironment, draftClaimName string) *corev1.Pod {
-	runAsUser := int64(1000)
-	runAsGroup := int64(1000)
 	runAsRoot := int64(0)
 	runAsRootGroup := int64(0)
 	automount := true
@@ -160,10 +159,7 @@ func environmentEditorPod(environment *workspacesv1alpha1.WorkspaceEnvironment, 
 			ServiceAccountName:           defaultWorkspaceServiceAccount,
 			AutomountServiceAccountToken: &automount,
 			RestartPolicy:                corev1.RestartPolicyAlways,
-			SecurityContext: &corev1.PodSecurityContext{
-				RunAsNonRoot: boolPointer(true), RunAsUser: &runAsUser, RunAsGroup: &runAsGroup, FSGroup: &runAsGroup,
-				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-			},
+			SecurityContext:              runtimepolicy.AgentPodSecurityContext(),
 			InitContainers: []corev1.Container{{
 				Name: environmentSudoersContainerName, Image: environment.Spec.Image,
 				Command: []string{"/bin/sh", "-ec"},

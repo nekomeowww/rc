@@ -94,6 +94,9 @@ func TestEnvironmentEditorPodSupportsPasswordlessSudo(t *testing.T) {
 	}
 
 	pod := environmentEditorPod(environment, "sudo-draft-1")
+	requirements.NotNil(pod.Spec.SecurityContext, "editor Pod has a security context")
+	requirements.NotNil(pod.Spec.SecurityContext.FSGroupChangePolicy, "editor skips recursive ownership changes when the volume root already matches")
+	assertions.Equal(corev1.FSGroupChangeOnRootMismatch, *pod.Spec.SecurityContext.FSGroupChangePolicy)
 	requirements.Len(pod.Spec.InitContainers, 1, "editor Pod has one sudoers setup container")
 	setup := pod.Spec.InitContainers[0]
 	assertions.Equal(environmentSudoersContainerName, setup.Name, "use a dedicated sudoers setup container")

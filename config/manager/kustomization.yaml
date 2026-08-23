@@ -7,10 +7,10 @@ resources:
 images:
 - name: controller
   newName: ghcr.io/nekomeowww/rc/controller
-  newTag: latest
+  newTag: dev-20260824-submodules
 - name: runner
   newName: ghcr.io/nekomeowww/rc/runner
-  newTag: latest
+  newTag: dev-20260824-submodules
 
 configurations:
 - kustomizeconfig.yaml

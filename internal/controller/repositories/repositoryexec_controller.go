@@ -35,6 +35,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	"github.com/nekomeowww/rc/internal/runtimepolicy"
 )
 
 const (
@@ -161,9 +162,6 @@ func repositoryExecJob(
 ) *batchv1.Job {
 	backoffLimit := int32(0)
 	ttlSecondsAfterFinished := repositoryExecJobTTLSeconds
-	runAsNonRoot := true
-	runAsUser := int64(65532)
-	runAsGroup := int64(65532)
 	allowPrivilegeEscalation := false
 	command := []string{exec.Spec.Command[0]}
 	args := append([]string(nil), exec.Spec.Command[1:]...)
@@ -183,16 +181,8 @@ func repositoryExecJob(
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{repositoryUIDLabel: string(repository.UID)}},
 				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
-					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot: &runAsNonRoot,
-						RunAsUser:    &runAsUser,
-						RunAsGroup:   &runAsGroup,
-						FSGroup:      &runAsGroup,
-						SeccompProfile: &corev1.SeccompProfile{
-							Type: corev1.SeccompProfileTypeRuntimeDefault,
-						},
-					},
+					RestartPolicy:   corev1.RestartPolicyNever,
+					SecurityContext: runtimepolicy.AgentPodSecurityContext(),
 					Containers: []corev1.Container{
 						{
 							// TODO(repository-exec-credentials): Repository credentials are

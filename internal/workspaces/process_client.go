@@ -272,31 +272,34 @@ func (processes *ProcessClient) Attach(ctx context.Context, process *workspacesv
 	}
 	target := processruntime.Target{Namespace: process.Namespace, Pod: process.Status.RuntimePodName, Container: "rc-kube"}
 	clientID := GenerateSortableName("terminal")
-	cleanup, err := processes.prepareLocalTerminal(ctx, target, process, clientID, input)
+	rows, columns, cleanup, err := processes.prepareLocalTerminal(ctx, target, process, clientID, input)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	return processes.Runtime.Attach(ctx, target, process.Name, clientID, input, output, process.Spec.TTY)
+	return processes.Runtime.Attach(ctx, target, process.Name, clientID, input, output, process.Spec.TTY, rows, columns)
 }
 
-func (processes *ProcessClient) prepareLocalTerminal(ctx context.Context, target processruntime.Target, process *workspacesv1alpha1.AgentProcess, clientID string, input io.Reader) (func(), error) {
+func (processes *ProcessClient) prepareLocalTerminal(ctx context.Context, target processruntime.Target, process *workspacesv1alpha1.AgentProcess, clientID string, input io.Reader) (uint16, uint16, func(), error) {
 	inputFile, ok := input.(*os.File)
 	if !process.Spec.TTY || !ok || !term.IsTerminal(int(inputFile.Fd())) {
-		return func() {}, nil
+		return 0, 0, func() {}, nil
+	}
+	columns, rows, err := term.GetSize(int(inputFile.Fd()))
+	if err != nil {
+		return 0, 0, nil, fmt.Errorf("read local terminal size: %w", err)
 	}
 	state, err := term.MakeRaw(int(inputFile.Fd()))
 	if err != nil {
-		return nil, fmt.Errorf("put local terminal in raw mode: %w", err)
+		return 0, 0, nil, fmt.Errorf("put local terminal in raw mode: %w", err)
 	}
 	resize := func() {
-		columns, rows, sizeErr := term.GetSize(int(inputFile.Fd()))
-		if sizeErr == nil && columns > 0 && rows > 0 {
-			_ = processes.Runtime.Resize(ctx, target, process.Name, clientID, uint16(rows), uint16(columns))
+		currentColumns, currentRows, sizeErr := term.GetSize(int(inputFile.Fd()))
+		if sizeErr == nil && currentColumns > 0 && currentRows > 0 {
+			_ = processes.Runtime.Resize(ctx, target, process.Name, clientID, uint16(currentRows), uint16(currentColumns))
 		}
 	}
-	resize()
 	resizeSignals := make(chan os.Signal, 1)
 	stopResize := make(chan struct{})
 	resizeDone := make(chan struct{})
@@ -315,7 +318,7 @@ func (processes *ProcessClient) prepareLocalTerminal(ctx context.Context, target
 		}
 	}()
 
-	return func() {
+	return uint16(rows), uint16(columns), func() {
 		signal.Stop(resizeSignals)
 		close(stopResize)
 		<-resizeDone

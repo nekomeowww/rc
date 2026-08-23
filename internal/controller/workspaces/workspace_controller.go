@@ -46,6 +46,7 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/runtimepolicy"
 )
 
 const (
@@ -554,7 +555,10 @@ func (r *WorkspaceReconciler) resolveWorkspaceMount(ctx context.Context, namespa
 			return volume, volumeMount, nil, "WorktreeNotReady", fmt.Sprintf("Mounted Worktree %s is not ready", worktree.Name), nil
 		}
 		volume.PersistentVolumeClaim = &corev1.PersistentVolumeClaimVolumeSource{ClaimName: worktree.Status.VolumeClaimName, ReadOnly: mount.ReadOnly}
-		volumeMount.SubPath = strings.TrimPrefix(filepath.Clean(worktree.Status.WorktreePath), "/repository/")
+		cleanWorktreePath := filepath.Clean(worktree.Status.WorktreePath)
+		if cleanWorktreePath != "/repository" {
+			volumeMount.SubPath = strings.TrimPrefix(cleanWorktreePath, "/repository/")
+		}
 		if !mount.ReadOnly {
 			identity := string(worktree.UID)
 			if identity == "" {
@@ -630,8 +634,6 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 	if err != nil {
 		return nil, fmt.Errorf("marshal Workspace write claims: %w", err)
 	}
-	runAsUser := int64(1000)
-	runAsGroup := int64(1000)
 	allowPrivilegeEscalation := false
 	readOnlyRootFilesystem := false
 	automount := resolved.automountSAToken
@@ -664,19 +666,11 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 			ServiceAccountName:           resolved.serviceAccount,
 			AutomountServiceAccountToken: &automount,
 			RestartPolicy:                corev1.RestartPolicyAlways,
-			SecurityContext: &corev1.PodSecurityContext{
-				RunAsNonRoot: boolPointer(true),
-				RunAsUser:    &runAsUser,
-				RunAsGroup:   &runAsGroup,
-				FSGroup:      &runAsGroup,
-				SeccompProfile: &corev1.SeccompProfile{
-					Type: corev1.SeccompProfileTypeRuntimeDefault,
-				},
-			},
-			NodeSelector:     workspace.Spec.NodeSelector,
-			Tolerations:      workspace.Spec.Tolerations,
-			Affinity:         workspace.Spec.Affinity,
-			RuntimeClassName: workspace.Spec.RuntimeClassName,
+			SecurityContext:              runtimepolicy.AgentPodSecurityContext(),
+			NodeSelector:                 workspace.Spec.NodeSelector,
+			Tolerations:                  workspace.Spec.Tolerations,
+			Affinity:                     workspace.Spec.Affinity,
+			RuntimeClassName:             workspace.Spec.RuntimeClassName,
 			Containers: []corev1.Container{{
 				Name:         runtimeContainerName,
 				Image:        resolved.image,

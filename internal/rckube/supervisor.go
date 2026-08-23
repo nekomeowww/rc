@@ -17,7 +17,6 @@ limitations under the License.
 package rckube
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -35,7 +34,6 @@ import (
 	"time"
 
 	"github.com/creack/pty"
-	"github.com/hinshun/vt10x"
 
 	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
 )
@@ -59,7 +57,6 @@ type supervisedProcess struct {
 	command             *exec.Cmd
 	input               io.WriteCloser
 	terminal            *os.File
-	terminalState       vt10x.Terminal
 	transcript          *os.File
 	transcriptPath      string
 	exit                chan struct{}
@@ -225,13 +222,10 @@ func (supervisor *Supervisor) Start(request processruntime.StartRequest) (proces
 		runtimeDir: runtimeDirectory, credentialLinks: credentialLinks, agentCredentialLink: agentCredentialLink,
 		supervisor: supervisor, processID: request.ID,
 	}
-	if request.TTY {
-		process.terminalState = vt10x.New(vt10x.WithSize(80, 24))
-	}
 	output := processOutput{process: process}
 	var outputDone chan struct{}
 	if request.TTY {
-		terminal, startErr := pty.Start(command)
+		terminal, startErr := pty.StartWithSize(command, &pty.Winsize{Rows: 24, Cols: 80})
 		if startErr != nil {
 			if failed, handled, failureErr := supervisor.recordCommandStartFailureLocked(process, startErr); handled {
 				commandLaunched = failureErr == nil
@@ -407,23 +401,18 @@ func (supervisor *Supervisor) TranscriptAvailable(id string) error {
 	return err
 }
 
-// Attach replays the transcript and then follows live output. Input is shared
-// with every other attached client.
-func (supervisor *Supervisor) Attach(ctx context.Context, id string, clientID string, input io.Reader, output io.Writer) error {
+// Attach replays the raw transcript and then follows the raw PTY output. Input
+// is shared with every other attached client.
+func (supervisor *Supervisor) Attach(ctx context.Context, id string, clientID string, input io.Reader, output io.Writer, rows uint16, columns uint16) error {
 	process, err := supervisor.process(id)
 	if err != nil {
 		return err
 	}
 	process.mu.Lock()
-	var replay []byte
-	if process.terminalState != nil {
-		replay = renderTerminal(process.terminalState, process.clientSizes[clientID])
-	} else {
-		replay, err = process.readTranscriptLocked()
-		if err != nil {
-			process.mu.Unlock()
-			return err
-		}
+	replay, err := process.readTranscriptLocked()
+	if err != nil {
+		process.mu.Unlock()
+		return err
 	}
 	if process.state.Phase != phaseRunning && process.state.Phase != phaseStarting {
 		process.mu.Unlock()
@@ -442,6 +431,19 @@ func (supervisor *Supervisor) Attach(ctx context.Context, id string, clientID st
 	process.clients[clientID] = stream
 	if process.foregroundClient == "" {
 		process.foregroundClient = clientID
+	}
+	if rows > 0 && columns > 0 {
+		size := pty.Winsize{Rows: rows, Cols: columns}
+		process.clientSizes[clientID] = size
+		if process.foregroundClient == clientID && process.terminal != nil {
+			if err := pty.Setsize(process.terminal, &size); err != nil {
+				delete(process.clients, clientID)
+				delete(process.clientSizes, clientID)
+				process.foregroundClient = ""
+				process.mu.Unlock()
+				return fmt.Errorf("set initial PTY size: %w", err)
+			}
+		}
 	}
 	process.state.AttachedClients = int32(len(process.clients))
 	exit := process.exit
@@ -517,10 +519,6 @@ func (supervisor *Supervisor) Resize(id string, clientID string, rows uint16, co
 			return nil
 		}
 	}
-	if process.terminalState != nil {
-		process.terminalState.Resize(int(columns), int(rows))
-	}
-
 	return pty.Setsize(process.terminal, &pty.Winsize{Rows: rows, Cols: columns})
 }
 
@@ -633,18 +631,9 @@ func (output processOutput) Write(data []byte) (int, error) {
 			output.process.truncated = true
 		}
 	}
-	if output.process.terminalState != nil {
-		if _, err := output.process.terminalState.Write(data); err != nil {
-			return 0, fmt.Errorf("update canonical terminal state: %w", err)
-		}
-	}
 	for id, client := range output.process.clients {
-		clientData := copyOfData
-		if output.process.terminalState != nil {
-			clientData = renderTerminal(output.process.terminalState, output.process.clientSizes[id])
-		}
 		select {
-		case client <- clientData:
+		case client <- copyOfData:
 		default:
 			delete(output.process.clients, id)
 			delete(output.process.clientSizes, id)
@@ -659,11 +648,6 @@ func (output processOutput) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-type serializedWriter struct {
-	mu     *sync.Mutex
-	target io.Writer
-}
-
 type foregroundWriter struct {
 	process  *supervisedProcess
 	clientID string
@@ -671,6 +655,8 @@ type foregroundWriter struct {
 }
 
 func (writer foregroundWriter) Write(data []byte) (int, error) {
+	writer.process.inputMu.Lock()
+	defer writer.process.inputMu.Unlock()
 	writer.process.mu.Lock()
 	writer.process.foregroundClient = writer.clientID
 	size, hasSize := writer.process.clientSizes[writer.clientID]
@@ -678,52 +664,7 @@ func (writer foregroundWriter) Write(data []byte) (int, error) {
 	writer.process.mu.Unlock()
 	if hasSize && terminal != nil {
 		_ = pty.Setsize(terminal, &size)
-		writer.process.mu.Lock()
-		if writer.process.terminalState != nil {
-			writer.process.terminalState.Resize(int(size.Cols), int(size.Rows))
-		}
-		writer.process.mu.Unlock()
 	}
-	return (serializedWriter{mu: &writer.process.inputMu, target: writer.target}).Write(data)
-}
-
-func renderTerminal(terminal vt10x.View, viewport pty.Winsize) []byte {
-	terminal.Lock()
-	defer terminal.Unlock()
-	columns, rows := terminal.Size()
-	if viewport.Cols > 0 && int(viewport.Cols) < columns {
-		columns = int(viewport.Cols)
-	}
-	if viewport.Rows > 0 && int(viewport.Rows) < rows {
-		rows = int(viewport.Rows)
-	}
-	var rendered bytes.Buffer
-	rendered.WriteString("\x1b[?25l\x1b[2J\x1b[H")
-	for row := 0; row < rows; row++ {
-		for column := 0; column < columns; column++ {
-			character := terminal.Cell(column, row).Char
-			if character == 0 {
-				character = ' '
-			}
-			rendered.WriteRune(character)
-		}
-		if row+1 < rows {
-			rendered.WriteString("\r\n")
-		}
-	}
-	cursor := terminal.Cursor()
-	if cursor.Y < rows && cursor.X < columns {
-		_, _ = fmt.Fprintf(&rendered, "\x1b[%d;%dH", cursor.Y+1, cursor.X+1)
-	}
-	if terminal.CursorVisible() {
-		rendered.WriteString("\x1b[?25h")
-	}
-	return rendered.Bytes()
-}
-
-func (writer serializedWriter) Write(data []byte) (int, error) {
-	writer.mu.Lock()
-	defer writer.mu.Unlock()
 	return writer.target.Write(data)
 }
 

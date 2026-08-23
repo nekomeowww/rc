@@ -8,15 +8,20 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 )
 
-const listTestNamespace = "development"
+const (
+	listTestNamespace = "development"
+	deleteTestName    = "example"
+)
 
 func TestRepositoryListRowsReportStatusAndSortByName(t *testing.T) {
 	t.Parallel()
@@ -66,4 +71,40 @@ func TestRepositoryListCommandHasAliasAndRejectsArguments(t *testing.T) {
 
 	assert.Contains(t, command.Aliases, "ls", "offer the conventional list alias")
 	require.Error(t, command.Args(command, []string{"unexpected"}), "list accepts no positional arguments")
+}
+
+func TestRepositoryDeleteCommandHasAliasesAndRequiresName(t *testing.T) {
+	t.Parallel()
+	command := newDeleteCommand(kubeconfig.NewFlags())
+
+	assert.Contains(t, command.Aliases, "remove", "offer remove as a descriptive alias")
+	assert.Contains(t, command.Aliases, "rm", "offer rm as a conventional alias")
+	require.Error(t, command.Args(command, nil), "delete requires a Repository name")
+	require.NoError(t, command.Args(command, []string{deleteTestName}), "delete accepts exactly one Repository name")
+	require.Error(t, command.Args(command, []string{"one", "two"}), "delete rejects extra positional arguments")
+}
+
+func TestRepositoryDeleteRemovesRepository(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	require.NoError(t, repositoriesv1alpha1.AddToScheme(scheme))
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&repositoriesv1alpha1.Repository{
+		ObjectMeta: metav1.ObjectMeta{Name: deleteTestName, Namespace: listTestNamespace},
+	}).Build()
+
+	err := runRepositoryDelete(context.Background(), kubeClient, listTestNamespace, deleteTestName)
+
+	require.NoError(t, err, "delete the Repository")
+	err = kubeClient.Get(context.Background(), client.ObjectKey{Namespace: listTestNamespace, Name: deleteTestName}, new(repositoriesv1alpha1.Repository))
+	require.True(t, apierrors.IsNotFound(err), "the Repository no longer exists")
+}
+
+func TestRepositoryDeleteReturnsKubernetesAPIError(t *testing.T) {
+	t.Parallel()
+	kubeClient := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
+
+	err := runRepositoryDelete(context.Background(), kubeClient, listTestNamespace, deleteTestName)
+
+	require.Error(t, err, "deleting an unregistered Repository type fails")
+	assert.ErrorContains(t, err, "delete Repository", "identify the failed resource operation")
 }

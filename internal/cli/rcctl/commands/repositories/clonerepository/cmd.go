@@ -17,12 +17,14 @@ import (
 const defaultRepositorySize = "20Gi"
 
 type cloneOptions struct {
-	name          string
-	storageClass  string
-	size          string
-	ref           string
-	credentialRef string
-	wait          bool
+	name                string
+	storageClass        string
+	size                string
+	ref                 string
+	credentialRef       string
+	withSubmodules      bool
+	recursiveSubmodules bool
+	wait                bool
 }
 
 // NewCommand creates the Repository clone command.
@@ -45,6 +47,8 @@ func NewCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	flags.StringVar(&options.size, "size", defaultRepositorySize, "Requested size of the Repository parent PVC")
 	flags.StringVar(&options.ref, "ref", "", "Full Git ref or commit to synchronize")
 	flags.StringVar(&options.credentialRef, "credential-ref", "", "Credential resource name for the Git remote")
+	flags.BoolVar(&options.withSubmodules, "with-submodules", false, "Initialize direct Git submodules")
+	flags.BoolVar(&options.recursiveSubmodules, "recursive-submodules", false, "Initialize Git submodules recursively; implies --with-submodules")
 	flags.BoolVar(&options.wait, "wait", true, "Wait for Repository bootstrap to complete")
 	_ = command.MarkFlagRequired("storage-class")
 
@@ -84,13 +88,15 @@ func run(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, options cloneOpt
 
 	repositoryClient := &repositoryservice.RepositoryClient{Client: kubeClient}
 	repository, err := repositoryClient.Clone(cmd.Context(), repositoryservice.CloneRequest{
-		Namespace:     namespace,
-		URL:           remoteURL,
-		Name:          options.name,
-		Ref:           options.ref,
-		StorageClass:  options.storageClass,
-		Size:          size,
-		CredentialRef: options.credentialRef,
+		Namespace:           namespace,
+		URL:                 remoteURL,
+		Name:                options.name,
+		Ref:                 options.ref,
+		StorageClass:        options.storageClass,
+		Size:                size,
+		CredentialRef:       options.credentialRef,
+		WithSubmodules:      options.withSubmodules,
+		RecursiveSubmodules: options.recursiveSubmodules,
 	})
 	if err != nil {
 		return err

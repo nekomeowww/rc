@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -58,6 +59,42 @@ func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			return runRepositoryList(cmd.Context(), cmd.OutOrStdout(), kubeClient, namespace)
 		},
 	}
+}
+
+func newDeleteCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
+	return &cobra.Command{
+		Use:     "delete NAME",
+		Aliases: []string{"remove", "rm"},
+		Short:   "Delete a Repository and its owned storage and Jobs",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			config, namespace, err := kubeconfigFlags.Resolve()
+			if err != nil {
+				return err
+			}
+			scheme := runtime.NewScheme()
+			if err := repositoriesv1alpha1.AddToScheme(scheme); err != nil {
+				return fmt.Errorf("register Repository API types: %w", err)
+			}
+			kubeClient, err := client.New(config, client.Options{Scheme: scheme})
+			if err != nil {
+				return fmt.Errorf("create Kubernetes client: %w", err)
+			}
+
+			return runRepositoryDelete(cmd.Context(), kubeClient, namespace, args[0])
+		},
+	}
+}
+
+func runRepositoryDelete(ctx context.Context, kubeClient client.Client, namespace string, name string) error {
+	repository := &repositoriesv1alpha1.Repository{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+	}
+	if err := kubeClient.Delete(ctx, repository); err != nil {
+		return fmt.Errorf("delete Repository: %w", err)
+	}
+
+	return nil
 }
 
 func runRepositoryList(ctx context.Context, output io.Writer, kubeClient client.Client, namespace string) error {

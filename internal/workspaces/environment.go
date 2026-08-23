@@ -30,6 +30,24 @@ var excludedCallerEnvironment = map[string]struct{}{
 	"PATH": {}, "HOME": {}, "PWD": {}, "OLDPWD": {}, "USER": {}, "LOGNAME": {}, "SHELL": {},
 	"SHLVL": {}, "_": {}, "KUBECONFIG": {}, "XDG_RUNTIME_DIR": {}, "SSH_AUTH_SOCK": {},
 	"TERM": {}, "COLORTERM": {}, "LINES": {}, "COLUMNS": {}, "CODEX_HOME": {},
+	"TMP": {}, "TEMP": {}, "TMPDIR": {}, "COMMAND_MODE": {}, "GIT_ASKPASS": {},
+	"NODE_OPTIONS": {}, "PYTHONSTARTUP": {}, "PYTHON_BASIC_REPL": {}, "TERMINFO": {},
+	"TERMINFO_DIRS": {}, "USER_ZDOTDIR": {}, "ZDOTDIR": {}, "MallocNanoZone": {},
+	"OSLogRateLimit": {},
+	"CDPATH":         {}, "CLASSPATH": {}, "FPATH": {}, "GOPATH": {}, "GOROOT": {},
+	"INFOPATH": {}, "MANPATH": {}, "PERL5LIB": {}, "PYTHONHOME": {}, "PYTHONPATH": {},
+	"RUBYLIB": {}, "BUN_INSTALL": {}, "CURL_CA_BUNDLE": {}, "REQUESTS_CA_BUNDLE": {},
+}
+
+var excludedCallerEnvironmentPrefixes = []string{
+	"ATUIN_", "CODELLDB_", "CODEX_", "COPILOT_", "GEMINI_CLI_IDE_", "GHOSTTY_",
+	"HOMEBREW_", "MISE_", "NIX_", "NODE_REPL_TRUSTED_", "STARSHIP_", "SWIFTLY_",
+	"TERM_", "VSCODE_", "VOLTA_", "XDG_", "XPC_",
+}
+
+var excludedCallerEnvironmentSuffixes = []string{
+	"_PATH", "_PATHS", "_DIR", "_DIRS", "_HOME", "_ROOT", "_PREFIX", "_CELLAR",
+	"_REPOSITORY", "_FILE", "_SOCK",
 }
 
 // EnvironmentOptions describes caller pass-through and explicit precedence.
@@ -101,6 +119,19 @@ func parseEnvironment(entries []string) map[string]string {
 func callerEnvironmentExcluded(name string) bool {
 	if _, excluded := excludedCallerEnvironment[name]; excluded {
 		return true
+	}
+	if strings.HasPrefix(name, "_") {
+		return true
+	}
+	for _, prefix := range excludedCallerEnvironmentPrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	for _, suffix := range excludedCallerEnvironmentSuffixes {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
 	}
 
 	return strings.HasPrefix(name, "KUBERNETES_") || strings.HasPrefix(name, "RC_")

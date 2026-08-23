@@ -131,7 +131,7 @@ func (server *Server) handle(serverContext context.Context, connection net.Conn)
 		}
 		attachContext, cancel := context.WithCancel(serverContext)
 		defer cancel()
-		if err := server.supervisor.Attach(attachContext, request.ID, request.ClientID, &cancelOnEOFReader{reader: reader, cancel: cancel}, connection); errors.Is(err, ErrSlowClient) {
+		if err := server.supervisor.Attach(attachContext, request.ID, request.ClientID, &cancelOnEOFReader{reader: reader, cancel: cancel}, connection, request.Rows, request.Columns); errors.Is(err, ErrSlowClient) {
 			_, _ = fmt.Fprintf(connection, "\r\n[rc-kube: %s]\r\n", err)
 		}
 	default:

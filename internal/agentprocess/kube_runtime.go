@@ -32,6 +32,7 @@ const (
 	runtimeBridgeCommand = "rc-kube"
 	runtimeProcessGroup  = "process"
 	runtimeSocketFlag    = "--socket"
+	runtimeClientIDFlag  = "--client-id"
 )
 
 // PodExecutor is the Kubernetes Pod exec system boundary.
@@ -65,10 +66,14 @@ func (runtime *KubeRuntime) Stop(ctx context.Context, target Target, id string) 
 	return runtime.stateCommand(ctx, target, []string{runtimeBridgeCommand, runtimeProcessGroup, "stop", id, runtimeSocketFlag, DefaultSocketPath}, nil)
 }
 
-func (runtime *KubeRuntime) Attach(ctx context.Context, target Target, id string, clientID string, input io.Reader, output io.Writer, _ bool) error {
+func (runtime *KubeRuntime) Attach(ctx context.Context, target Target, id string, clientID string, input io.Reader, output io.Writer, _ bool, rows uint16, columns uint16) error {
 	// The child owns the PTY. The Kubernetes exec bridge stays a transparent
 	// byte stream so it does not introduce a second terminal line discipline.
-	return runtime.executor.Exec(ctx, target, []string{runtimeBridgeCommand, runtimeProcessGroup, "attach", id, runtimeSocketFlag, DefaultSocketPath, "--client-id", clientID}, input, output, output, false)
+	command := []string{runtimeBridgeCommand, runtimeProcessGroup, "attach", id, runtimeSocketFlag, DefaultSocketPath, runtimeClientIDFlag, clientID}
+	if rows > 0 && columns > 0 {
+		command = append(command, "--rows", fmt.Sprint(rows), "--columns", fmt.Sprint(columns))
+	}
+	return runtime.executor.Exec(ctx, target, command, input, output, output, false)
 }
 
 func (runtime *KubeRuntime) Logs(ctx context.Context, target Target, id string, output io.Writer) error {
@@ -76,7 +81,7 @@ func (runtime *KubeRuntime) Logs(ctx context.Context, target Target, id string, 
 }
 
 func (runtime *KubeRuntime) Resize(ctx context.Context, target Target, id string, clientID string, rows uint16, columns uint16) error {
-	command := []string{runtimeBridgeCommand, runtimeProcessGroup, "resize", id, runtimeSocketFlag, DefaultSocketPath, "--client-id", clientID, "--rows", fmt.Sprint(rows), "--columns", fmt.Sprint(columns)}
+	command := []string{runtimeBridgeCommand, runtimeProcessGroup, "resize", id, runtimeSocketFlag, DefaultSocketPath, runtimeClientIDFlag, clientID, "--rows", fmt.Sprint(rows), "--columns", fmt.Sprint(columns)}
 	return runtime.executor.Exec(ctx, target, command, nil, io.Discard, io.Discard, false)
 }
 

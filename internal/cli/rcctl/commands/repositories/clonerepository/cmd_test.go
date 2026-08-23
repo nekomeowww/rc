@@ -26,10 +26,18 @@ func TestCloneAcceptsRepositoryOptions(t *testing.T) {
 		"--ref", "refs/heads/main",
 		"--credential-ref", "gitlab-token",
 		"--name", "tools-main",
+		"--with-submodules",
+		"--recursive-submodules",
 	}))
 	require.NoError(t, command.Args(command, command.Flags().Args()))
 
 	assert.Equal(t, []string{testCloneURL}, command.Flags().Args())
+	withSubmodulesFlag := command.Flags().Lookup("with-submodules")
+	require.NotNil(t, withSubmodulesFlag, "register direct submodule flag")
+	recursiveSubmodulesFlag := command.Flags().Lookup("recursive-submodules")
+	require.NotNil(t, recursiveSubmodulesFlag, "register recursive submodule flag")
+	assert.Equal(t, "true", withSubmodulesFlag.Value.String())
+	assert.Equal(t, "true", recursiveSubmodulesFlag.Value.String())
 }
 
 func TestCloneDefaultsRepositorySize(t *testing.T) {

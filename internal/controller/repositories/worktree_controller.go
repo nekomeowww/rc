@@ -39,6 +39,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	"github.com/nekomeowww/rc/internal/runtimepolicy"
 )
 
 const (
@@ -49,6 +50,7 @@ const (
 	worktreeUIDLabel           = "repositories.rc.ayaka.io/worktree-uid"
 	worktreeManagedByLabel     = "app.kubernetes.io/managed-by"
 	worktreeManagedByValue     = "rc"
+	generatedWorkspaceLabel    = "workspaces.rc.ayaka.io/generated-for"
 	worktreeRequeueDelay       = 2 * time.Second
 )
 
@@ -168,7 +170,11 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "BootstrapFailed", message, claim.Name, repository.Status.VolumeClaimName, worktreePath)
 	}
 	if condition := jobCondition(job, batchv1.JobComplete); condition != nil && condition.Status == corev1.ConditionTrue {
-		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionTrue, "WorktreeReady", "Child volume and native Git worktree are ready", claim.Name, repository.Status.VolumeClaimName, worktreePath)
+		message := "Child volume and native Git worktree are ready"
+		if reusesRepositoryRoot(worktree) {
+			message = "Child volume and isolated Git checkout are ready"
+		}
+		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionTrue, "WorktreeReady", message, claim.Name, repository.Status.VolumeClaimName, worktreePath)
 	}
 
 	return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "Initializing", "Worktree bootstrap Job is running", claim.Name, repository.Status.VolumeClaimName, worktreePath)
@@ -292,7 +298,21 @@ func (r *WorktreeReconciler) labelWorktreePods(ctx context.Context, worktree *re
 }
 
 func worktreePath(worktree *repositoriesv1alpha1.Worktree) string {
+	if reusesRepositoryRoot(worktree) {
+		return workerMountPath
+	}
 	return worktreeBootstrapPath + "/" + worktree.Name
+}
+
+func reusesRepositoryRoot(worktree *repositoriesv1alpha1.Worktree) bool {
+	return worktree.Labels[generatedWorkspaceLabel] != "" &&
+		worktree.Spec.Branch != "" &&
+		worktree.Spec.ResetBranch == "" &&
+		worktree.Spec.Ref == "" &&
+		!worktree.Spec.Detach &&
+		!worktree.Spec.Orphan &&
+		!worktree.Spec.NoCheckout &&
+		!worktree.Spec.Lock
 }
 
 func worktreeBootstrapJobName(worktree *repositoriesv1alpha1.Worktree) string {
@@ -307,39 +327,42 @@ func worktreeBootstrapJobName(worktree *repositoriesv1alpha1.Worktree) string {
 }
 
 func worktreeBootstrapJob(worktree *repositoriesv1alpha1.Worktree, claimName, runnerImage string) *batchv1.Job {
-	gitArgs := []string{"worktree", "add"}
-	if worktree.Spec.Branch != "" {
-		gitArgs = append(gitArgs, "-b", worktree.Spec.Branch)
-	}
-	if worktree.Spec.ResetBranch != "" {
-		gitArgs = append(gitArgs, "-B", worktree.Spec.ResetBranch)
-	}
-	if worktree.Spec.Detach {
-		gitArgs = append(gitArgs, "--detach")
-	}
-	if worktree.Spec.Orphan {
-		gitArgs = append(gitArgs, "--orphan")
-	}
-	if worktree.Spec.NoCheckout {
-		gitArgs = append(gitArgs, "--no-checkout")
-	}
-	if worktree.Spec.Lock {
-		gitArgs = append(gitArgs, "--lock")
-		if worktree.Spec.LockReason != "" {
-			gitArgs = append(gitArgs, "--reason", worktree.Spec.LockReason)
+	bootstrapScript := worktreeBootstrapScript
+	gitArgs := []string{worktree.Spec.Branch}
+	if reusesRepositoryRoot(worktree) {
+		bootstrapScript = generatedWorktreeBootstrapScript
+	} else {
+		gitArgs = []string{"worktree", "add"}
+		if worktree.Spec.Branch != "" {
+			gitArgs = append(gitArgs, "-b", worktree.Spec.Branch)
 		}
-	}
+		if worktree.Spec.ResetBranch != "" {
+			gitArgs = append(gitArgs, "-B", worktree.Spec.ResetBranch)
+		}
+		if worktree.Spec.Detach {
+			gitArgs = append(gitArgs, "--detach")
+		}
+		if worktree.Spec.Orphan {
+			gitArgs = append(gitArgs, "--orphan")
+		}
+		if worktree.Spec.NoCheckout {
+			gitArgs = append(gitArgs, "--no-checkout")
+		}
+		if worktree.Spec.Lock {
+			gitArgs = append(gitArgs, "--lock")
+			if worktree.Spec.LockReason != "" {
+				gitArgs = append(gitArgs, "--reason", worktree.Spec.LockReason)
+			}
+		}
 
-	gitArgs = append(gitArgs, worktreePath(worktree))
-	if worktree.Spec.Ref != "" {
-		gitArgs = append(gitArgs, worktree.Spec.Ref)
+		gitArgs = append(gitArgs, worktreePath(worktree))
+		if worktree.Spec.Ref != "" {
+			gitArgs = append(gitArgs, worktree.Spec.Ref)
+		}
 	}
 
 	backoffLimit := int32(0)
 	ttlSecondsAfterFinished := worktreeBootstrapJobTTL
-	runAsNonRoot := true
-	runAsUser := int64(65532)
-	runAsGroup := int64(65532)
 	allowPrivilegeEscalation := false
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -357,21 +380,13 @@ func worktreeBootstrapJob(worktree *repositoriesv1alpha1.Worktree, claimName, ru
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{worktreeUIDLabel: string(worktree.UID)}},
 				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
-					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot: &runAsNonRoot,
-						RunAsUser:    &runAsUser,
-						RunAsGroup:   &runAsGroup,
-						FSGroup:      &runAsGroup,
-						SeccompProfile: &corev1.SeccompProfile{
-							Type: corev1.SeccompProfileTypeRuntimeDefault,
-						},
-					},
+					RestartPolicy:   corev1.RestartPolicyNever,
+					SecurityContext: runtimepolicy.AgentPodSecurityContext(),
 					Containers: []corev1.Container{{
 						Name:       "bootstrap",
 						Image:      runnerImage,
 						Command:    []string{"sh"},
-						Args:       append([]string{"-ceu", worktreeBootstrapScript, "worktree-bootstrap"}, gitArgs...),
+						Args:       append([]string{"-ceu", bootstrapScript, "worktree-bootstrap"}, gitArgs...),
 						WorkingDir: "/repository",
 						Env:        []corev1.EnvVar{{Name: "HOME", Value: "/tmp"}},
 						SecurityContext: &corev1.SecurityContext{
@@ -494,6 +509,12 @@ const worktreeBootstrapScript = `
 git config --global --add safe.directory /repository
 mkdir -p /repository/worktree
 git -C /repository worktree prune
-git -C /repository "$@"
+git -C /repository -c checkout.workers=8 -c checkout.thresholdForParallelism=100 "$@"
 git -C /repository worktree list --porcelain
+`
+
+const generatedWorktreeBootstrapScript = `
+git config --global --add safe.directory /repository
+git -C /repository checkout -b "$1"
+git -C /repository rev-parse --verify HEAD
 `

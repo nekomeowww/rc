@@ -24,6 +24,7 @@ RUN apt-get update \
     && git config --system --add safe.directory '*'
 COPY --from=builder /out/rcctl /usr/local/bin/rcctl
 COPY --from=builder /out/rc-kube /usr/local/bin/rc-kube
+ENV SHELL=/bin/bash
 USER 1000:1000
 WORKDIR /workspace
 ENTRYPOINT ["rc-kube"]

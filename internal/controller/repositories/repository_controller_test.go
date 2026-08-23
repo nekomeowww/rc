@@ -19,6 +19,7 @@ package repositories
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -77,6 +78,11 @@ var _ = Describe("Repository Controller", func() {
 		Expect(bootstrapJob.Spec.Template.Spec.Containers[0].Image).To(Equal("ghcr.io/example/rc/runner:test"))
 		Expect(bootstrapJob.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ClaimName).To(Equal(repositoryName))
 		Expect(bootstrapJob.Spec.Template.Spec.Containers[0].Args).To(ContainElement(testRemoteURL))
+		Expect(bootstrapJob.Spec.Template.Spec.SecurityContext.RunAsUser).To(HaveValue(Equal(int64(1000))))
+		Expect(bootstrapJob.Spec.Template.Spec.SecurityContext.RunAsGroup).To(HaveValue(Equal(int64(1000))))
+		Expect(bootstrapJob.Spec.Template.Spec.SecurityContext.FSGroup).To(HaveValue(Equal(int64(1000))))
+		Expect(bootstrapJob.Spec.Template.Spec.SecurityContext.FSGroupChangePolicy).To(HaveValue(Equal(corev1.FSGroupChangeOnRootMismatch)))
+		Expect(bootstrapJob.Spec.Template.Spec.Containers[0].Args[1]).To(ContainSubstring("checkout.workers 8"))
 
 		claim.Status.Phase = corev1.ClaimBound
 		Expect(k8sClient.Status().Update(ctx, claim)).To(Succeed())
@@ -162,6 +168,73 @@ var _ = Describe("Repository Controller", func() {
 		Expect(job.Spec.Template.Spec.Volumes[1].Secret.SecretName).To(Equal(credentialName))
 		Expect(job.Spec.Template.Spec.Volumes[2].Secret.SecretName).To(Equal(credentialName))
 		Expect(container.Args).To(ContainElement("ssh"))
+	})
+
+	It("does not initialize submodules unless requested", func() {
+		repository := &repositoriesv1alpha1.Repository{
+			ObjectMeta: metav1.ObjectMeta{Name: "repository-bootstrap-without-submodules", Namespace: testNamespace, Generation: 1},
+			Spec: repositoriesv1alpha1.RepositorySpec{
+				Remote: repositoriesv1alpha1.RepositoryRemoteSpec{URL: testRemoteURL},
+				Storage: repositoriesv1alpha1.RepositoryStorageSpec{
+					StorageClassName: testStorageClassName,
+					Size:             resource.MustParse("1Gi"),
+				},
+			},
+		}
+
+		job := repositoryBootstrapJob(repository, "ghcr.io/example/rc/runner:test", nil)
+		args := job.Spec.Template.Spec.Containers[0].Args
+
+		Expect(args[5]).To(Equal(repositorySubmoduleModeNone))
+	})
+
+	It("initializes direct submodules when requested", func() {
+		repository := &repositoriesv1alpha1.Repository{
+			ObjectMeta: metav1.ObjectMeta{Name: "repository-bootstrap-direct-submodules", Namespace: testNamespace, Generation: 1},
+			Spec: repositoriesv1alpha1.RepositorySpec{
+				Remote:     repositoriesv1alpha1.RepositoryRemoteSpec{URL: testRemoteURL},
+				Submodules: &repositoriesv1alpha1.RepositorySubmodulesSpec{},
+				Storage: repositoriesv1alpha1.RepositoryStorageSpec{
+					StorageClassName: testStorageClassName,
+					Size:             resource.MustParse("1Gi"),
+				},
+			},
+		}
+
+		job := repositoryBootstrapJob(repository, "ghcr.io/example/rc/runner:test", nil)
+		args := job.Spec.Template.Spec.Containers[0].Args
+
+		Expect(args[5]).To(Equal(repositorySubmoduleModeDirect))
+	})
+
+	It("initializes nested submodules recursively after synchronizing the checkout", func() {
+		repository := &repositoriesv1alpha1.Repository{
+			ObjectMeta: metav1.ObjectMeta{Name: "repository-bootstrap-submodules", Namespace: testNamespace, Generation: 1},
+			Spec: repositoriesv1alpha1.RepositorySpec{
+				Remote: repositoriesv1alpha1.RepositoryRemoteSpec{URL: testRemoteURL},
+				Submodules: &repositoriesv1alpha1.RepositorySubmodulesSpec{
+					Recursive: true,
+				},
+				Storage: repositoriesv1alpha1.RepositoryStorageSpec{
+					StorageClassName: testStorageClassName,
+					Size:             resource.MustParse("1Gi"),
+				},
+			},
+		}
+
+		job := repositoryBootstrapJob(repository, "ghcr.io/example/rc/runner:test", nil)
+		args := job.Spec.Template.Spec.Containers[0].Args
+		script := args[1]
+		resetIndex := strings.Index(script, "git -C /repository reset --hard")
+		syncIndex := strings.Index(script, "git -C /repository submodule sync --recursive")
+		updateIndex := strings.Index(script, "git -C /repository submodule update --init --recursive")
+		verifyIndex := strings.Index(script, "git -C /repository rev-parse --verify HEAD")
+
+		Expect(args[5]).To(Equal(repositorySubmoduleModeRecursive))
+		Expect(resetIndex).To(BeNumerically(">=", 0), "reset the parent checkout")
+		Expect(syncIndex).To(BeNumerically(">", resetIndex), "sync nested submodule URLs after reset")
+		Expect(updateIndex).To(BeNumerically(">", syncIndex), "initialize nested submodules after syncing URLs")
+		Expect(verifyIndex).To(BeNumerically(">", updateIndex), "report success only after submodules are ready")
 	})
 
 	It("accepts a full Git ref or commit and rejects a shorthand ref", func() {

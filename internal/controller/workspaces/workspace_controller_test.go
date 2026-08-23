@@ -77,7 +77,7 @@ func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 		},
 		Status: repositoriesv1alpha1.WorktreeStatus{
 			VolumeClaimName: "rc-main",
-			WorktreePath:    "/repository/worktree",
+			WorktreePath:    "/repository",
 			Conditions: []metav1.Condition{{
 				Type: repositoriesv1alpha1.WorktreeConditionReady, Status: metav1.ConditionTrue, Reason: "WorktreeReady",
 			}},
@@ -117,6 +117,9 @@ func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 	pod := new(corev1.Pod)
 	requirements.NoError(kubeClient.Get(ctx, key, pod), "get Workspace runtime Pod")
 	requirements.Len(pod.Spec.Containers, 1, "runtime Pod has one supervisor container")
+	requirements.NotNil(pod.Spec.SecurityContext, "runtime Pod has a security context")
+	requirements.NotNil(pod.Spec.SecurityContext.FSGroupChangePolicy, "runtime skips recursive ownership changes when volume roots already match")
+	assertions.Equal(corev1.FSGroupChangeOnRootMismatch, *pod.Spec.SecurityContext.FSGroupChangePolicy)
 	requirements.NotNil(pod.Spec.Containers[0].SecurityContext, "runtime container has a SecurityContext")
 	requirements.NotNil(pod.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation, "runtime container declares privilege escalation policy")
 	assertions.Equal(environment.Status.CurrentImage, pod.Spec.Containers[0].Image, "use captured Environment image")
@@ -132,7 +135,7 @@ func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 	}
 	assertions.Equal("/home/agent", pod.Spec.Containers[0].VolumeMounts[0].MountPath, "mount persistent home")
 	assertions.Equal("/workspace/rc", pod.Spec.Containers[0].VolumeMounts[1].MountPath, "mount selected Worktree")
-	assertions.Equal("worktree", pod.Spec.Containers[0].VolumeMounts[1].SubPath, "mount native Git worktree directory")
+	assertions.Empty(pod.Spec.Containers[0].VolumeMounts[1].SubPath, "mount a generated Worktree clone from its volume root")
 	assertions.True(metav1.IsControlledBy(pod, workspace), "Workspace owns runtime Pod")
 
 	serviceAccount := new(corev1.ServiceAccount)

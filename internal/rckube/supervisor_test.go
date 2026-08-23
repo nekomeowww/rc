@@ -269,19 +269,33 @@ func TestRecentInputControlsSharedTerminalViewport(t *testing.T) {
 	require.Equal(t, "second", process.foregroundClient, "resize alone does not change foreground")
 }
 
-func TestTerminalAttachRendersCanonicalScreenInsteadOfRawTranscript(t *testing.T) {
+func TestTerminalAttachStreamsRawPTYBytes(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
 	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
-	request := processruntime.StartRequest{ID: "screen", UID: testProcessUID, Command: []string{"sh", "-c", "printf 'first\\rsecond'"}, TTY: true}
+	request := processruntime.StartRequest{
+		ID: "raw-terminal", UID: testProcessUID,
+		Command: []string{"sh", "-c", "sleep 0.1; printf '\\033[31mraw-color\\033[0m'"}, TTY: true,
+	}
 	_, err := supervisor.Start(request)
 	requirements.NoError(err, "start terminal process")
-	requirements.Eventually(func() bool {
-		state, inspectErr := supervisor.Inspect(request.ID)
-		return inspectErr == nil && state.Phase == phaseExited
-	}, 3*time.Second, 10*time.Millisecond, "wait for terminal process")
-	var rendered bytes.Buffer
-	requirements.NoError(supervisor.Attach(context.Background(), request.ID, "viewer", nil, &rendered), "render terminal screen")
-	requirements.Contains(rendered.String(), "second", "render final screen content")
-	requirements.NotContains(rendered.String(), "first\rsecond", "do not replay raw control stream")
+	var attached bytes.Buffer
+	requirements.NoError(supervisor.Attach(context.Background(), request.ID, "viewer", nil, &attached, 24, 80), "attach to live terminal stream")
+	requirements.Contains(attached.String(), "\x1b[31mraw-color\x1b[0m", "preserve the child PTY ANSI sequence byte-for-byte")
+}
+
+func TestTerminalAttachAppliesInitialSizeBeforeForwardingInput(t *testing.T) {
+	t.Parallel()
+	requirements := require.New(t)
+	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
+	request := processruntime.StartRequest{
+		ID: "initial-size", UID: testProcessUID,
+		Command: []string{"sh", "-c", "read line; stty size"}, TTY: true,
+	}
+	_, err := supervisor.Start(request)
+	requirements.NoError(err, "start terminal process")
+	var attached bytes.Buffer
+	input := bytes.NewBufferString("continue\n")
+	requirements.NoError(supervisor.Attach(context.Background(), request.ID, "viewer", input, &attached, 42, 120), "attach with local terminal size")
+	requirements.Contains(attached.String(), "42 120", "resize the child PTY before forwarding attached input")
 }

@@ -16,6 +16,27 @@ import (
 )
 
 var _ = Describe("Worktree Controller", func() {
+	It("reuses the cloned Repository root for generated Workspace Worktrees", func() {
+		worktree := &repositoriesv1alpha1.Worktree{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "generated-worktree",
+				Namespace: testNamespace,
+				Labels:    map[string]string{generatedWorkspaceLabel: "generated-workspace"},
+			},
+			Spec: repositoriesv1alpha1.WorktreeSpec{
+				RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: "repository-parent"},
+				Branch:        "rc/generated-workspace/repository-parent",
+			},
+		}
+
+		job := worktreeBootstrapJob(worktree, worktree.Name, "ghcr.io/example/rc/runner:test")
+		container := job.Spec.Template.Spec.Containers[0]
+		Expect(worktreePath(worktree)).To(Equal(workerMountPath))
+		Expect(container.Args).To(ContainElement(worktree.Spec.Branch))
+		Expect(container.Args[1]).To(ContainSubstring("checkout -b"))
+		Expect(container.Args[1]).NotTo(ContainSubstring("worktree add"))
+	})
+
 	It("clones the Repository PVC and creates a native Git worktree Job", func() {
 		ctx := context.Background()
 		const (
@@ -88,6 +109,11 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(container.Args).To(ContainElement("-b"))
 		Expect(container.Args).To(ContainElement("feature/worktree"))
 		Expect(container.Args).To(ContainElement(worktreePath(worktree)))
+		Expect(container.Args[1]).To(ContainSubstring("checkout.workers=8"))
+		Expect(job.Spec.Template.Spec.SecurityContext.RunAsUser).To(HaveValue(Equal(int64(1000))))
+		Expect(job.Spec.Template.Spec.SecurityContext.RunAsGroup).To(HaveValue(Equal(int64(1000))))
+		Expect(job.Spec.Template.Spec.SecurityContext.FSGroup).To(HaveValue(Equal(int64(1000))))
+		Expect(job.Spec.Template.Spec.SecurityContext.FSGroupChangePolicy).To(HaveValue(Equal(corev1.FSGroupChangeOnRootMismatch)))
 		Expect(job.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ClaimName).To(Equal(worktreeName))
 		Expect(job.Spec.Template.Labels[worktreeUIDLabel]).To(Equal(string(worktree.UID)))
 		Expect(metav1.IsControlledBy(job, worktree)).To(BeTrue())

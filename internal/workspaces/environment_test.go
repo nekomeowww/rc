@@ -54,6 +54,47 @@ func TestBuildProcessEnvironmentExcludesRuntimeAndLocalPathValues(t *testing.T) 
 	assertions.NotContains(values, "RC_INTERNAL", "exclude rc runtime values")
 }
 
+func TestBuildProcessEnvironmentExcludesHostRuntimeAndFilesystemValues(t *testing.T) {
+	t.Parallel()
+	assertions := assert.New(t)
+	requirements := require.New(t)
+
+	values, err := BuildProcessEnvironment(EnvironmentOptions{
+		Caller: []string{
+			"TMPDIR=/var/folders/host/T", "TMP=/private/tmp", "TEMP=/private/tmp",
+			"HOMEBREW_PREFIX=/opt/homebrew", "PNPM_HOME=/Users/person/Library/pnpm",
+			"CUSTOM_CONFIG_FILE=/Users/person/.config/tool", "XDG_DATA_DIRS=/opt/homebrew/share",
+			"GIT_ASKPASS=/Applications/Editor.app/askpass", "PYTHONSTARTUP=/Users/person/.pythonrc",
+			"NODE_OPTIONS=--require /Users/person/runtime-hook.js",
+			"VSCODE_GIT_IPC_HANDLE=/var/folders/host/vscode.sock", "GEMINI_CLI_IDE_AUTH_TOKEN=local-token",
+			"CODEX_THREAD_ID=local-thread", "ATUIN_SESSION=local-session", "__MISE_DIFF=local-state",
+			"AWS_PROFILE=development", "HTTP_PROXY=http://proxy.example:8080",
+		},
+	})
+	requirements.NoError(err, "build process environment")
+
+	for _, name := range []string{
+		"TMPDIR", "TMP", "TEMP", "HOMEBREW_PREFIX", "PNPM_HOME", "CUSTOM_CONFIG_FILE",
+		"XDG_DATA_DIRS", "GIT_ASKPASS", "PYTHONSTARTUP", "NODE_OPTIONS", "VSCODE_GIT_IPC_HANDLE",
+		"GEMINI_CLI_IDE_AUTH_TOKEN", "CODEX_THREAD_ID", "ATUIN_SESSION", "__MISE_DIFF",
+	} {
+		assertions.NotContains(values, name, "exclude host-only environment variable %s", name)
+	}
+	assertions.Equal("development", values["AWS_PROFILE"], "preserve an ordinary caller setting")
+	assertions.Equal("http://proxy.example:8080", values["HTTP_PROXY"], "preserve an ordinary network setting")
+}
+
+func TestBuildProcessEnvironmentExplicitlyRestoresExcludedHostVariable(t *testing.T) {
+	t.Parallel()
+
+	values, err := BuildProcessEnvironment(EnvironmentOptions{
+		Caller:   []string{"TMPDIR=/var/folders/host/T"},
+		Explicit: []string{"TMPDIR=/tmp"},
+	})
+	require.NoError(t, err, "build process environment")
+	assert.Equal(t, "/tmp", values["TMPDIR"], "allow an explicit container-local temporary directory")
+}
+
 func TestBuildProcessEnvironmentCanDisablePassthrough(t *testing.T) {
 	t.Parallel()
 	values, err := BuildProcessEnvironment(EnvironmentOptions{

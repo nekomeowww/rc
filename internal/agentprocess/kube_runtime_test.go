@@ -27,6 +27,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const testProcessID = "codex-01"
+
 type recordingPodExecutor struct {
 	target  Target
 	command []string
@@ -47,10 +49,10 @@ func TestKubeRuntimeStartsThroughRcKubeBridge(t *testing.T) {
 	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
-	executor := &recordingPodExecutor{output: State{ID: "codex-01", UID: "uid-01", Phase: "Running", PID: 17}}
+	executor := &recordingPodExecutor{output: State{ID: testProcessID, UID: "uid-01", Phase: "Running", PID: 17}}
 	runtime := NewKubeRuntime(executor)
 	target := Target{Namespace: "development", Pod: "coding", Container: runtimeBridgeCommand}
-	request := StartRequest{ID: "codex-01", UID: "uid-01", Command: []string{"codex", "task"}}
+	request := StartRequest{ID: testProcessID, UID: "uid-01", Command: []string{"codex", "task"}}
 
 	state, err := runtime.Start(context.Background(), target, request)
 	requirements.NoError(err, "start through Pod exec bridge")
@@ -60,4 +62,22 @@ func TestKubeRuntimeStartsThroughRcKubeBridge(t *testing.T) {
 	assertions.Equal(target, executor.target, "exec in selected runtime")
 	assertions.Equal([]string{runtimeBridgeCommand, runtimeProcessGroup, "start", runtimeSocketFlag, DefaultSocketPath}, executor.command, "invoke versioned bridge command")
 	assertions.JSONEq(string(expectedRequest), string(bytes.TrimSpace(executor.input)), "send exact start request")
+}
+
+func TestKubeRuntimeAttachesWithInitialTerminalSize(t *testing.T) {
+	t.Parallel()
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	executor := &recordingPodExecutor{}
+	runtime := NewKubeRuntime(executor)
+	target := Target{Namespace: "development", Pod: "coding", Container: runtimeBridgeCommand}
+
+	err := runtime.Attach(context.Background(), target, testProcessID, "terminal-01", nil, io.Discard, true, 42, 120)
+	requirements.NoError(err, "attach through Pod exec bridge")
+	assertions.Equal(target, executor.target, "exec in selected runtime")
+	assertions.Equal(
+		[]string{runtimeBridgeCommand, runtimeProcessGroup, "attach", testProcessID, runtimeSocketFlag, DefaultSocketPath, runtimeClientIDFlag, "terminal-01", "--rows", "42", "--columns", "120"},
+		executor.command,
+		"send the initial terminal size with the attach request",
+	)
 }

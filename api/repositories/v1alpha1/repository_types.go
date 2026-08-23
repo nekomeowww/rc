@@ -64,6 +64,14 @@ type RepositoryRemoteSpec struct {
 	// consumes this source contract.
 }
 
+// RepositorySubmodulesSpec configures Git submodule initialization during
+// Repository synchronization. The presence of this object enables submodules.
+type RepositorySubmodulesSpec struct {
+	// recursive initializes nested submodules in addition to direct submodules.
+	// +optional
+	Recursive bool `json:"recursive,omitempty"`
+}
+
 // RepositoryStorageSpec describes the persistent parent volume.
 // +kubebuilder:validation:XValidation:rule="quantity(self.size).isGreaterThan(quantity('0'))",message="size must be greater than zero"
 type RepositoryStorageSpec struct {
@@ -89,6 +97,11 @@ type RepositorySpec struct {
 	// +kubebuilder:validation:Pattern="^(refs/.+|[0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"
 	// +optional
 	Ref string `json:"ref,omitempty"`
+
+	// submodules configures optional Git submodule initialization. When omitted,
+	// the Repository synchronizes only the parent checkout.
+	// +optional
+	Submodules *RepositorySubmodulesSpec `json:"submodules,omitempty"`
 
 	// storage configures the persistent parent volume.
 	// +required

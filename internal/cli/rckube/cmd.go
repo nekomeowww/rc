@@ -123,16 +123,20 @@ func newStateCommand(action string) *cobra.Command {
 func newAttachCommand() *cobra.Command {
 	var socketPath string
 	var clientID string
+	var rows uint16
+	var columns uint16
 	command := &cobra.Command{
 		Use:   "attach ID",
 		Short: "Attach stdin and stdout to a supervised process",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(command *cobra.Command, arguments []string) error {
-			return runtime.NewClient(socketPath).Attach(command.Context(), arguments[0], clientID, command.InOrStdin(), command.OutOrStdout())
+			return runtime.NewClient(socketPath).Attach(command.Context(), arguments[0], clientID, command.InOrStdin(), command.OutOrStdout(), rows, columns)
 		},
 	}
 	command.Flags().StringVar(&socketPath, "socket", processruntime.DefaultSocketPath, "Unix socket path")
 	command.Flags().StringVar(&clientID, "client-id", "", "Stable identity for foreground terminal arbitration")
+	command.Flags().Uint16Var(&rows, "rows", 0, "Initial terminal rows")
+	command.Flags().Uint16Var(&columns, "columns", 0, "Initial terminal columns")
 
 	return command
 }

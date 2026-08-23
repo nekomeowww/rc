@@ -69,8 +69,8 @@ func (client *Client) Logs(ctx context.Context, id string, output io.Writer) err
 	return err
 }
 
-func (client *Client) Attach(ctx context.Context, id string, clientID string, input io.Reader, output io.Writer) error {
-	connection, reader, response, err := client.open(ctx, protocolRequest{Action: "attach", ID: id, ClientID: clientID})
+func (client *Client) Attach(ctx context.Context, id string, clientID string, input io.Reader, output io.Writer, rows uint16, columns uint16) error {
+	connection, reader, response, err := client.open(ctx, protocolRequest{Action: "attach", ID: id, ClientID: clientID, Rows: rows, Columns: columns})
 	if err != nil {
 		return err
 	}

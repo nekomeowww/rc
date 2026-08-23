@@ -117,6 +117,16 @@ spec:
                 x-kubernetes-validations:
                 - message: size must be greater than zero
                   rule: quantity(self.size).isGreaterThan(quantity('0'))
+              submodules:
+                description: |-
+                  submodules configures optional Git submodule initialization. When omitted,
+                  the Repository synchronizes only the parent checkout.
+                properties:
+                  recursive:
+                    description: recursive initializes nested submodules in addition
+                      to direct submodules.
+                    type: boolean
+                type: object
             required:
             - remote
             - storage

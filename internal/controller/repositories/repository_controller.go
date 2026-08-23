@@ -37,14 +37,18 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
+	"github.com/nekomeowww/rc/internal/runtimepolicy"
 )
 
 const (
-	repositoryBootstrapJobSuffix = "-bootstrap-"
-	repositoryCredentialRoot     = "/run/rc/credentials"
-	repositoryManagedByLabel     = "app.kubernetes.io/managed-by"
-	repositoryManagedByValue     = "rc"
-	repositoryNameLabel          = "rc.ayaka.io/repository"
+	repositoryBootstrapJobSuffix     = "-bootstrap-"
+	repositoryCredentialRoot         = "/run/rc/credentials"
+	repositoryManagedByLabel         = "app.kubernetes.io/managed-by"
+	repositoryManagedByValue         = "rc"
+	repositoryNameLabel              = "rc.ayaka.io/repository"
+	repositorySubmoduleModeNone      = "none"
+	repositorySubmoduleModeDirect    = "direct"
+	repositorySubmoduleModeRecursive = "recursive"
 )
 
 // RepositoryReconciler reconciles a Repository object.
@@ -284,21 +288,19 @@ func repositoryBootstrapJob(
 	credential *configsv1alpha1.Credential,
 ) *batchv1.Job {
 	auth := repositoryBootstrapAuth(credential)
-	args := make([]string, 0, 7+len(auth.headerArgs))
+	args := make([]string, 0, 8+len(auth.headerArgs))
 	args = append(args,
 		"-ceu",
 		repositoryBootstrapScript,
 		"repository-bootstrap",
 		repository.Spec.Remote.URL,
 		repository.Spec.Ref,
+		repositorySubmoduleMode(repository),
 		auth.mode,
 		strconv.Itoa(len(auth.headerArgs)/2),
 	)
 	args = append(args, auth.headerArgs...)
 	backoffLimit := int32(0)
-	runAsNonRoot := true
-	runAsUser := int64(65532)
-	runAsGroup := int64(65532)
 	allowPrivilegeEscalation := false
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -314,16 +316,8 @@ func repositoryBootstrapJob(
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"rc.ayaka.io/repository": repository.Name}},
 				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
-					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot: &runAsNonRoot,
-						RunAsUser:    &runAsUser,
-						RunAsGroup:   &runAsGroup,
-						FSGroup:      &runAsGroup,
-						SeccompProfile: &corev1.SeccompProfile{
-							Type: corev1.SeccompProfileTypeRuntimeDefault,
-						},
-					},
+					RestartPolicy:   corev1.RestartPolicyNever,
+					SecurityContext: runtimepolicy.AgentPodSecurityContext(),
 					Containers: []corev1.Container{{
 						Name:         "bootstrap",
 						Image:        runnerImage,
@@ -409,6 +403,17 @@ func repositoryBootstrapAuth(credential *configsv1alpha1.Credential) repositoryB
 	return auth
 }
 
+func repositorySubmoduleMode(repository *repositoriesv1alpha1.Repository) string {
+	if repository.Spec.Submodules == nil {
+		return repositorySubmoduleModeNone
+	}
+	if repository.Spec.Submodules.Recursive {
+		return repositorySubmoduleModeRecursive
+	}
+
+	return repositorySubmoduleModeDirect
+}
+
 func jobCondition(job *batchv1.Job, conditionType batchv1.JobConditionType) *batchv1.JobCondition {
 	for index := range job.Status.Conditions {
 		condition := &job.Status.Conditions[index]
@@ -423,9 +428,10 @@ func jobCondition(job *batchv1.Job, conditionType batchv1.JobConditionType) *bat
 const repositoryBootstrapScript = `
 remote="$1"
 ref="$2"
-auth_mode="$3"
-header_count="$4"
-shift 4
+submodule_mode="$3"
+auth_mode="$4"
+header_count="$5"
+shift 5
 
 case "$auth_mode" in
 none|ssh)
@@ -462,6 +468,8 @@ esac
 
 git config --global --add safe.directory /repository
 git -C /repository init
+git -C /repository config checkout.workers 8
+git -C /repository config checkout.thresholdForParallelism 100
 if git -C /repository remote get-url origin >/dev/null 2>&1; then
   git -C /repository remote set-url origin "$remote"
 else
@@ -492,6 +500,22 @@ fi
 
 git -C /repository reset --hard "$target"
 git -C /repository clean -ffdx
+case "$submodule_mode" in
+none)
+  ;;
+direct)
+  git -C /repository submodule sync
+  git -C /repository submodule update --init
+  ;;
+recursive)
+  git -C /repository submodule sync --recursive
+  git -C /repository submodule update --init --recursive
+  ;;
+*)
+  echo "unsupported Repository submodule mode" >&2
+  exit 64
+  ;;
+esac
 git -C /repository rev-parse --verify HEAD
 `
 

@@ -9,6 +9,8 @@ spec:
   remote:
     url: https://github.com/nekomeowww/rc.git
   ref: refs/heads/main
+  submodules:
+    recursive: true
   storage:
     storageClassName: truenas-nfs
     size: 10Gi

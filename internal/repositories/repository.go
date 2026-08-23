@@ -26,6 +26,10 @@ type CloneRequest struct {
 	StorageClass  string
 	Size          resource.Quantity
 	CredentialRef string
+	// WithSubmodules initializes direct Git submodules. RecursiveSubmodules
+	// implies WithSubmodules and also initializes nested submodules.
+	WithSubmodules      bool
+	RecursiveSubmodules bool
 }
 
 // RepositoryClient creates Repository resources and observes their bootstrap
@@ -66,6 +70,11 @@ func (c *RepositoryClient) Clone(ctx context.Context, request CloneRequest) (*re
 	if request.CredentialRef != "" {
 		repository.Spec.Remote.CredentialRef = &repositoriesv1alpha1.RepositoryCredentialReference{
 			Name: request.CredentialRef,
+		}
+	}
+	if request.WithSubmodules || request.RecursiveSubmodules {
+		repository.Spec.Submodules = &repositoriesv1alpha1.RepositorySubmodulesSpec{
+			Recursive: request.RecursiveSubmodules,
 		}
 	}
 

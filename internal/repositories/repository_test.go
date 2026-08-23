@@ -3,6 +3,7 @@ package repositories
 import (
 	"context"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -17,8 +18,10 @@ import (
 )
 
 const (
-	repositoryTestNamespace = "default"
-	repositoryTestName      = "gitlab-com-acme-tools"
+	repositoryTestNamespace    = "default"
+	repositoryTestName         = "gitlab-com-acme-tools"
+	repositoryCloneTestURL     = "https://gitlab.com/acme/platform/tools.git"
+	repositoryTestStorageClass = "truenas-nfs"
 )
 
 func TestRepositoryClientCloneCreatesRepository(t *testing.T) {
@@ -31,9 +34,9 @@ func TestRepositoryClientCloneCreatesRepository(t *testing.T) {
 
 	repository, err := repositoryClient.Clone(context.Background(), CloneRequest{
 		Namespace:     repositoryTestNamespace,
-		URL:           "https://gitlab.com/acme/platform/tools.git",
+		URL:           repositoryCloneTestURL,
 		Ref:           "refs/heads/main",
-		StorageClass:  "truenas-nfs",
+		StorageClass:  repositoryTestStorageClass,
 		Size:          resource.MustParse("10Gi"),
 		CredentialRef: "gitlab-token",
 	})
@@ -43,9 +46,9 @@ func TestRepositoryClientCloneCreatesRepository(t *testing.T) {
 
 	persisted := new(repositoriesv1alpha1.Repository)
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(repository), persisted))
-	assert.Equal(t, "https://gitlab.com/acme/platform/tools.git", persisted.Spec.Remote.URL)
+	assert.Equal(t, repositoryCloneTestURL, persisted.Spec.Remote.URL)
 	assert.Equal(t, "refs/heads/main", persisted.Spec.Ref)
-	assert.Equal(t, "truenas-nfs", persisted.Spec.Storage.StorageClassName)
+	assert.Equal(t, repositoryTestStorageClass, persisted.Spec.Storage.StorageClassName)
 	assert.Equal(t, resource.MustParse("10Gi"), persisted.Spec.Storage.Size)
 	assert.Equal(t, &repositoriesv1alpha1.RepositoryCredentialReference{Name: "gitlab-token"}, persisted.Spec.Remote.CredentialRef)
 }
@@ -59,14 +62,52 @@ func TestRepositoryClientCloneUsesCustomName(t *testing.T) {
 
 	repository, err := (&RepositoryClient{Client: kubeClient}).Clone(context.Background(), CloneRequest{
 		Namespace:    repositoryTestNamespace,
-		URL:          "https://gitlab.com/acme/platform/tools.git",
+		URL:          repositoryCloneTestURL,
 		Name:         "tools-main",
-		StorageClass: "truenas-nfs",
+		StorageClass: repositoryTestStorageClass,
 		Size:         resource.MustParse("10Gi"),
 	})
 
 	require.NoError(t, err)
 	assert.Equal(t, "tools-main", repository.Name)
+}
+
+func TestRepositoryClientCloneMapsSubmoduleOptions(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name                string
+		withSubmodules      bool
+		recursiveSubmodules bool
+		wantSubmodules      *repositoriesv1alpha1.RepositorySubmodulesSpec
+	}{
+		{name: "Disabled"},
+		{name: "Direct", withSubmodules: true, wantSubmodules: &repositoriesv1alpha1.RepositorySubmodulesSpec{}},
+		{name: "RecursiveImpliesEnabled", recursiveSubmodules: true, wantSubmodules: &repositoriesv1alpha1.RepositorySubmodulesSpec{Recursive: true}},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			scheme := runtime.NewScheme()
+			require.NoError(t, repositoriesv1alpha1.AddToScheme(scheme))
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+			repositoryClient := &RepositoryClient{Client: kubeClient}
+
+			repository, err := repositoryClient.Clone(context.Background(), CloneRequest{
+				Namespace:           repositoryTestNamespace,
+				URL:                 repositoryCloneTestURL,
+				Name:                "tools-" + strings.ToLower(testCase.name),
+				StorageClass:        repositoryTestStorageClass,
+				Size:                resource.MustParse("10Gi"),
+				WithSubmodules:      testCase.withSubmodules,
+				RecursiveSubmodules: testCase.recursiveSubmodules,
+			})
+
+			require.NoError(t, err)
+			assert.Equal(t, testCase.wantSubmodules, repository.Spec.Submodules)
+		})
+	}
 }
 
 func TestRepositoryClientWaitReturnsWhenRepositoryIsReady(t *testing.T) {

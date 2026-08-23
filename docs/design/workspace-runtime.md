@@ -288,6 +288,15 @@ scheduling settings such as node selection, affinity, tolerations, and
 RuntimeClass. The CLI should expose common CPU, memory, and accelerator flags
 and leave uncommon scheduling configuration to manifests.
 
+`workspace create`, `agent run`, and `agent exec` expose GPU requests. `--gpu`
+sets the `nvidia.com/gpu` count and `--gpu-vram` independently sets the
+`nvidia.com/gpumem` quantity. `--gpu-resource NAME=QUANTITY` is repeatable and
+adds a vendor-specific Kubernetes extended resource directly. rcctl writes
+each selected GPU resource to both runtime container requests and limits. When
+an Agent Process targets an existing Workspace, these flags are requirements:
+the command rejects a Workspace that does not already provide the requested
+quantities instead of mutating its runtime topology.
+
 ### Start, suspend, and topology changes
 
 A Workspace has a desired runtime state:

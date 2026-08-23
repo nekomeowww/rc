@@ -22,6 +22,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -36,6 +37,10 @@ const runnerTestNamespace = "development"
 
 const runnerTestImage = "workspace:test"
 
+const runnerTestExistingWorkspace = "existing"
+
+const runnerTestWorkspaceReadyReason = "WorkspaceReady"
+
 func TestRunnerRejectsRepositoryRequirementMissingFromExistingWorkspace(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
@@ -43,9 +48,9 @@ func TestRunnerRejectsRepositoryRequirementMissingFromExistingWorkspace(t *testi
 	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme), "register Repository API types")
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
 	workspace := &workspacesv1alpha1.Workspace{
-		ObjectMeta: metav1.ObjectMeta{Name: "existing", Namespace: runnerTestNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: runnerTestExistingWorkspace, Namespace: runnerTestNamespace},
 		Status: workspacesv1alpha1.WorkspaceStatus{Conditions: []metav1.Condition{{
-			Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionTrue, Reason: "WorkspaceReady",
+			Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionTrue, Reason: runnerTestWorkspaceReadyReason,
 		}}},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace).Build()
@@ -92,15 +97,22 @@ func TestRunnerCreatesGeneratedWorkspaceAndWorktreeForRepository(t *testing.T) {
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repository, environment).Build()
 	runner := &Runner{Client: kubeClient, NameGenerator: func(string) string { return "codex-generated" }}
+	gpuResource := corev1.ResourceName("nvidia.com/gpu")
 
 	result, err := runner.Prepare(context.Background(), RunRequest{
 		Namespace: runnerTestNamespace, Environment: environment.Name,
 		Repositories: []MountRequest{{Name: repository.Name, MountName: "rc", Path: "rc"}},
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{gpuResource: resource.MustParse("2")},
+			Limits:   corev1.ResourceList{gpuResource: resource.MustParse("2")},
+		},
 	})
 	requirements.NoError(err, "prepare generated Workspace")
 	assertions.True(result.Created, "report generated topology")
 	assertions.Equal("codex-generated", result.Workspace.Name, "use generated sortable name")
 	assertions.True(result.Workspace.Spec.Generated, "mark generated Workspace")
+	requestedGPU := result.Workspace.Spec.Resources.Limits[gpuResource]
+	assertions.Zero(requestedGPU.Cmp(resource.MustParse("2")), "retain generated Workspace GPU resources")
 	requirements.Len(result.Workspace.Spec.Mounts, 1, "mount generated Worktree")
 	requirements.NotNil(result.Workspace.Spec.Mounts[0].WorktreeRef, "generated Repository shortcut resolves to Worktree")
 
@@ -112,6 +124,33 @@ func TestRunnerCreatesGeneratedWorkspaceAndWorktreeForRepository(t *testing.T) {
 	assertions.Equal("codex-generated", worktree.Labels[GeneratedWorkspaceLabel], "label cascade ownership")
 }
 
+func TestRunnerTreatsGPUResourcesAsRequirementsForExistingWorkspace(t *testing.T) {
+	t.Parallel()
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	scheme := runtime.NewScheme()
+	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme), "register Repository API types")
+	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
+	gpuResource := corev1.ResourceName("nvidia.com/gpu")
+	workspace := &workspacesv1alpha1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{Name: runnerTestExistingWorkspace, Namespace: runnerTestNamespace},
+		Spec: workspacesv1alpha1.WorkspaceSpec{Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+			gpuResource: resource.MustParse("1"),
+		}}},
+		Status: workspacesv1alpha1.WorkspaceStatus{Conditions: []metav1.Condition{{
+			Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionTrue, Reason: runnerTestWorkspaceReadyReason,
+		}}},
+	}
+	runner := &Runner{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace).Build()}
+
+	_, err := runner.Prepare(context.Background(), RunRequest{
+		Namespace: workspace.Namespace, Workspace: workspace.Name,
+		Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{gpuResource: resource.MustParse("2")}},
+	})
+	requirements.Error(err, "reject a Workspace with insufficient GPU resources")
+	assertions.EqualError(err, "workspace \"existing\" does not provide requested resource nvidia.com/gpu=2", "report the unsatisfied GPU requirement")
+}
+
 func TestRunnerTreatsCredentialsAsRequirementsForExistingWorkspace(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
@@ -119,8 +158,8 @@ func TestRunnerTreatsCredentialsAsRequirementsForExistingWorkspace(t *testing.T)
 	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme), "register Repository API types")
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
 	workspace := &workspacesv1alpha1.Workspace{
-		ObjectMeta: metav1.ObjectMeta{Name: "existing", Namespace: runnerTestNamespace},
-		Status:     workspacesv1alpha1.WorkspaceStatus{Conditions: []metav1.Condition{{Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionTrue, Reason: "WorkspaceReady"}}},
+		ObjectMeta: metav1.ObjectMeta{Name: runnerTestExistingWorkspace, Namespace: runnerTestNamespace},
+		Status:     workspacesv1alpha1.WorkspaceStatus{Conditions: []metav1.Condition{{Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionTrue, Reason: runnerTestWorkspaceReadyReason}}},
 	}
 	runner := &Runner{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace).Build()}
 	_, err := runner.Prepare(context.Background(), RunRequest{Namespace: workspace.Namespace, Workspace: workspace.Name, CredentialRefs: []string{"github"}})

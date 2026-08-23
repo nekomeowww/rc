@@ -58,6 +58,7 @@ type runOptions struct {
 	size             string
 	serviceAccount   string
 	noServiceAccount bool
+	gpu              command.GPUOptions
 }
 
 type listOptions struct {
@@ -118,10 +119,15 @@ func addRunFlags(cmd *cobra.Command, options *runOptions) {
 	cmd.Flags().StringVar(&options.size, "size", "20Gi", "Home volume size for a generated blank Workspace")
 	cmd.Flags().StringVar(&options.serviceAccount, "service-account", "", "Same-namespace ServiceAccount for a generated Workspace")
 	cmd.Flags().BoolVar(&options.noServiceAccount, "no-service-account", false, "Disable ServiceAccount token mounting for a generated Workspace")
+	options.gpu.AddFlags(cmd.Flags())
 }
 
 //nolint:gocyclo // This command coordinates target, credential, environment, and terminal setup.
 func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []string, tty bool, options runOptions) error {
+	resources, err := options.gpu.ResourceRequirements(cmd.Flags().Changed("gpu"), cmd.Flags().Changed("gpu-vram"))
+	if err != nil {
+		return err
+	}
 	config, namespace, contextName, err := kubeconfigFlags.ResolveWithIdentity()
 	if err != nil {
 		return err
@@ -171,7 +177,8 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 		Environment: options.environment, DefaultEnvironment: defaults.Environment,
 		Repositories: repositories, Worktrees: worktrees,
 		AgentCredentialRefs: credentialNames, CredentialRefs: options.genericCreds,
-		Storage: storage, Image: options.image, ServiceAccountName: options.serviceAccount, AutomountServiceAccountToken: automount,
+		Storage: storage, Image: options.image, Resources: resources,
+		ServiceAccountName: options.serviceAccount, AutomountServiceAccountToken: automount,
 		NamePrefix: agentType,
 	})
 	if err != nil {

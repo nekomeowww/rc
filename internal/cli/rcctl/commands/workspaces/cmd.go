@@ -54,6 +54,7 @@ type createOptions struct {
 	noServiceAccount bool
 	idleTimeout      time.Duration
 	wait             bool
+	gpu              command.GPUOptions
 }
 
 type mountOptions struct {
@@ -80,6 +81,10 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use: "create NAME", Short: "Create a persistent Workspace", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			resources, err := options.gpu.ResourceRequirements(cmd.Flags().Changed("gpu"), cmd.Flags().Changed("gpu-vram"))
+			if err != nil {
+				return err
+			}
 			config, namespace, err := kubeconfigFlags.Resolve()
 			if err != nil {
 				return err
@@ -94,6 +99,7 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 					DesiredState: workspacesv1alpha1.WorkspaceDesiredStateRunning,
 					Image:        options.image, DefaultWorkingDirectory: options.defaultCwd,
 					ServiceAccountName: options.serviceAccount,
+					Resources:          resources,
 				},
 			}
 			if options.environment != "" {
@@ -144,6 +150,7 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	cmd.Flags().BoolVar(&options.noServiceAccount, "no-service-account", false, "Disable ServiceAccount token mounting")
 	cmd.Flags().DurationVar(&options.idleTimeout, "idle-timeout", 0, "Suspend an idle named Workspace; zero disables")
 	cmd.Flags().BoolVar(&options.wait, "wait", true, "Wait for the Workspace runtime")
+	options.gpu.AddFlags(cmd.Flags())
 
 	return cmd
 }

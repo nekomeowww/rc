@@ -75,3 +75,28 @@ func TestCommandTreeContainsWorkspaceRuntimeCommands(t *testing.T) {
 	assert.Contains(t, output.String(), "workspace")
 	assert.Contains(t, output.String(), "agent")
 }
+
+func TestCommandTreeContainsGPUFlags(t *testing.T) {
+	t.Parallel()
+
+	testCases := map[string][]string{
+		"WorkspaceCreate": {"workspace", "create", helpArgument},
+		"AgentRun":        {"agent", "run", helpArgument},
+		"AgentExec":       {"agent", "exec", helpArgument},
+	}
+	for name, arguments := range testCases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			command := NewCommand()
+			output := new(bytes.Buffer)
+			command.SetOut(output)
+			command.SetErr(output)
+			command.SetArgs(arguments)
+
+			require.NoError(t, command.Execute(), "render command help")
+			assert.Contains(t, output.String(), "--gpu uint32", "show the GPU count flag")
+			assert.Contains(t, output.String(), "--gpu-vram string", "show the GPU VRAM flag")
+			assert.Contains(t, output.String(), "--gpu-resource stringArray", "show the repeatable low-level resource flag")
+		})
+	}
+}

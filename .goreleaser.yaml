@@ -4,7 +4,7 @@ project_name: rcctl
 
 before:
   hooks:
-    - make build-installer IMG={{ .Env.CONTROLLER_IMAGE }}:{{ .Version }} RUNNER_IMG={{ .Env.RUNNER_IMAGE }}:{{ .Version }}
+    - make build-installer INSTALLER_OUTPUT=install.yaml IMG={{ .Env.CONTROLLER_IMAGE }}:{{ .Version }} RUNNER_IMG={{ .Env.RUNNER_IMAGE }}:{{ .Version }}
 
 builds:
   - id: rcctl
@@ -44,4 +44,4 @@ changelog:
 
 release:
   extra_files:
-    - glob: dist/install.yaml
+    - glob: install.yaml

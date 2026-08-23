@@ -2,6 +2,8 @@
 IMG ?= ghcr.io/nekomeowww/rc/controller:latest
 # Shared image used by Repository and Worktree Jobs and Workspace runtimes.
 RUNNER_IMG ?= ghcr.io/nekomeowww/rc/runner:latest
+# INSTALLER_OUTPUT defines where build-installer writes the consolidated manifest.
+INSTALLER_OUTPUT ?= dist/install.yaml
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -164,9 +166,9 @@ docker-buildx-runner: ## Build and push the shared runner image for cross-platfo
 
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
-	mkdir -p dist
+	mkdir -p "$(dir $(INSTALLER_OUTPUT))"
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG} runner=${RUNNER_IMG}
-	"$(KUSTOMIZE)" build config/default > dist/install.yaml
+	"$(KUSTOMIZE)" build config/default > "$(INSTALLER_OUTPUT)"
 
 ##@ Deployment
 

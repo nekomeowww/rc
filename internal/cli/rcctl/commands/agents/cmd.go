@@ -149,15 +149,20 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 			return fmt.Errorf("--credential requires a recognized agent command; use --dangerously-include-credentials for generic credentials")
 		}
 	}
-	credentialNames, err := selectAgentCredentials(cmd.Context(), clusterClient.Kube, namespace, agentType, options.credentials, options.workspace == "" && (options.temporary || defaults.Workspace == ""))
-	if err != nil {
-		return err
-	}
 	repositories, err := resolveRepositories(cmd.Context(), clusterClient.Kube, namespace, options.repositories)
 	if err != nil {
 		return err
 	}
 	worktrees, err := resolveWorktrees(cmd.Context(), clusterClient.Kube, namespace, options.worktrees)
+	if err != nil {
+		return err
+	}
+	runRequest := workspaceservice.RunRequest{
+		Namespace: namespace, Workspace: options.workspace, DefaultWorkspace: defaults.Workspace, Temporary: options.temporary,
+		Environment: options.environment, DefaultEnvironment: defaults.Environment,
+		Repositories: repositories, Worktrees: worktrees,
+	}
+	credentialNames, err := selectAgentCredentials(cmd.Context(), clusterClient.Kube, namespace, agentType, options.credentials, runRequest.UsesGeneratedWorkspace())
 	if err != nil {
 		return err
 	}
@@ -172,15 +177,15 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 		}
 		automount = boolPointer(false)
 	}
-	target, err := (&workspaceservice.Runner{Client: clusterClient.Kube}).Prepare(cmd.Context(), workspaceservice.RunRequest{
-		Namespace: namespace, Workspace: options.workspace, DefaultWorkspace: defaults.Workspace, Temporary: options.temporary,
-		Environment: options.environment, DefaultEnvironment: defaults.Environment,
-		Repositories: repositories, Worktrees: worktrees,
-		AgentCredentialRefs: credentialNames, CredentialRefs: options.genericCreds,
-		Storage: storage, Image: options.image, Resources: resources,
-		ServiceAccountName: options.serviceAccount, AutomountServiceAccountToken: automount,
-		NamePrefix: agentType,
-	})
+	runRequest.AgentCredentialRefs = credentialNames
+	runRequest.CredentialRefs = options.genericCreds
+	runRequest.Storage = storage
+	runRequest.Image = options.image
+	runRequest.Resources = resources
+	runRequest.ServiceAccountName = options.serviceAccount
+	runRequest.AutomountServiceAccountToken = automount
+	runRequest.NamePrefix = agentType
+	target, err := (&workspaceservice.Runner{Client: clusterClient.Kube}).Prepare(cmd.Context(), runRequest)
 	if err != nil {
 		return err
 	}

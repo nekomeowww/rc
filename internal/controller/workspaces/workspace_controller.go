@@ -46,7 +46,9 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/lifecycle"
 	"github.com/nekomeowww/rc/internal/runtimepolicy"
+	"github.com/nekomeowww/rc/internal/worktreebootstrap"
 )
 
 const (
@@ -64,6 +66,7 @@ const (
 	workspaceWriteClaimsAnnotation   = "workspaces.rc.ayaka.io/write-claims"
 	workspaceRuntimePolicyAnnotation = "workspaces.rc.ayaka.io/runtime-policy"
 	workspaceRuntimePolicyVersion    = "restricted-v1"
+	repositoryRootMountPath          = "/repository"
 	workspaceWriteHolderLabel        = "workspaces.rc.ayaka.io/write-holder"
 	workspaceWriteClaimPrefix        = "rc-worktree-"
 	runtimeContainerName             = "rc-kube"
@@ -93,6 +96,14 @@ type resolvedWorkspace struct {
 	serviceAccount   string
 	automountSAToken bool
 	writeClaims      []workspaceWriteClaim
+	initializers     []workspaceInitializer
+	beforeStop       []lifecycle.Action
+}
+
+type workspaceInitializer struct {
+	name   string
+	image  string
+	action lifecycle.Action
 }
 
 type workspaceWriteClaim struct {
@@ -134,7 +145,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}
 
-	resolved, reason, message, err := r.resolveWorkspace(ctx, workspace)
+	resolved, reason, message, err := r.resolveWorkspaceBase(ctx, workspace)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -187,6 +198,17 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, failureReason, failureMessage)
 		}
 		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Provisioning", "Workspace home volume is provisioning")
+	}
+	resolved, reason, message, err = r.resolveWorkspaceDependencies(ctx, workspace, resolved)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if reason != "" {
+		result := ctrl.Result{}
+		if strings.HasSuffix(reason, "NotReady") || strings.HasSuffix(reason, "NotFound") || reason == "WorktreeInUse" {
+			result.RequeueAfter = workspaceDependencyRequeue
+		}
+		return result, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reason, message)
 	}
 
 	active, hasProcesses, lastCompletion, err := r.processState(ctx, workspace)
@@ -322,11 +344,28 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Replacing", "Workspace runtime Pod topology changed")
 	}
+	if failureReason, failureMessage := workspaceInitializationFailure(pod); failureReason != "" {
+		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, failureReason, failureMessage)
+	}
 	if !podReady(pod) {
 		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Starting", "Workspace runtime Pod is starting")
 	}
 
 	return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionTrue, "WorkspaceReady", "Workspace runtime is ready")
+}
+
+func workspaceInitializationFailure(pod *corev1.Pod) (string, string) {
+	for _, status := range pod.Status.InitContainerStatuses {
+		terminated := status.State.Terminated
+		if terminated == nil && status.State.Waiting != nil {
+			terminated = status.LastTerminationState.Terminated
+		}
+		if terminated != nil && terminated.ExitCode != 0 {
+			return "InitializationFailed", fmt.Sprintf("Workspace initializer %s exited with code %d", status.Name, terminated.ExitCode)
+		}
+	}
+
+	return "", ""
 }
 
 func (r *WorkspaceReconciler) finalizeWorkspace(ctx context.Context, workspace *workspacesv1alpha1.Workspace) (ctrl.Result, error) {
@@ -444,7 +483,7 @@ func (r *WorkspaceReconciler) releaseWriteClaims(ctx context.Context, workspace 
 	return nil
 }
 
-func (r *WorkspaceReconciler) resolveWorkspace(ctx context.Context, workspace *workspacesv1alpha1.Workspace) (*resolvedWorkspace, string, string, error) {
+func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspace *workspacesv1alpha1.Workspace) (*resolvedWorkspace, string, string, error) {
 	resolved := &resolvedWorkspace{image: workspace.Status.RuntimeImage}
 	if workspace.Spec.EnvironmentRef != nil {
 		environment := new(workspacesv1alpha1.WorkspaceEnvironment)
@@ -484,8 +523,13 @@ func (r *WorkspaceReconciler) resolveWorkspace(ctx context.Context, workspace *w
 		return resolved, "ImageRequired", "Workspace runtime image is empty", nil
 	}
 
+	return resolved, "", "", nil
+}
+
+func (r *WorkspaceReconciler) resolveWorkspaceDependencies(ctx context.Context, workspace *workspacesv1alpha1.Workspace, resolved *resolvedWorkspace) (*resolvedWorkspace, string, string, error) {
+	initializerNames := make(map[string]struct{})
 	for _, mount := range workspace.Spec.Mounts {
-		volume, volumeMount, claim, reason, message, err := r.resolveWorkspaceMount(ctx, workspace.Namespace, mount)
+		volume, volumeMount, claim, initializer, reason, message, err := r.resolveWorkspaceMount(ctx, workspace.Namespace, mount)
 		if err != nil {
 			return nil, "", "", err
 		}
@@ -496,6 +540,12 @@ func (r *WorkspaceReconciler) resolveWorkspace(ctx context.Context, workspace *w
 		resolved.volumeMounts = append(resolved.volumeMounts, volumeMount)
 		if claim != nil {
 			resolved.writeClaims = append(resolved.writeClaims, *claim)
+		}
+		if initializer != nil {
+			if _, exists := initializerNames[initializer.name]; !exists {
+				resolved.initializers = append(resolved.initializers, *initializer)
+				initializerNames[initializer.name] = struct{}{}
+			}
 		}
 	}
 	for index, reference := range workspace.Spec.ConfigMapRefs {
@@ -522,6 +572,24 @@ func (r *WorkspaceReconciler) resolveWorkspace(ctx context.Context, workspace *w
 		resolved.volumes = append(resolved.volumes, corev1.Volume{Name: volumeName, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: reference.Name}}})
 		resolved.volumeMounts = append(resolved.volumeMounts, corev1.VolumeMount{Name: volumeName, MountPath: filepath.Join("/run/rc/secrets", reference.Name), ReadOnly: true})
 	}
+	if workspace.Spec.Lifecycle != nil {
+		for index, action := range workspace.Spec.Lifecycle.Initialize {
+			resolvedAction, err := resolveLifecycleAction(action)
+			if err != nil {
+				return nil, "", "", fmt.Errorf("resolve Workspace initialize action %d: %w", index+1, err)
+			}
+			resolved.initializers = append(resolved.initializers, workspaceInitializer{
+				name: fmt.Sprintf("rc-initialize-%d", index), image: resolved.image, action: resolvedAction,
+			})
+		}
+		for index, action := range workspace.Spec.Lifecycle.BeforeStop {
+			resolvedAction, err := resolveLifecycleAction(action)
+			if err != nil {
+				return nil, "", "", fmt.Errorf("resolve Workspace beforeStop action %d: %w", index+1, err)
+			}
+			resolved.beforeStop = append(resolved.beforeStop, resolvedAction)
+		}
+	}
 
 	resolved.automountSAToken = workspace.Spec.AutomountServiceAccountToken == nil || *workspace.Spec.AutomountServiceAccountToken
 	if resolved.automountSAToken {
@@ -534,10 +602,25 @@ func (r *WorkspaceReconciler) resolveWorkspace(ctx context.Context, workspace *w
 	return resolved, "", "", nil
 }
 
-func (r *WorkspaceReconciler) resolveWorkspaceMount(ctx context.Context, namespace string, mount workspacesv1alpha1.WorkspaceMount) (corev1.Volume, corev1.VolumeMount, *workspaceWriteClaim, string, string, error) {
+func resolveLifecycleAction(action workspacesv1alpha1.WorkspaceLifecycleAction) (lifecycle.Action, error) {
+	hasCommand := len(action.Command) > 0
+	hasScript := action.Script != ""
+	if hasCommand == hasScript {
+		return lifecycle.Action{}, fmt.Errorf("exactly one of command or script must be set")
+	}
+	if hasCommand && action.Command[0] == "" {
+		return lifecycle.Action{}, fmt.Errorf("command executable must not be empty")
+	}
+
+	return lifecycle.Action{
+		Command: append([]string(nil), action.Command...), Script: action.Script, WorkingDirectory: action.WorkingDirectory,
+	}, nil
+}
+
+func (r *WorkspaceReconciler) resolveWorkspaceMount(ctx context.Context, namespace string, mount workspacesv1alpha1.WorkspaceMount) (corev1.Volume, corev1.VolumeMount, *workspaceWriteClaim, *workspaceInitializer, string, string, error) {
 	cleanPath := filepath.Clean(mount.Path)
 	if cleanPath == "." || cleanPath == ".." || strings.HasPrefix(cleanPath, "../") || filepath.IsAbs(mount.Path) {
-		return corev1.Volume{}, corev1.VolumeMount{}, nil, "InvalidMountPath", fmt.Sprintf("Mount %s has an invalid path", mount.Name), nil
+		return corev1.Volume{}, corev1.VolumeMount{}, nil, nil, "InvalidMountPath", fmt.Sprintf("Mount %s has an invalid path", mount.Name), nil
 	}
 	volume := corev1.Volume{Name: mount.Name}
 	volumeMount := corev1.VolumeMount{Name: mount.Name, MountPath: filepath.Join(workspaceRootMountPath, cleanPath), ReadOnly: mount.ReadOnly}
@@ -546,18 +629,29 @@ func (r *WorkspaceReconciler) resolveWorkspaceMount(ctx context.Context, namespa
 		key := types.NamespacedName{Name: mount.WorktreeRef.Name, Namespace: namespace}
 		if err := r.Get(ctx, key, worktree); err != nil {
 			if errors.IsNotFound(err) {
-				return volume, volumeMount, nil, "WorktreeNotFound", fmt.Sprintf("Mounted Worktree %s does not exist", mount.WorktreeRef.Name), nil
+				return volume, volumeMount, nil, nil, "WorktreeNotFound", fmt.Sprintf("Mounted Worktree %s does not exist", mount.WorktreeRef.Name), nil
 			}
-			return volume, volumeMount, nil, "", "", fmt.Errorf("get mounted Worktree: %w", err)
+			return volume, volumeMount, nil, nil, "", "", fmt.Errorf("get mounted Worktree: %w", err)
 		}
 		ready := meta.FindStatusCondition(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady)
-		if ready == nil || ready.Status != metav1.ConditionTrue || worktree.Status.VolumeClaimName == "" {
-			return volume, volumeMount, nil, "WorktreeNotReady", fmt.Sprintf("Mounted Worktree %s is not ready", worktree.Name), nil
+		worktreeReady := ready != nil && ready.Status == metav1.ConditionTrue
+		deferred := worktreebootstrap.Deferred(worktree)
+		volumeReady := meta.IsStatusConditionTrue(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionVolumeReady)
+		if (!worktreeReady && (!deferred || !volumeReady)) || worktree.Status.VolumeClaimName == "" {
+			return volume, volumeMount, nil, nil, "WorktreeNotReady", fmt.Sprintf("Mounted Worktree %s is not ready", worktree.Name), nil
 		}
 		volume.PersistentVolumeClaim = &corev1.PersistentVolumeClaimVolumeSource{ClaimName: worktree.Status.VolumeClaimName, ReadOnly: mount.ReadOnly}
 		cleanWorktreePath := filepath.Clean(worktree.Status.WorktreePath)
-		if cleanWorktreePath != "/repository" {
-			volumeMount.SubPath = strings.TrimPrefix(cleanWorktreePath, "/repository/")
+		if cleanWorktreePath != repositoryRootMountPath {
+			volumeMount.SubPath = strings.TrimPrefix(cleanWorktreePath, repositoryRootMountPath+"/")
+		}
+		var initializer *workspaceInitializer
+		if deferred && !worktreeReady {
+			initializer = &workspaceInitializer{
+				name:   worktreebootstrap.ContainerName(worktree.Namespace, worktree.Name, worktree.UID),
+				image:  r.RunnerImage,
+				action: worktreebootstrap.Action(worktree.Spec.Branch, volumeMount.MountPath),
+			}
 		}
 		if !mount.ReadOnly {
 			identity := string(worktree.UID)
@@ -566,31 +660,31 @@ func (r *WorkspaceReconciler) resolveWorkspaceMount(ctx context.Context, namespa
 			}
 			sum := sha256.Sum256([]byte(identity))
 			claim := &workspaceWriteClaim{leaseName: workspaceWriteClaimPrefix + hex.EncodeToString(sum[:10]), worktree: worktree.Name}
-			return volume, volumeMount, claim, "", "", nil
+			return volume, volumeMount, claim, initializer, "", "", nil
 		}
 
-		return volume, volumeMount, nil, "", "", nil
+		return volume, volumeMount, nil, initializer, "", "", nil
 	}
 	if mount.RepositoryRef != nil {
 		repository := new(repositoriesv1alpha1.Repository)
 		key := types.NamespacedName{Name: mount.RepositoryRef.Name, Namespace: namespace}
 		if err := r.Get(ctx, key, repository); err != nil {
 			if errors.IsNotFound(err) {
-				return volume, volumeMount, nil, "RepositoryNotFound", fmt.Sprintf("Mounted Repository %s does not exist", mount.RepositoryRef.Name), nil
+				return volume, volumeMount, nil, nil, "RepositoryNotFound", fmt.Sprintf("Mounted Repository %s does not exist", mount.RepositoryRef.Name), nil
 			}
-			return volume, volumeMount, nil, "", "", fmt.Errorf("get mounted Repository: %w", err)
+			return volume, volumeMount, nil, nil, "", "", fmt.Errorf("get mounted Repository: %w", err)
 		}
 		ready := meta.FindStatusCondition(repository.Status.Conditions, repositoriesv1alpha1.RepositoryConditionStorageReady)
 		if ready == nil || ready.Status != metav1.ConditionTrue || repository.Status.VolumeClaimName == "" {
-			return volume, volumeMount, nil, "RepositoryNotReady", fmt.Sprintf("Mounted Repository %s is not ready", repository.Name), nil
+			return volume, volumeMount, nil, nil, "RepositoryNotReady", fmt.Sprintf("Mounted Repository %s is not ready", repository.Name), nil
 		}
 		volume.PersistentVolumeClaim = &corev1.PersistentVolumeClaimVolumeSource{ClaimName: repository.Status.VolumeClaimName, ReadOnly: true}
 		volumeMount.ReadOnly = true
 
-		return volume, volumeMount, nil, "", "", nil
+		return volume, volumeMount, nil, nil, "", "", nil
 	}
 
-	return volume, volumeMount, nil, "InvalidMount", fmt.Sprintf("Mount %s has no source", mount.Name), nil
+	return volume, volumeMount, nil, nil, "InvalidMount", fmt.Sprintf("Mount %s has no source", mount.Name), nil
 }
 
 func workspaceHomeVolumeClaim(workspace *workspacesv1alpha1.Workspace, resolved *resolvedWorkspace) *corev1.PersistentVolumeClaim {
@@ -650,6 +744,36 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 	volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: workspaceHomeVolumeName, MountPath: workspaceHomeMountPath})
 	volumeMounts = append(volumeMounts, resolved.volumeMounts...)
 	volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: workspaceRuntimeVolumeName, MountPath: "/run/rc"})
+	initContainers := make([]corev1.Container, 0, len(resolved.initializers))
+	for _, initializer := range resolved.initializers {
+		if initializer.image == "" {
+			return nil, fmt.Errorf("workspace initializer %s has no runtime image", initializer.name)
+		}
+		encoded, err := lifecycle.Encode([]lifecycle.Action{initializer.action})
+		if err != nil {
+			return nil, fmt.Errorf("encode Workspace initializer %s: %w", initializer.name, err)
+		}
+		initContainers = append(initContainers, corev1.Container{
+			Name: initializer.name, Image: initializer.image,
+			Command:      []string{runtimeContainerName, "lifecycle", "--actions", encoded},
+			VolumeMounts: volumeMounts,
+			SecurityContext: &corev1.SecurityContext{
+				AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+				ReadOnlyRootFilesystem:   &readOnlyRootFilesystem,
+				Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{allLinuxCapabilities}},
+			},
+		})
+	}
+	var containerLifecycle *corev1.Lifecycle
+	if len(resolved.beforeStop) > 0 {
+		encoded, err := lifecycle.Encode(resolved.beforeStop)
+		if err != nil {
+			return nil, fmt.Errorf("encode Workspace beforeStop actions: %w", err)
+		}
+		containerLifecycle = &corev1.Lifecycle{PreStop: &corev1.LifecycleHandler{Exec: &corev1.ExecAction{
+			Command: []string{runtimeContainerName, "lifecycle", "--actions", encoded},
+		}}}
+	}
 
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -671,6 +795,7 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 			Tolerations:                  workspace.Spec.Tolerations,
 			Affinity:                     workspace.Spec.Affinity,
 			RuntimeClassName:             workspace.Spec.RuntimeClassName,
+			InitContainers:               initContainers,
 			Containers: []corev1.Container{{
 				Name:         runtimeContainerName,
 				Image:        resolved.image,
@@ -678,6 +803,7 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 				Args:         []string{"--socket", "/run/rc/rc-kube.sock", "--state-dir", "/home/agent/.rc/processes"},
 				Resources:    workspace.Spec.Resources,
 				VolumeMounts: volumeMounts,
+				Lifecycle:    containerLifecycle,
 				SecurityContext: &corev1.SecurityContext{
 					AllowPrivilegeEscalation: &allowPrivilegeEscalation,
 					ReadOnlyRootFilesystem:   &readOnlyRootFilesystem,
@@ -721,6 +847,7 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 		Tolerations      []corev1.Toleration
 		Affinity         *corev1.Affinity
 		RuntimeClassName *string
+		Lifecycle        *workspacesv1alpha1.WorkspaceLifecycle
 	}{
 		RuntimePolicy: workspaceRuntimePolicyVersion,
 		Image:         resolved.image, Mounts: workspace.Spec.Mounts, ConfigMapRefs: workspace.Spec.ConfigMapRefs,
@@ -728,7 +855,7 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 		Credentials: workspace.Spec.CredentialRefs, ServiceAccount: resolved.serviceAccount,
 		AutomountSAToken: resolved.automountSAToken, Resources: workspace.Spec.Resources,
 		NodeSelector: workspace.Spec.NodeSelector, Tolerations: workspace.Spec.Tolerations,
-		Affinity: workspace.Spec.Affinity, RuntimeClassName: workspace.Spec.RuntimeClassName,
+		Affinity: workspace.Spec.Affinity, RuntimeClassName: workspace.Spec.RuntimeClassName, Lifecycle: workspace.Spec.Lifecycle,
 	}
 	data, err := json.Marshal(topology)
 	if err != nil {

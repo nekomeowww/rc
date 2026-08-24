@@ -1208,6 +1208,70 @@ spec:
                   image is used only for a blank Workspace without environmentRef. When
                   omitted, the controller's base Workspace image is used.
                 type: string
+              lifecycle:
+                description: lifecycle configures commands and scripts around each
+                  runtime Pod.
+                properties:
+                  beforeStop:
+                    description: |-
+                      beforeStop runs in order before a normally terminated runtime container.
+                      Kubernetes continues termination if an action fails or the grace period
+                      expires.
+                    items:
+                      description: |-
+                        WorkspaceLifecycleAction runs one exact argv or shell script inside the
+                        Workspace runtime image.
+                      properties:
+                        command:
+                          description: command is executed as an exact argv without
+                            shell interpretation.
+                          items:
+                            minLength: 1
+                            type: string
+                          minItems: 1
+                          type: array
+                        script:
+                          description: script is executed by /bin/sh -ceu.
+                          minLength: 1
+                          type: string
+                        workingDirectory:
+                          description: workingDirectory defaults to /workspace.
+                          type: string
+                      type: object
+                      x-kubernetes-validations:
+                      - message: exactly one of command or script must be set
+                        rule: has(self.command) != has(self.script)
+                    type: array
+                  initialize:
+                    description: |-
+                      initialize runs in order before the rc-kube supervisor starts. Actions run
+                      again whenever Kubernetes creates a replacement runtime Pod.
+                    items:
+                      description: |-
+                        WorkspaceLifecycleAction runs one exact argv or shell script inside the
+                        Workspace runtime image.
+                      properties:
+                        command:
+                          description: command is executed as an exact argv without
+                            shell interpretation.
+                          items:
+                            minLength: 1
+                            type: string
+                          minItems: 1
+                          type: array
+                        script:
+                          description: script is executed by /bin/sh -ceu.
+                          minLength: 1
+                          type: string
+                        workingDirectory:
+                          description: workingDirectory defaults to /workspace.
+                          type: string
+                      type: object
+                      x-kubernetes-validations:
+                      - message: exactly one of command or script must be set
+                        rule: has(self.command) != has(self.script)
+                    type: array
+                type: object
               mounts:
                 description: mounts exposes Worktrees and explicit read-only Repositories.
                 items:

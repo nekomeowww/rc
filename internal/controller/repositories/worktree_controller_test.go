@@ -7,21 +7,98 @@ import (
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	"github.com/nekomeowww/rc/internal/worktreebootstrap"
+)
+
+const (
+	generatedWorkspaceTestName = "generated-workspace"
+	worktreeVolumeTestName     = "worktree"
 )
 
 var _ = Describe("Worktree Controller", func() {
+	It("defers generated checkout to the consuming Workspace runtime", func() {
+		ctx := context.Background()
+		const (
+			repositoryName = "deferred-parent"
+			worktreeName   = "deferred-child"
+		)
+		repository := readyRepository(repositoryName)
+		Expect(k8sClient.Create(ctx, repository)).To(Succeed())
+		repository.Status = readyRepositoryStatus(repositoryName)
+		Expect(k8sClient.Status().Update(ctx, repository)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, repository)).To(Succeed()) })
+
+		worktree := &repositoriesv1alpha1.Worktree{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: worktreeName, Namespace: testNamespace,
+				Labels: map[string]string{generatedWorkspaceLabel: generatedWorkspaceTestName},
+			},
+			Spec: repositoriesv1alpha1.WorktreeSpec{
+				RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: repositoryName},
+				Branch:        "rc/generated-workspace/repository",
+			},
+		}
+		Expect(k8sClient.Create(ctx, worktree)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, worktree)).To(Succeed()) })
+		key := types.NamespacedName{Name: worktreeName, Namespace: testNamespace}
+		reconciler := &WorktreeReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: "ghcr.io/example/rc/runner:test"}
+
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+		claim := new(corev1.PersistentVolumeClaim)
+		Expect(k8sClient.Get(ctx, key, claim)).To(Succeed())
+		claim.Status.Phase = corev1.ClaimBound
+		Expect(k8sClient.Status().Update(ctx, claim)).To(Succeed())
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		persisted := new(repositoriesv1alpha1.Worktree)
+		Expect(k8sClient.Get(ctx, key, persisted)).To(Succeed())
+		Expect(meta.IsStatusConditionTrue(persisted.Status.Conditions, repositoriesv1alpha1.WorktreeConditionVolumeReady)).To(BeTrue())
+		ready := meta.FindStatusCondition(persisted.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal("WaitingForWorkspace"))
+		job := new(batchv1.Job)
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: worktreeBootstrapJobName(worktree), Namespace: testNamespace}, job))).To(BeTrue())
+
+		containerName := worktreebootstrap.ContainerName(persisted.Namespace, persisted.Name, persisted.UID)
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: generatedWorkspaceTestName, Namespace: testNamespace},
+			Spec: corev1.PodSpec{
+				InitContainers: []corev1.Container{{Name: containerName, Image: "runner:test", Command: []string{"true"}}},
+				Containers:     []corev1.Container{{Name: "runtime", Image: "runner:test", Command: []string{"sleep", "3600"}}},
+				Volumes: []corev1.Volume{{Name: worktreeVolumeTestName, VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: worktreeName},
+				}}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, pod)).To(Succeed()) })
+		pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+			Name: containerName, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
+		}}
+		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, key, persisted)).To(Succeed())
+		Expect(meta.IsStatusConditionTrue(persisted.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady)).To(BeTrue())
+		Expect(persisted.Status.JobName).To(BeEmpty())
+	})
+
 	It("reuses the cloned Repository root for generated Workspace Worktrees", func() {
 		worktree := &repositoriesv1alpha1.Worktree{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "generated-worktree",
 				Namespace: testNamespace,
-				Labels:    map[string]string{generatedWorkspaceLabel: "generated-workspace"},
+				Labels:    map[string]string{generatedWorkspaceLabel: generatedWorkspaceTestName},
 			},
 			Spec: repositoriesv1alpha1.WorktreeSpec{
 				RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: "repository-parent"},
@@ -29,12 +106,11 @@ var _ = Describe("Worktree Controller", func() {
 			},
 		}
 
-		job := worktreeBootstrapJob(worktree, worktree.Name, "ghcr.io/example/rc/runner:test")
-		container := job.Spec.Template.Spec.Containers[0]
+		action := worktreebootstrap.Action(worktree.Spec.Branch, workerMountPath)
 		Expect(worktreePath(worktree)).To(Equal(workerMountPath))
-		Expect(container.Args).To(ContainElement(worktree.Spec.Branch))
-		Expect(container.Args[1]).To(ContainSubstring("checkout -b"))
-		Expect(container.Args[1]).NotTo(ContainSubstring("worktree add"))
+		Expect(action.Command).To(ContainElement(worktree.Spec.Branch))
+		Expect(action.Command[2]).To(ContainSubstring("checkout -b"))
+		Expect(action.Command[2]).NotTo(ContainSubstring("worktree add"))
 	})
 
 	It("clones the Repository PVC and creates a native Git worktree Job", func() {
@@ -83,7 +159,7 @@ var _ = Describe("Worktree Controller", func() {
 					Command: []string{"sleep", "3600"},
 				}},
 				Volumes: []corev1.Volume{{
-					Name: "worktree",
+					Name: worktreeVolumeTestName,
 					VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 						ClaimName: worktreeName,
 					}},
@@ -104,7 +180,7 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: worktreeBootstrapJobName(worktree), Namespace: testNamespace}, job)).To(Succeed())
 		container := job.Spec.Template.Spec.Containers[0]
 		Expect(container.Image).To(Equal(runnerImage))
-		Expect(container.Args).To(ContainElement("worktree"))
+		Expect(container.Args).To(ContainElement(gitWorktreeSubcommand))
 		Expect(container.Args).To(ContainElement("add"))
 		Expect(container.Args).To(ContainElement("-b"))
 		Expect(container.Args).To(ContainElement("feature/worktree"))

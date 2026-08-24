@@ -94,11 +94,13 @@ rc publishes two core images under one product path:
   system tools required by runtime processes.
 
 The runner image is shared by blank Workspace runtimes, Repository bootstrap
-and Exec Jobs, and Worktree bootstrap Jobs. These operations still run in
-separate Pods so they can mount the appropriate PVC and retain their security
-contexts, but they do not require separate container images. Workspace
+and Exec Jobs, and ordinary Worktree bootstrap Jobs. A generated Worktree that
+reuses its cloned Repository root is initialized in the consuming Workspace Pod
+with the controller's runner image, avoiding a second Pod and iSCSI attach cycle
+for a one-second checkout. User-configured Workspace lifecycle actions still run
+in the Workspace runtime image so they see the same toolchain. Workspace
 Environment images may extend or replace the runner image, provided they retain
-the `rc-kube` runtime contract.
+the matching `rc-kube` runtime contract.
 
 Controller and runner images from one release use the same version tag. Release
 manifests pass the corresponding runner image to the controller explicitly;
@@ -321,6 +323,32 @@ mount propagation as a default hot-plug mechanism.
 Named Workspaces remain running unless stopped or configured with an idle
 timeout. Automatically created Workspaces suspend after their processes finish,
 but their resources and volumes remain until explicit cleanup.
+
+### Runtime lifecycle actions
+
+A Workspace may define ordered `spec.lifecycle.initialize` and
+`spec.lifecycle.beforeStop` actions. Each action contains exactly one of:
+
+- `command`, an exact argv executed without shell interpretation; or
+- `script`, source executed by `/bin/sh -ceu`.
+
+An optional `workingDirectory` defaults to `/workspace`. Initialize actions run
+as init containers, in order, after all Workspace volumes are mounted and before
+the `rc-kube` supervisor starts. They run again for every replacement runtime
+Pod and must therefore be idempotent. A failed initialize action prevents the
+Workspace from becoming Ready.
+
+Before-stop actions use the runtime container's Kubernetes pre-stop hook. They
+run in order during a normal suspension, topology replacement, or deletion, but
+remain best effort: Kubernetes continues termination after a failure or when
+the Pod termination grace period expires. They do not run after the container
+has already exited or during an ungraceful node loss.
+
+Generated Worktrees use the same lifecycle action runner internally. Their PVC
+becomes `VolumeReady` as soon as the clone is bound; the Workspace then performs
+an idempotent branch checkout in its first init container. The Worktree
+controller observes that init container and owns the final Worktree `Ready`
+condition. Ordinary independently managed Worktrees retain their bootstrap Job.
 
 ## Agent Process
 

@@ -198,7 +198,9 @@ spec:
                 - type
                 x-kubernetes-list-type: map
               jobName:
-                description: jobName is the bootstrap Job that ran git worktree add.
+                description: |-
+                  jobName is the bootstrap Job that ran git worktree add. It is empty when a
+                  generated Workspace runtime initializes the cloned Repository root.
                 type: string
               observedGeneration:
                 description: |-

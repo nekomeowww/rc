@@ -40,6 +40,7 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	"github.com/nekomeowww/rc/internal/runtimepolicy"
+	"github.com/nekomeowww/rc/internal/worktreebootstrap"
 )
 
 const (
@@ -52,6 +53,7 @@ const (
 	worktreeManagedByValue     = "rc"
 	generatedWorkspaceLabel    = "workspaces.rc.ayaka.io/generated-for"
 	worktreeRequeueDelay       = 2 * time.Second
+	gitWorktreeSubcommand      = "worktree"
 )
 
 // WorktreeReconciler reconciles an independent child volume and the native
@@ -68,6 +70,8 @@ type WorktreeReconciler struct {
 // +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=repositories,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
+//
+//nolint:gocyclo // Reconcile is an explicit resource lifecycle state machine.
 func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	worktree := new(repositoriesv1alpha1.Worktree)
@@ -133,8 +137,20 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if claim.Status.Phase != corev1.ClaimBound {
 		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "Provisioning", "Child volume is provisioning", claim.Name, repository.Status.VolumeClaimName, worktreePath)
 	}
+	if err := r.setWorktreeVolumeReady(ctx, worktree, claim.Name, repository.Status.VolumeClaimName, worktreePath); err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := r.labelWorktreePods(ctx, worktree, claim.Name); err != nil {
 		return ctrl.Result{}, err
+	}
+	if reusesRepositoryRoot(worktree) {
+		legacyJob := new(batchv1.Job)
+		legacyKey := types.NamespacedName{Name: worktreeBootstrapJobName(worktree), Namespace: worktree.Namespace}
+		if err := r.Get(ctx, legacyKey, legacyJob); errors.IsNotFound(err) {
+			return ctrl.Result{}, r.reconcileWorkspaceBootstrap(ctx, worktree, claim.Name, repository.Status.VolumeClaimName, worktreePath)
+		} else if err != nil {
+			return ctrl.Result{}, fmt.Errorf("get legacy generated Worktree bootstrap Job: %w", err)
+		}
 	}
 
 	job := new(batchv1.Job)
@@ -178,6 +194,50 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "Initializing", "Worktree bootstrap Job is running", claim.Name, repository.Status.VolumeClaimName, worktreePath)
+}
+
+func (r *WorktreeReconciler) reconcileWorkspaceBootstrap(ctx context.Context, worktree *repositoriesv1alpha1.Worktree, claimName, sourceClaimName, path string) error {
+	if meta.IsStatusConditionTrue(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady) {
+		return r.setWorktreeStatus(ctx, worktree, metav1.ConditionTrue, "WorktreeReady", "Child volume and isolated Git checkout are ready", claimName, sourceClaimName, path)
+	}
+	pods := new(corev1.PodList)
+	if err := r.List(ctx, pods, client.InNamespace(worktree.Namespace)); err != nil {
+		return fmt.Errorf("list Pods while observing Workspace Worktree initialization: %w", err)
+	}
+	containerName := worktreebootstrap.ContainerName(worktree.Namespace, worktree.Name, worktree.UID)
+	initializing := false
+	failedMessage := ""
+	for index := range pods.Items {
+		pod := &pods.Items[index]
+		if !podUsesPersistentVolumeClaim(pod, claimName) {
+			continue
+		}
+		for _, status := range pod.Status.InitContainerStatuses {
+			if status.Name != containerName {
+				continue
+			}
+			terminated := status.State.Terminated
+			if terminated == nil && status.State.Waiting != nil {
+				terminated = status.LastTerminationState.Terminated
+			}
+			if terminated != nil {
+				if terminated.ExitCode == 0 {
+					return r.setWorktreeStatus(ctx, worktree, metav1.ConditionTrue, "WorktreeReady", "Workspace runtime initialized the isolated Git checkout", claimName, sourceClaimName, path)
+				}
+				failedMessage = fmt.Sprintf("Workspace bootstrap init container exited with code %d", terminated.ExitCode)
+				continue
+			}
+			initializing = true
+		}
+	}
+	if failedMessage != "" {
+		return r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "BootstrapFailed", failedMessage, claimName, sourceClaimName, path)
+	}
+	if initializing {
+		return r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "Initializing", "Workspace bootstrap init container is running", claimName, sourceClaimName, path)
+	}
+
+	return r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "WaitingForWorkspace", "Child volume is waiting for a Workspace runtime to initialize its Git branch", claimName, sourceClaimName, path)
 }
 
 func effectiveWorktreeStorage(worktree *repositoriesv1alpha1.Worktree, repository *repositoriesv1alpha1.Repository) (string, resource.Quantity, []corev1.PersistentVolumeAccessMode) {
@@ -305,14 +365,7 @@ func worktreePath(worktree *repositoriesv1alpha1.Worktree) string {
 }
 
 func reusesRepositoryRoot(worktree *repositoriesv1alpha1.Worktree) bool {
-	return worktree.Labels[generatedWorkspaceLabel] != "" &&
-		worktree.Spec.Branch != "" &&
-		worktree.Spec.ResetBranch == "" &&
-		worktree.Spec.Ref == "" &&
-		!worktree.Spec.Detach &&
-		!worktree.Spec.Orphan &&
-		!worktree.Spec.NoCheckout &&
-		!worktree.Spec.Lock
+	return worktreebootstrap.Deferred(worktree)
 }
 
 func worktreeBootstrapJobName(worktree *repositoriesv1alpha1.Worktree) string {
@@ -327,38 +380,32 @@ func worktreeBootstrapJobName(worktree *repositoriesv1alpha1.Worktree) string {
 }
 
 func worktreeBootstrapJob(worktree *repositoriesv1alpha1.Worktree, claimName, runnerImage string) *batchv1.Job {
-	bootstrapScript := worktreeBootstrapScript
-	gitArgs := []string{worktree.Spec.Branch}
-	if reusesRepositoryRoot(worktree) {
-		bootstrapScript = generatedWorktreeBootstrapScript
-	} else {
-		gitArgs = []string{"worktree", "add"}
-		if worktree.Spec.Branch != "" {
-			gitArgs = append(gitArgs, "-b", worktree.Spec.Branch)
+	gitArgs := []string{gitWorktreeSubcommand, "add"}
+	if worktree.Spec.Branch != "" {
+		gitArgs = append(gitArgs, "-b", worktree.Spec.Branch)
+	}
+	if worktree.Spec.ResetBranch != "" {
+		gitArgs = append(gitArgs, "-B", worktree.Spec.ResetBranch)
+	}
+	if worktree.Spec.Detach {
+		gitArgs = append(gitArgs, "--detach")
+	}
+	if worktree.Spec.Orphan {
+		gitArgs = append(gitArgs, "--orphan")
+	}
+	if worktree.Spec.NoCheckout {
+		gitArgs = append(gitArgs, "--no-checkout")
+	}
+	if worktree.Spec.Lock {
+		gitArgs = append(gitArgs, "--lock")
+		if worktree.Spec.LockReason != "" {
+			gitArgs = append(gitArgs, "--reason", worktree.Spec.LockReason)
 		}
-		if worktree.Spec.ResetBranch != "" {
-			gitArgs = append(gitArgs, "-B", worktree.Spec.ResetBranch)
-		}
-		if worktree.Spec.Detach {
-			gitArgs = append(gitArgs, "--detach")
-		}
-		if worktree.Spec.Orphan {
-			gitArgs = append(gitArgs, "--orphan")
-		}
-		if worktree.Spec.NoCheckout {
-			gitArgs = append(gitArgs, "--no-checkout")
-		}
-		if worktree.Spec.Lock {
-			gitArgs = append(gitArgs, "--lock")
-			if worktree.Spec.LockReason != "" {
-				gitArgs = append(gitArgs, "--reason", worktree.Spec.LockReason)
-			}
-		}
+	}
 
-		gitArgs = append(gitArgs, worktreePath(worktree))
-		if worktree.Spec.Ref != "" {
-			gitArgs = append(gitArgs, worktree.Spec.Ref)
-		}
+	gitArgs = append(gitArgs, worktreePath(worktree))
+	if worktree.Spec.Ref != "" {
+		gitArgs = append(gitArgs, worktree.Spec.Ref)
 	}
 
 	backoffLimit := int32(0)
@@ -386,8 +433,8 @@ func worktreeBootstrapJob(worktree *repositoriesv1alpha1.Worktree, claimName, ru
 						Name:       "bootstrap",
 						Image:      runnerImage,
 						Command:    []string{"sh"},
-						Args:       append([]string{"-ceu", bootstrapScript, "worktree-bootstrap"}, gitArgs...),
-						WorkingDir: "/repository",
+						Args:       append([]string{"-ceu", worktreeBootstrapScript, "worktree-bootstrap"}, gitArgs...),
+						WorkingDir: workerMountPath,
 						Env:        []corev1.EnvVar{{Name: "HOME", Value: "/tmp"}},
 						SecurityContext: &corev1.SecurityContext{
 							AllowPrivilegeEscalation: &allowPrivilegeEscalation,
@@ -407,6 +454,37 @@ func worktreeBootstrapJob(worktree *repositoriesv1alpha1.Worktree, claimName, ru
 	}
 }
 
+func (r *WorktreeReconciler) setWorktreeVolumeReady(ctx context.Context, worktree *repositoriesv1alpha1.Worktree, claimName, sourceClaimName, path string) error {
+	key := client.ObjectKeyFromObject(worktree)
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := new(repositoriesv1alpha1.Worktree)
+		if err := r.Get(ctx, key, current); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		before := current.DeepCopy()
+		current.Status.ObservedGeneration = current.Generation
+		current.Status.SourceVolumeClaimName = sourceClaimName
+		current.Status.VolumeClaimName = claimName
+		current.Status.WorktreePath = path
+		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type: repositoriesv1alpha1.WorktreeConditionVolumeReady, Status: metav1.ConditionTrue,
+			ObservedGeneration: current.Generation, Reason: "VolumeReady", Message: "Child volume is bound and ready to mount",
+		})
+		if current.Status.ObservedGeneration == before.Status.ObservedGeneration &&
+			current.Status.SourceVolumeClaimName == before.Status.SourceVolumeClaimName &&
+			current.Status.VolumeClaimName == before.Status.VolumeClaimName &&
+			current.Status.WorktreePath == before.Status.WorktreePath &&
+			conditionsEqual(current.Status.Conditions, before.Status.Conditions) {
+			return nil
+		}
+		if err := r.Status().Patch(ctx, current, client.MergeFrom(before)); err != nil {
+			return fmt.Errorf("patch Worktree volume-ready status: %w", err)
+		}
+
+		return nil
+	})
+}
+
 func (r *WorktreeReconciler) setWorktreeStatus(ctx context.Context, worktree *repositoriesv1alpha1.Worktree, status metav1.ConditionStatus, reason, message, claimName, sourceClaimName, path string) error {
 	key := client.ObjectKeyFromObject(worktree)
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
@@ -422,7 +500,7 @@ func (r *WorktreeReconciler) setWorktreeStatus(ctx context.Context, worktree *re
 		current.Status.SourceVolumeClaimName = sourceClaimName
 		current.Status.VolumeClaimName = claimName
 		current.Status.WorktreePath = path
-		if claimName == "" {
+		if claimName == "" || reusesRepositoryRoot(current) {
 			current.Status.JobName = ""
 		} else if current.Status.JobName == "" || status != metav1.ConditionTrue {
 			current.Status.JobName = worktreeBootstrapJobName(current)
@@ -511,10 +589,4 @@ mkdir -p /repository/worktree
 git -C /repository worktree prune
 git -C /repository -c checkout.workers=8 -c checkout.thresholdForParallelism=100 "$@"
 git -C /repository worktree list --porcelain
-`
-
-const generatedWorktreeBootstrapScript = `
-git config --global --add safe.directory /repository
-git -C /repository checkout -b "$1"
-git -C /repository rev-parse --verify HEAD
 `

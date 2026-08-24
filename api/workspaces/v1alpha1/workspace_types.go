@@ -61,6 +61,42 @@ type WorkspaceMount struct {
 	ReadOnly bool `json:"readOnly,omitempty"`
 }
 
+// WorkspaceLifecycleAction runs one exact argv or shell script inside the
+// Workspace runtime image.
+// +kubebuilder:validation:XValidation:rule="has(self.command) != has(self.script)",message="exactly one of command or script must be set"
+type WorkspaceLifecycleAction struct {
+	// command is executed as an exact argv without shell interpretation.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:MinLength=1
+	// +optional
+	Command []string `json:"command,omitempty"`
+
+	// script is executed by /bin/sh -ceu.
+	// +kubebuilder:validation:MinLength=1
+	// +optional
+	Script string `json:"script,omitempty"`
+
+	// workingDirectory defaults to /workspace.
+	// +optional
+	WorkingDirectory string `json:"workingDirectory,omitempty"`
+}
+
+// WorkspaceLifecycle configures ordered runtime startup and shutdown actions.
+// Initialize actions must succeed before the runtime becomes Ready. BeforeStop
+// actions are best-effort Kubernetes pre-stop hooks.
+type WorkspaceLifecycle struct {
+	// initialize runs in order before the rc-kube supervisor starts. Actions run
+	// again whenever Kubernetes creates a replacement runtime Pod.
+	// +optional
+	Initialize []WorkspaceLifecycleAction `json:"initialize,omitempty"`
+
+	// beforeStop runs in order before a normally terminated runtime container.
+	// Kubernetes continues termination if an action fails or the grace period
+	// expires.
+	// +optional
+	BeforeStop []WorkspaceLifecycleAction `json:"beforeStop,omitempty"`
+}
+
 // WorkspaceSpec defines one persistent development machine.
 type WorkspaceSpec struct {
 	// desiredState controls runtime compute while retaining persistent state.
@@ -117,6 +153,10 @@ type WorkspaceSpec struct {
 	// defaultWorkingDirectory is used when a process does not set --cwd.
 	// +optional
 	DefaultWorkingDirectory string `json:"defaultWorkingDirectory,omitempty"`
+
+	// lifecycle configures commands and scripts around each runtime Pod.
+	// +optional
+	Lifecycle *WorkspaceLifecycle `json:"lifecycle,omitempty"`
 
 	// serviceAccountName overrides the namespace rc-workspace ServiceAccount.
 	// +optional

@@ -37,7 +37,151 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/lifecycle"
+	"github.com/nekomeowww/rc/internal/worktreebootstrap"
 )
+
+const (
+	lifecycleRepositoryTestName = "repository"
+	lifecycleToolTestName       = "tool"
+	testRunnerImage             = "ghcr.io/example/rc/runner:test"
+)
+
+func TestWorkspaceCreatesHomeWhileWorktreeIsProvisioning(t *testing.T) {
+	t.Parallel()
+	requirements := require.New(t)
+	scheme := runtime.NewScheme()
+	requirements.NoError(corev1.AddToScheme(scheme))
+	requirements.NoError(coordinationv1.AddToScheme(scheme))
+	requirements.NoError(rbacv1.AddToScheme(scheme))
+	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme))
+	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme))
+	worktree := &repositoriesv1alpha1.Worktree{
+		ObjectMeta: metav1.ObjectMeta{Name: "pending-worktree", Namespace: testNamespace},
+		Spec:       repositoriesv1alpha1.WorktreeSpec{RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: lifecycleRepositoryTestName}},
+	}
+	workspace := &workspacesv1alpha1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "parallel-home", Namespace: testNamespace, UID: types.UID("parallel-home-uid")},
+		Spec: workspacesv1alpha1.WorkspaceSpec{
+			Image: testRuntimeImage,
+			Storage: &workspacesv1alpha1.PersistentStorageSpec{
+				StorageClassName: testStorageClass, Size: resource.MustParse("20Gi"),
+			},
+			Mounts: []workspacesv1alpha1.WorkspaceMount{{
+				Name: lifecycleRepositoryTestName, Path: lifecycleRepositoryTestName, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: worktree.Name},
+			}},
+		},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(workspace, worktree, &corev1.PersistentVolumeClaim{}).
+		WithObjects(workspace, worktree).Build()
+	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
+	key := client.ObjectKeyFromObject(workspace)
+
+	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+	requirements.NoError(err)
+	home := new(corev1.PersistentVolumeClaim)
+	requirements.NoError(kubeClient.Get(context.Background(), key, home), "home PVC starts provisioning without waiting for the Worktree")
+}
+
+func TestWorkspaceRuntimeUsesDeferredWorktreeAndLifecycleActions(t *testing.T) {
+	t.Parallel()
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	requirements.NoError(corev1.AddToScheme(scheme))
+	requirements.NoError(coordinationv1.AddToScheme(scheme))
+	requirements.NoError(rbacv1.AddToScheme(scheme))
+	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme))
+	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme))
+	worktree := &repositoriesv1alpha1.Worktree{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "deferred-worktree", Namespace: testNamespace, UID: types.UID("deferred-worktree-uid"),
+			Labels: map[string]string{"workspaces.rc.ayaka.io/generated-for": "lifecycle-workspace"},
+		},
+		Spec: repositoriesv1alpha1.WorktreeSpec{
+			RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: lifecycleRepositoryTestName}, Branch: "rc/lifecycle-workspace/repository",
+		},
+		Status: repositoriesv1alpha1.WorktreeStatus{
+			VolumeClaimName: "deferred-worktree", WorktreePath: repositoryRootMountPath,
+			Conditions: []metav1.Condition{{
+				Type: repositoriesv1alpha1.WorktreeConditionVolumeReady, Status: metav1.ConditionTrue, Reason: "VolumeReady",
+			}},
+		},
+	}
+	workspace := &workspacesv1alpha1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "lifecycle-workspace", Namespace: testNamespace, UID: types.UID("lifecycle-workspace-uid")},
+		Spec: workspacesv1alpha1.WorkspaceSpec{
+			Image: testRuntimeImage,
+			Storage: &workspacesv1alpha1.PersistentStorageSpec{
+				StorageClassName: testStorageClass, Size: resource.MustParse("20Gi"),
+			},
+			Mounts: []workspacesv1alpha1.WorkspaceMount{{
+				Name: lifecycleRepositoryTestName, Path: lifecycleRepositoryTestName, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: worktree.Name},
+			}},
+			Lifecycle: &workspacesv1alpha1.WorkspaceLifecycle{
+				Initialize: []workspacesv1alpha1.WorkspaceLifecycleAction{
+					{Command: []string{lifecycleToolTestName, "prepare"}, WorkingDirectory: "/workspace/repository"},
+					{Script: "printf initialized"},
+				},
+				BeforeStop: []workspacesv1alpha1.WorkspaceLifecycleAction{{Command: []string{lifecycleToolTestName, "cleanup"}}},
+			},
+		},
+	}
+	home := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: workspace.Name, Namespace: workspace.Namespace,
+			OwnerReferences: []metav1.OwnerReference{{UID: workspace.UID, Controller: boolPointer(true)}},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(workspace, worktree, home, &corev1.Pod{}).
+		WithObjects(workspace, worktree, home).Build()
+	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
+	key := client.ObjectKeyFromObject(workspace)
+
+	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+	requirements.NoError(err)
+	pod := new(corev1.Pod)
+	requirements.NoError(kubeClient.Get(ctx, key, pod))
+	requirements.Len(pod.Spec.InitContainers, 3, "run deferred Git bootstrap before user initializers")
+	assertions.Equal(worktreebootstrap.ContainerName(worktree.Namespace, worktree.Name, worktree.UID), pod.Spec.InitContainers[0].Name)
+	assertions.Equal(testRunnerImage, pod.Spec.InitContainers[0].Image, "use the controller runner for internal Git initialization")
+	bootstrapActions, err := lifecycle.Decode(pod.Spec.InitContainers[0].Command[3])
+	requirements.NoError(err)
+	requirements.Len(bootstrapActions, 1)
+	assertions.Equal("/workspace/repository", bootstrapActions[0].WorkingDirectory)
+	assertions.Contains(bootstrapActions[0].Command, worktree.Spec.Branch)
+	initializeCommand, err := lifecycle.Decode(pod.Spec.InitContainers[1].Command[3])
+	requirements.NoError(err)
+	assertions.Equal(testRuntimeImage, pod.Spec.InitContainers[1].Image, "use the Workspace image for user lifecycle actions")
+	assertions.Equal([]string{lifecycleToolTestName, "prepare"}, initializeCommand[0].Command)
+	initializeScript, err := lifecycle.Decode(pod.Spec.InitContainers[2].Command[3])
+	requirements.NoError(err)
+	assertions.Equal("printf initialized", initializeScript[0].Script)
+	requirements.NotNil(pod.Spec.Containers[0].Lifecycle)
+	requirements.NotNil(pod.Spec.Containers[0].Lifecycle.PreStop)
+	beforeStop, err := lifecycle.Decode(pod.Spec.Containers[0].Lifecycle.PreStop.Exec.Command[3])
+	requirements.NoError(err)
+	assertions.Equal([]string{lifecycleToolTestName, "cleanup"}, beforeStop[0].Command)
+}
+
+func TestWorkspaceInitializationFailureReportsCrashLoopExit(t *testing.T) {
+	t.Parallel()
+	pod := &corev1.Pod{Status: corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{{
+		Name: "rc-initialize-0",
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+			Reason: "CrashLoopBackOff",
+		}},
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 17}},
+	}}}}
+	reason, message := workspaceInitializationFailure(pod)
+	assert.Equal(t, "InitializationFailed", reason)
+	assert.Contains(t, message, "rc-initialize-0")
+	assert.Contains(t, message, "17")
+}
 
 func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 	t.Parallel()
@@ -77,7 +221,7 @@ func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 		},
 		Status: repositoriesv1alpha1.WorktreeStatus{
 			VolumeClaimName: "rc-main",
-			WorktreePath:    "/repository",
+			WorktreePath:    repositoryRootMountPath,
 			Conditions: []metav1.Condition{{
 				Type: repositoriesv1alpha1.WorktreeConditionReady, Status: metav1.ConditionTrue, Reason: "WorktreeReady",
 			}},

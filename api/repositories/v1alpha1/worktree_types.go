@@ -24,6 +24,11 @@ import (
 )
 
 const (
+	// WorktreeConditionVolumeReady reports whether the cloned child PVC can be
+	// mounted. Generated Workspace Worktrees may become volume-ready before the
+	// runtime initializes their Git branch.
+	WorktreeConditionVolumeReady = "VolumeReady"
+
 	// WorktreeConditionReady reports whether the child volume and its native
 	// Git worktree are ready for a workload to mount.
 	WorktreeConditionReady = "Ready"
@@ -127,7 +132,8 @@ type WorktreeStatus struct {
 	// +optional
 	WorktreePath string `json:"worktreePath,omitempty"`
 
-	// jobName is the bootstrap Job that ran git worktree add.
+	// jobName is the bootstrap Job that ran git worktree add. It is empty when a
+	// generated Workspace runtime initializes the cloned Repository root.
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 

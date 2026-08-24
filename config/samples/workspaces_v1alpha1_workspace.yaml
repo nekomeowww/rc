@@ -15,3 +15,10 @@ spec:
       worktreeRef:
         name: worktree-sample
   defaultWorkingDirectory: /workspace/rc
+  lifecycle:
+    initialize:
+      - command: ["git", "status", "--short"]
+        workingDirectory: /workspace/rc
+    beforeStop:
+      - script: |
+          printf 'Workspace runtime is stopping\n'

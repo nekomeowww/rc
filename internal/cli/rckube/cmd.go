@@ -24,6 +24,7 @@ import (
 	"github.com/spf13/cobra"
 
 	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
+	"github.com/nekomeowww/rc/internal/lifecycle"
 	runtime "github.com/nekomeowww/rc/internal/rckube"
 )
 
@@ -35,9 +36,30 @@ func NewCommand() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
-	root.AddCommand(newServeCommand(), newProcessCommand())
+	root.AddCommand(newServeCommand(), newProcessCommand(), newLifecycleCommand())
 
 	return root
+}
+
+func newLifecycleCommand() *cobra.Command {
+	var encodedActions string
+	command := &cobra.Command{
+		Use:   "lifecycle",
+		Short: "Run ordered Workspace lifecycle actions",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			actions, err := lifecycle.Decode(encodedActions)
+			if err != nil {
+				return err
+			}
+
+			return lifecycle.Run(command.Context(), actions, command.InOrStdin(), command.OutOrStdout(), command.ErrOrStderr())
+		},
+	}
+	command.Flags().StringVar(&encodedActions, "actions", "", "Base64url-encoded lifecycle action list")
+	_ = command.MarkFlagRequired("actions")
+
+	return command
 }
 
 func newServeCommand() *cobra.Command {

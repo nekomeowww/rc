@@ -15,7 +15,8 @@ on:
 
 concurrency: ${{ github.workflow }}-${{ inputs.codex_version }}-${{ inputs.runner_version }}
 
-permissions: {}
+permissions:
+  packages: write
 
 jobs:
   docker:

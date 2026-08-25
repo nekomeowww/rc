@@ -35,7 +35,7 @@ func TestValidateRejectsFileForGitHubImport(t *testing.T) {
 		file:           "token.txt",
 	}
 
-	assert.EqualError(t, options.validate(), "flag --file is only supported with --type agent")
+	assert.EqualError(t, options.validate(), "flag --file is only supported with --type agent or process")
 }
 
 func TestImportCommandAcceptsGitHubFlags(t *testing.T) {
@@ -48,4 +48,16 @@ func TestImportCommandAcceptsGitHubFlags(t *testing.T) {
 		"--name", "github-enterprise",
 	}))
 	require.NoError(t, command.Args(command, command.Flags().Args()))
+}
+
+func TestValidateAcceptsProcessCredentialImport(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, (options{
+		credentialType: credentialTypeProcess,
+		name:           "tool-auth",
+		file:           "/tmp/credentials.json",
+		mountPath:      "/home/agent/.tool/credentials.json",
+		environment:    []string{"TOOL_HOME=/home/agent/.tool"},
+	}).validate())
 }

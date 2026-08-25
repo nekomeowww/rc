@@ -186,9 +186,19 @@ func (supervisor *Supervisor) Start(request processruntime.StartRequest) (proces
 		_ = transcript.Close()
 		return processruntime.State{}, err
 	}
+	mountedCredentialLinks, err := supervisor.prepareCredentialMounts(request.ID, runtimeDirectory, request.CredentialMounts)
+	if err != nil {
+		_ = transcript.Close()
+		supervisor.releaseCredentialAliasesLocked(request.ID, credentialLinks, "")
+		_ = os.RemoveAll(runtimeDirectory)
+		return processruntime.State{}, err
+	}
+	credentialLinks = append(credentialLinks, mountedCredentialLinks...)
 	agentCredentialLink, err := supervisor.prepareAgentHome(request.ID, runtimeDirectory, request.AgentHome, request.CredentialFiles)
 	if err != nil {
 		_ = transcript.Close()
+		supervisor.releaseCredentialAliasesLocked(request.ID, credentialLinks, "")
+		_ = os.RemoveAll(runtimeDirectory)
 		return processruntime.State{}, err
 	}
 	defer func() {
@@ -756,6 +766,49 @@ func (supervisor *Supervisor) prepareCredentialAliases(processID string, process
 	return links, nil
 }
 
+func (supervisor *Supervisor) prepareCredentialMounts(processID string, processDirectory string, mounts []processruntime.CredentialMount) ([]string, error) {
+	links := make([]string, 0, len(mounts))
+	completed := false
+	defer func() {
+		if !completed {
+			supervisor.releaseCredentialAliasesLocked(processID, links, "")
+		}
+	}()
+	for _, mount := range mounts {
+		source, err := safeChildPath(processDirectory, mount.Source)
+		if err != nil {
+			return nil, fmt.Errorf("resolve credential mount source: %w", err)
+		}
+		if !filepath.IsAbs(mount.Target) || filepath.Clean(mount.Target) != mount.Target || mount.Target == string(filepath.Separator) {
+			return nil, fmt.Errorf("credential mount target %q must be a clean absolute file path", mount.Target)
+		}
+		if err := os.MkdirAll(filepath.Dir(mount.Target), 0o700); err != nil {
+			return nil, fmt.Errorf("create credential mount directory: %w", err)
+		}
+		sum := sha256.Sum256([]byte(mount.Target))
+		targetDirectory := filepath.Join(filepath.Dir(processDirectory), "credential-mounts", hex.EncodeToString(sum[:10]))
+		target, err := safeChildPath(targetDirectory, filepath.Base(mount.Target))
+		if err != nil {
+			return nil, err
+		}
+		if err := supervisor.claimCredentialAliasLocked(processID, mount.Target, target, func() error {
+			data, err := os.ReadFile(source)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+				return err
+			}
+			return os.WriteFile(target, data, 0o600)
+		}); err != nil {
+			return nil, fmt.Errorf("project credential file to %s: %w", mount.Target, err)
+		}
+		links = append(links, mount.Target)
+	}
+	completed = true
+	return links, nil
+}
+
 func (supervisor *Supervisor) prepareAgentHome(processID string, processDirectory string, agentHome string, files map[string][]byte) (string, error) {
 	if agentHome == "" {
 		return "", nil
@@ -791,7 +844,14 @@ func (supervisor *Supervisor) claimCredentialAliasLocked(processID string, link 
 		existing.owners[processID] = struct{}{}
 		return nil
 	}
-	if err := os.Remove(link); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if info, err := os.Lstat(link); err == nil {
+		if info.Mode()&os.ModeSymlink == 0 {
+			return fmt.Errorf("credential projection target %s already exists and is not a symbolic link", link)
+		}
+		if err := os.Remove(link); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	if err := prepare(); err != nil {

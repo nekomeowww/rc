@@ -412,12 +412,13 @@ remove, reorder, or reinterpret command arguments.
 
 An adapter for a recognized coding agent may supply default environment,
 credential paths, status detection, and Agent home layout. An unrecognized
-command still runs, but rcctl warns and does not automatically select a
-Credential. A caller may explicitly expose named credentials to an unknown
-command with repeated `--dangerously-include-credentials <name>` flags. There
-is no flag that implicitly exposes every Credential. Explicitly exposed
-credentials use `/run/rc/credentials/<name>/`, and `RC_CREDENTIALS_DIR` points
-to `/run/rc/credentials`.
+command still runs, but rcctl warns and does not automatically select an
+AgentCredential. A caller explicitly selects generic Credentials with repeated
+`--credential <name>` flags. There is no flag that implicitly exposes every
+Credential. Credentials use `/run/rc/credentials/<name>/`, and
+`RC_CREDENTIALS_DIR` points to `/run/rc/credentials`. A Process Credential may
+independently configure raw Secret-backed `files` and non-secret literal
+`envs`; selecting it applies both sets of projections.
 
 ### Terminal and attach behavior
 
@@ -628,7 +629,7 @@ live home volume, Worktree mounts, Credentials, ConfigMaps, Secrets, or resource
 settings. It uses only command arguments and caller environment pass-through.
 If exactly one compatible AgentCredential exists in the namespace, a known
 agent may select it automatically; several candidates require explicit ordered
-`--credential` flags.
+`--agent-credential` flags.
 
 All referenced Environments, Repositories, and existing Worktrees must already
 exist and be Ready. While constructing a generated Workspace, `--repo <name>`

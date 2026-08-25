@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -25,11 +26,15 @@ type options struct {
 	file           string
 	hostname       string
 	name           string
+	mountPath      string
+	environment    []string
 }
 
 const (
-	credentialTypeGitHub = "github"
-	defaultGitHubHost    = "github.com"
+	credentialTypeAgent   = "agent"
+	credentialTypeProcess = "process"
+	credentialTypeGitHub  = "github"
+	defaultGitHubHost     = "github.com"
 )
 
 // NewCommand creates the credential import command.
@@ -51,22 +56,43 @@ func NewCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	cmd.Flags().StringVar(&commandOptions.file, "file", "", "Path to the credential file")
 	cmd.Flags().StringVar(&commandOptions.hostname, "hostname", defaultGitHubHost, "GitHub hostname for --type github")
 	cmd.Flags().StringVar(&commandOptions.name, "name", "", "Credential metadata.name; derive it from the GitHub hostname when omitted")
+	cmd.Flags().StringVar(&commandOptions.mountPath, "mount-path", "", "Absolute process-scoped file path for --type process")
+	cmd.Flags().StringArrayVar(&commandOptions.environment, "env", nil, "Literal NAME=value added when the process Credential is selected; repeat")
 	return cmd
 }
 
 func (options options) validate() error {
 	switch options.credentialType {
-	case "agent":
-		if options.agent != string(configsv1alpha1.AgentTypeCodex) {
-			return fmt.Errorf("unsupported agent %q: only codex is supported", options.agent)
+	case credentialTypeAgent:
+		agent := configsv1alpha1.AgentType(options.agent)
+		if agent != configsv1alpha1.AgentTypeCodex {
+			return fmt.Errorf("unsupported agent %q: supported agent is codex", options.agent)
 		}
 		if options.file == "" {
 			return errors.New("flag --file is required")
 		}
 		return nil
+	case credentialTypeProcess:
+		if options.name == "" {
+			return errors.New("flag --name is required")
+		}
+		if validationErrors := validation.IsDNS1123Subdomain(options.name); len(validationErrors) > 0 {
+			return fmt.Errorf("invalid Credential name %q: %s", options.name, validationErrors[0])
+		}
+		if options.file == "" {
+			return errors.New("flag --file is required")
+		}
+		if options.mountPath == "" {
+			return errors.New("flag --mount-path is required")
+		}
+		if !filepath.IsAbs(options.mountPath) || filepath.Clean(options.mountPath) != options.mountPath || options.mountPath == string(filepath.Separator) {
+			return fmt.Errorf("credential mount path %q must be a clean absolute file path", options.mountPath)
+		}
+		_, err := parseCredentialEnvironment(options.environment)
+		return err
 	case credentialTypeGitHub:
 		if options.file != "" {
-			return errors.New("flag --file is only supported with --type agent")
+			return errors.New("flag --file is only supported with --type agent or process")
 		}
 		if hostname := strings.TrimSpace(options.hostname); hostname == "" || strings.ContainsAny(hostname, "/?#") {
 			return fmt.Errorf("invalid GitHub hostname %q", options.hostname)
@@ -78,7 +104,7 @@ func (options options) validate() error {
 		}
 		return nil
 	default:
-		return fmt.Errorf("unsupported credential type %q: only agent and github are supported", options.credentialType)
+		return fmt.Errorf("unsupported credential type %q: only agent, process, and github are supported", options.credentialType)
 	}
 }
 
@@ -89,7 +115,7 @@ func run(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, options options)
 		err   error
 	)
 	switch options.credentialType {
-	case "agent":
+	case credentialTypeAgent, credentialTypeProcess:
 		data, err = os.ReadFile(options.file)
 		if err != nil {
 			return fmt.Errorf("read credential file: %w", err)
@@ -135,6 +161,23 @@ func run(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, options options)
 		_, err = fmt.Fprintf(cmd.OutOrStdout(), "secret/%s %s\n", result.SecretName, result.SecretOperation)
 		return err
 	}
+	if options.credentialType == credentialTypeProcess {
+		environment, err := parseCredentialEnvironment(options.environment)
+		if err != nil {
+			return err
+		}
+		result, err := importer.ImportProcess(cmd.Context(), credentialservice.ImportProcessRequest{
+			Namespace: namespace, Name: options.name, Data: data, MountPath: options.mountPath, Envs: environment,
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "credential.configs.rc.ayaka.io/%s %s\n", result.CredentialName, result.CredentialOperation); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(cmd.OutOrStdout(), "secret/%s %s\n", result.SecretName, result.SecretOperation)
+		return err
+	}
 
 	result, err := importer.ImportAgent(cmd.Context(), credentialservice.ImportAgentRequest{
 		Namespace: namespace,
@@ -150,6 +193,26 @@ func run(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, options options)
 	}
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "secret/%s %s\n", result.SecretName, result.SecretOperation)
 	return err
+}
+
+func parseCredentialEnvironment(values []string) ([]configsv1alpha1.CredentialEnv, error) {
+	environment := make([]configsv1alpha1.CredentialEnv, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		name, literal, found := strings.Cut(value, "=")
+		if !found {
+			return nil, fmt.Errorf("credential environment %q must use NAME=value", value)
+		}
+		if validationErrors := validation.IsEnvVarName(name); len(validationErrors) > 0 {
+			return nil, fmt.Errorf("invalid credential environment variable %q: %s", name, validationErrors[0])
+		}
+		if _, exists := seen[name]; exists {
+			return nil, fmt.Errorf("credential environment variable %q is repeated", name)
+		}
+		seen[name] = struct{}{}
+		environment = append(environment, configsv1alpha1.CredentialEnv{Name: name, Value: literal})
+	}
+	return environment, nil
 }
 
 func readGitHubToken(ctx context.Context, hostname string) (string, error) {

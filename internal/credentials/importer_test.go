@@ -72,6 +72,47 @@ func TestImportAgentCreatesAndUpdatesCredentialObjects(t *testing.T) {
 	assert.Equal(t, []byte("keep"), secret.Data["preserved"], "preserve unrelated Secret data")
 }
 
+func TestImportProcessPreservesRawBytesAndIndependentProjections(t *testing.T) {
+	t.Parallel()
+	const namespace = "credentials"
+	const credentialName = "tool-auth"
+	raw := []byte{0x00, 0x01, '{', '\n', 0xff}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme), "register core Kubernetes types")
+	require.NoError(t, configsv1alpha1.AddToScheme(scheme), "register rc API types")
+
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	importer := NewImporter(kubeClient, scheme)
+	result, err := importer.ImportProcess(context.Background(), ImportProcessRequest{
+		Namespace: namespace, Name: credentialName, Data: raw, MountPath: "/home/agent/.tool/credentials.json",
+		Envs: []configsv1alpha1.CredentialEnv{{Name: "TOOL_HOME", Value: "/home/agent/.tool"}},
+	})
+	require.NoError(t, err, "import raw file credential")
+	assert.Equal(t, credentialName, result.CredentialName)
+	assert.Equal(t, credentialName+"-file", result.SecretName)
+	assert.Equal(t, fileCredentialSecretKey, result.SecretKey)
+
+	credential := new(configsv1alpha1.Credential)
+	require.NoError(t, kubeClient.Get(context.Background(), types.NamespacedName{
+		Namespace: namespace,
+		Name:      credentialName,
+	}, credential), "get imported file Credential")
+	require.NotNil(t, credential.Spec.Process, "process Credential has projection configuration")
+	assert.Equal(t, []configsv1alpha1.CredentialFile{{
+		DataRef:   configsv1alpha1.SecretKeyReference{Name: credentialName + "-file", Key: fileCredentialSecretKey},
+		MountPath: "/home/agent/.tool/credentials.json",
+	}}, credential.Spec.Process.Files)
+	assert.Equal(t, []configsv1alpha1.CredentialEnv{{Name: "TOOL_HOME", Value: "/home/agent/.tool"}}, credential.Spec.Process.Envs)
+
+	secret := new(corev1.Secret)
+	require.NoError(t, kubeClient.Get(context.Background(), types.NamespacedName{
+		Namespace: namespace,
+		Name:      credentialName + "-file",
+	}, secret), "get imported file Secret")
+	assert.Equal(t, raw, secret.Data[fileCredentialSecretKey], "store input bytes without transformation")
+}
+
 func TestImportAgentRejectsUnsupportedAgent(t *testing.T) {
 	t.Parallel()
 

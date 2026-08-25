@@ -101,7 +101,7 @@ func (importer *Importer) ImportGitHub(ctx context.Context, request ImportGitHub
 		if secret.Labels == nil {
 			secret.Labels = make(map[string]string)
 		}
-		secret.Labels["app.kubernetes.io/managed-by"] = "rcctl"
+		secret.Labels[managedByLabelName] = managedByRCCTL
 		secret.Type = corev1.SecretTypeOpaque
 		if secret.Data == nil {
 			secret.Data = make(map[string][]byte)

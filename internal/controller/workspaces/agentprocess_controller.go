@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,12 +50,14 @@ const (
 )
 
 type resolvedProcessTarget struct {
-	runtime     processruntime.Target
-	podUID      string
-	workingDir  string
-	environment map[string]string
-	agentHome   string
-	credentials map[string][]byte
+	runtime               processruntime.Target
+	podUID                string
+	workingDir            string
+	environment           map[string]string
+	agentHome             string
+	credentials           map[string][]byte
+	mounts                []processruntime.CredentialMount
+	credentialEnvironment map[string]string
 }
 
 // AgentProcessReconciler reconciles an at-most-once command with rc-kube.
@@ -286,11 +289,15 @@ func (r *AgentProcessReconciler) resolveProcessTarget(ctx context.Context, proce
 		if err != nil {
 			return nil, "", "", err
 		}
+		credentialMounts, credentialEnvironment, err := r.resolveCredentialProjections(ctx, process.Namespace, process.Spec.CredentialRefs)
+		if err != nil {
+			return nil, "", "", err
+		}
 
 		return &resolvedProcessTarget{
 			runtime: processruntime.Target{Namespace: process.Namespace, Pod: pod.Name, Container: runtimeContainerName},
 			podUID:  string(pod.UID), workingDir: workingDirectory, environment: environment,
-			agentHome: agentHome, credentials: credentialFiles,
+			agentHome: agentHome, credentials: credentialFiles, mounts: credentialMounts, credentialEnvironment: credentialEnvironment,
 		}, "", "", nil
 	case workspacesv1alpha1.AgentProcessTargetWorkspaceEnvironment:
 		return r.resolveEnvironmentProcessTarget(ctx, process)
@@ -368,7 +375,18 @@ func (r *AgentProcessReconciler) resolveProcessCredentials(ctx context.Context, 
 	credentialFiles := make(map[string][]byte)
 	agentCredentialRef := process.Spec.AgentCredentialRef
 	if agentCredentialRef == nil && process.Spec.AgentType != "" && len(workspace.Spec.AgentCredentialRefs) > 0 {
-		agentCredentialRef = &workspace.Spec.AgentCredentialRefs[0]
+		for index := range workspace.Spec.AgentCredentialRefs {
+			reference := &workspace.Spec.AgentCredentialRefs[index]
+			credential := new(configsv1alpha1.AgentCredential)
+			key := types.NamespacedName{Name: reference.Name, Namespace: workspace.Namespace}
+			if err := r.Get(ctx, key, credential); err != nil {
+				return "", nil, fmt.Errorf("get AgentCredential: %w", err)
+			}
+			if string(credential.Spec.Agent) == process.Spec.AgentType {
+				agentCredentialRef = reference
+				break
+			}
+		}
 	}
 	agentHome := ""
 	if process.Spec.AgentType != "" {
@@ -464,6 +482,16 @@ func (r *AgentProcessReconciler) resolveGenericCredential(ctx context.Context, n
 				break
 			}
 		}
+	case configsv1alpha1.CredentialTypeProcess:
+		if credential.Spec.Process == nil {
+			return nil, fmt.Errorf("process Credential %s has no process configuration", credential.Name)
+		}
+		for index, file := range credential.Spec.Process.Files {
+			files[filepath.Join("files", strconv.Itoa(index))], err = read(file.DataRef)
+			if err != nil {
+				break
+			}
+		}
 	default:
 		return nil, fmt.Errorf("credential %s has unsupported type %s", credential.Name, credential.Spec.Type)
 	}
@@ -474,8 +502,44 @@ func (r *AgentProcessReconciler) resolveGenericCredential(ctx context.Context, n
 	return files, nil
 }
 
+func (r *AgentProcessReconciler) resolveCredentialProjections(ctx context.Context, namespace string, references []workspacesv1alpha1.LocalReference) ([]processruntime.CredentialMount, map[string]string, error) {
+	mounts := make([]processruntime.CredentialMount, 0)
+	environment := make(map[string]string)
+	targets := make(map[string]string)
+	for _, reference := range references {
+		credential := new(configsv1alpha1.Credential)
+		if err := r.Get(ctx, types.NamespacedName{Name: reference.Name, Namespace: namespace}, credential); err != nil {
+			return nil, nil, fmt.Errorf("get Credential %s projection: %w", reference.Name, err)
+		}
+		if credential.Spec.Type != configsv1alpha1.CredentialTypeProcess {
+			continue
+		}
+		if credential.Spec.Process == nil {
+			return nil, nil, fmt.Errorf("process Credential %s has no process configuration", reference.Name)
+		}
+		for index, file := range credential.Spec.Process.Files {
+			mountPath := file.MountPath
+			if owner, exists := targets[mountPath]; exists {
+				return nil, nil, fmt.Errorf("credentials %s and %s project to the same path %s", owner, reference.Name, mountPath)
+			}
+			targets[mountPath] = reference.Name
+			mounts = append(mounts, processruntime.CredentialMount{
+				Source: filepath.Join("credentials", reference.Name, "files", strconv.Itoa(index)), Target: mountPath,
+			})
+		}
+		for _, variable := range credential.Spec.Process.Envs {
+			if previous, exists := environment[variable.Name]; exists && previous != variable.Value {
+				return nil, nil, fmt.Errorf("selected Credentials define conflicting values for environment variable %s", variable.Name)
+			}
+			environment[variable.Name] = variable.Value
+		}
+	}
+	return mounts, environment, nil
+}
+
 func (r *AgentProcessReconciler) processStartRequest(ctx context.Context, process *workspacesv1alpha1.AgentProcess, target *resolvedProcessTarget) (processruntime.StartRequest, error) {
 	environment := make(map[string]string, len(target.environment)+3)
+	maps.Copy(environment, target.credentialEnvironment)
 	maps.Copy(environment, target.environment)
 	if target.agentHome != "" {
 		if _, exists := environment["RC_AGENT_HOME"]; !exists {
@@ -503,7 +567,7 @@ func (r *AgentProcessReconciler) processStartRequest(ctx context.Context, proces
 	return processruntime.StartRequest{
 		ID: process.Name, UID: string(process.UID), Command: append([]string(nil), process.Spec.Command...),
 		WorkingDirectory: target.workingDir, TTY: process.Spec.TTY, Environment: environment,
-		AgentHome: target.agentHome, CredentialFiles: target.credentials,
+		AgentHome: target.agentHome, CredentialFiles: target.credentials, CredentialMounts: append([]processruntime.CredentialMount(nil), target.mounts...),
 		RuntimeDirectory: filepath.Join("/run/rc/processes", process.Name), CredentialsRoot: "/run/rc/credentials",
 		TranscriptPath: filepath.Join(workspaceHomeMountPath, ".rc", "processes", process.Name, "transcript.log"),
 	}, nil

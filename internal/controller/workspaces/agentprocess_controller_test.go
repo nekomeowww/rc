@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
 )
@@ -138,6 +139,64 @@ func TestAgentProcessReconcileStartsCommandAtReadyWorkspace(t *testing.T) {
 	assertions.Equal(testWorkspaceName, persisted.Status.RuntimePodName, "publish runtime Pod name")
 	assertions.NotNil(persisted.Status.StartedAt, "record start time")
 	assertions.Equal(".rc/processes/codex-01k2example/transcript.log", persisted.Status.TranscriptPath, "publish transcript index")
+}
+
+func TestProcessCredentialProjectsFilesAndEnvsIndependently(t *testing.T) {
+	t.Parallel()
+	const credentialName = "tool-auth"
+	const mountPath = "/home/agent/.tool/credentials.json"
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme), "register core API types")
+	require.NoError(t, configsv1alpha1.AddToScheme(scheme), "register config API types")
+	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
+
+	workspace := &workspacesv1alpha1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testNamespace},
+		Spec:       workspacesv1alpha1.WorkspaceSpec{CredentialRefs: []workspacesv1alpha1.LocalReference{{Name: credentialName}}},
+	}
+	credential := &configsv1alpha1.Credential{
+		ObjectMeta: metav1.ObjectMeta{Name: credentialName, Namespace: testNamespace},
+		Spec: configsv1alpha1.CredentialSpec{
+			Type: configsv1alpha1.CredentialTypeProcess,
+			Process: &configsv1alpha1.ProcessCredential{
+				Files: []configsv1alpha1.CredentialFile{{
+					DataRef: configsv1alpha1.SecretKeyReference{Name: "tool-auth-file", Key: "data"}, MountPath: mountPath,
+				}},
+				Envs: []configsv1alpha1.CredentialEnv{{Name: "TOOL_HOME", Value: "/home/agent/.tool"}},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "tool-auth-file", Namespace: testNamespace},
+		Data:       map[string][]byte{"data": []byte("raw\x00credential")},
+	}
+	process := &workspacesv1alpha1.AgentProcess{
+		ObjectMeta: metav1.ObjectMeta{Name: "tool-process", Namespace: testNamespace},
+		Spec:       workspacesv1alpha1.AgentProcessSpec{CredentialRefs: []workspacesv1alpha1.LocalReference{{Name: credentialName}}},
+	}
+	reconciler := &AgentProcessReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, credential, secret).Build(),
+		Scheme: scheme,
+	}
+
+	agentHome, files, err := reconciler.resolveProcessCredentials(ctx, workspace, process)
+	require.NoError(t, err)
+	assert.Empty(t, agentHome)
+	assert.Equal(t, []byte("raw\x00credential"), files["credentials/"+credentialName+"/files/0"])
+	mounts, environment, err := reconciler.resolveCredentialProjections(ctx, testNamespace, process.Spec.CredentialRefs)
+	require.NoError(t, err)
+	assert.Equal(t, []processruntime.CredentialMount{{Source: "credentials/" + credentialName + "/files/0", Target: mountPath}}, mounts)
+	assert.Equal(t, map[string]string{"TOOL_HOME": "/home/agent/.tool"}, environment)
+
+	request, err := reconciler.processStartRequest(ctx, process, &resolvedProcessTarget{
+		credentials:           files,
+		mounts:                mounts,
+		credentialEnvironment: environment,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "/home/agent/.tool", request.Environment["TOOL_HOME"])
+	assert.Equal(t, mounts, request.CredentialMounts)
 }
 
 func TestRunningAgentProcessBecomesLostWhenOriginalPodDisappears(t *testing.T) {

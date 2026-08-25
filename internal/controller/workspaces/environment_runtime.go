@@ -133,11 +133,15 @@ func (r *AgentProcessReconciler) resolveEnvironmentProcessTarget(ctx context.Con
 	if err != nil {
 		return nil, "", "", err
 	}
+	credentialMounts, credentialEnvironment, err := r.resolveCredentialProjections(ctx, process.Namespace, process.Spec.CredentialRefs)
+	if err != nil {
+		return nil, "", "", err
+	}
 
 	return &resolvedProcessTarget{
 		runtime: processruntime.Target{Namespace: environment.Namespace, Pod: editor.Name, Container: runtimeContainerName},
 		podUID:  string(editor.UID), workingDir: workingDirectory, environment: environmentVariables,
-		agentHome: agentHome, credentials: credentialFiles,
+		agentHome: agentHome, credentials: credentialFiles, mounts: credentialMounts, credentialEnvironment: credentialEnvironment,
 	}, "", "", nil
 }
 

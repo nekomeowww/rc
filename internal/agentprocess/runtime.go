@@ -31,6 +31,12 @@ type Target struct {
 	Container string
 }
 
+// CredentialMount projects one temporary credential source to a process path.
+type CredentialMount struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+}
+
 // StartRequest is the versioned process contract sent to rc-kube.
 type StartRequest struct {
 	ID               string            `json:"id"`
@@ -41,6 +47,7 @@ type StartRequest struct {
 	Environment      map[string]string `json:"environment,omitempty"`
 	AgentHome        string            `json:"agentHome,omitempty"`
 	CredentialFiles  map[string][]byte `json:"credentialFiles,omitempty"`
+	CredentialMounts []CredentialMount `json:"credentialMounts,omitempty"`
 	RuntimeDirectory string            `json:"runtimeDirectory,omitempty"`
 	CredentialsRoot  string            `json:"credentialsRoot,omitempty"`
 	TranscriptPath   string            `json:"transcriptPath"`

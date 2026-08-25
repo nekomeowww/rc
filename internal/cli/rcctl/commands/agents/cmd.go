@@ -44,11 +44,13 @@ import (
 type runOptions struct {
 	workspace        string
 	temporary        bool
+	detach           bool
 	environment      string
 	repositories     []string
 	worktrees        []string
+	agentCredentials []string
 	credentials      []string
-	genericCreds     []string
+	legacyGeneric    []string
 	environmentVars  []string
 	environmentFiles []string
 	noPassthrough    bool
@@ -97,6 +99,9 @@ func newRunCommand(kubeconfigFlags *kubeconfig.Flags, tty bool) *cobra.Command {
 		},
 	}
 	addRunFlags(cmd, options)
+	if tty {
+		cmd.Flags().BoolVarP(&options.detach, "detach", "d", false, "Start the Agent Process without attaching")
+	}
 	cmd.Flags().SetInterspersed(false)
 
 	return cmd
@@ -108,8 +113,10 @@ func addRunFlags(cmd *cobra.Command, options *runOptions) {
 	cmd.Flags().StringVar(&options.environment, "environment", "", "WorkspaceEnvironment for a generated Workspace or existing-target requirement")
 	cmd.Flags().StringArrayVar(&options.repositories, "repo", nil, "Repository requirement or generated writable Worktree source; repeat")
 	cmd.Flags().StringArrayVar(&options.worktrees, "worktree", nil, "Worktree requirement or generated mount; repeat")
-	cmd.Flags().StringArrayVar(&options.credentials, "credential", nil, "Ordered AgentCredential names; repeat")
-	cmd.Flags().StringArrayVar(&options.genericCreds, "dangerously-include-credentials", nil, "Generic Credential names to expose; repeat")
+	cmd.Flags().StringArrayVar(&options.agentCredentials, "agent-credential", nil, "Ordered AgentCredential names; repeat")
+	cmd.Flags().StringArrayVar(&options.credentials, "credential", nil, "Credential names to project into the process; repeat")
+	cmd.Flags().StringArrayVar(&options.legacyGeneric, "dangerously-include-credentials", nil, "Deprecated alias for --credential; repeat")
+	_ = cmd.Flags().MarkDeprecated("dangerously-include-credentials", "use --credential")
 	cmd.Flags().StringArrayVar(&options.environmentVars, "env", nil, "Explicit NAME or NAME=value; repeat")
 	cmd.Flags().StringArrayVar(&options.environmentFiles, "env-file", nil, "Read environment values from a file; repeat")
 	cmd.Flags().BoolVar(&options.noPassthrough, "no-env-passthrough", false, "Disable caller environment pass-through")
@@ -141,14 +148,6 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 		return err
 	}
 	agentType := workspaceservice.AgentTypeForCommand(argv[0])
-	if agentType == "" {
-		if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "warning: command %q has no recognized agent adapter; credentials will not be selected automatically\n", argv[0]); err != nil {
-			return err
-		}
-		if len(options.credentials) > 0 {
-			return fmt.Errorf("--credential requires a recognized agent command; use --dangerously-include-credentials for generic credentials")
-		}
-	}
 	repositories, err := resolveRepositories(cmd.Context(), clusterClient.Kube, namespace, options.repositories)
 	if err != nil {
 		return err
@@ -162,9 +161,20 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 		Environment: options.environment, DefaultEnvironment: defaults.Environment,
 		Repositories: repositories, Worktrees: worktrees,
 	}
-	credentialNames, err := selectAgentCredentials(cmd.Context(), clusterClient.Kube, namespace, agentType, options.credentials, runRequest.UsesGeneratedWorkspace())
+	credentialRefs := append(append([]string(nil), options.credentials...), options.legacyGeneric...)
+	credentialNames, agentCredential, selectedAgentType, err := selectAgentCredentials(
+		cmd.Context(), clusterClient.Kube, namespace, agentType, options.agentCredentials, runRequest.UsesGeneratedWorkspace(),
+	)
 	if err != nil {
 		return err
+	}
+	if selectedAgentType != "" {
+		agentType = selectedAgentType
+	}
+	if agentType == "" && len(credentialRefs) == 0 {
+		if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "warning: command %q has no recognized agent adapter; AgentCredentials will not be selected automatically\n", argv[0]); err != nil {
+			return err
+		}
 	}
 	storage, err := generatedStorage(options)
 	if err != nil {
@@ -178,7 +188,7 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 		automount = boolPointer(false)
 	}
 	runRequest.AgentCredentialRefs = credentialNames
-	runRequest.CredentialRefs = options.genericCreds
+	runRequest.CredentialRefs = credentialRefs
 	runRequest.Storage = storage
 	runRequest.Image = options.image
 	runRequest.Resources = resources
@@ -210,15 +220,11 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 	if err != nil {
 		return err
 	}
-	agentCredential := ""
-	if len(credentialNames) > 0 {
-		agentCredential = credentialNames[0]
-	}
 	processClient := &workspaceservice.ProcessClient{Kube: clusterClient.Kube, Runtime: clusterClient.Processes, Config: config}
 	process, err := processClient.Start(cmd.Context(), workspaceservice.ProcessStartRequest{
 		Namespace: namespace, Target: workspacesv1alpha1.AgentProcessTargetReference{Kind: workspacesv1alpha1.AgentProcessTargetWorkspace, Name: target.Workspace.Name},
 		Command: argv, WorkingDirectory: options.cwd, TTY: tty, AgentType: agentType,
-		AgentCredential: agentCredential, Credentials: options.genericCreds, Environment: values,
+		AgentCredential: agentCredential, Credentials: credentialRefs, Environment: values,
 	})
 	if err != nil {
 		return err
@@ -231,6 +237,9 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 	indicator.Stop()
 	if err != nil {
 		return err
+	}
+	if options.detach && !processTerminal(ready.Status.Phase) {
+		return nil
 	}
 	if processTerminal(ready.Status.Phase) {
 		if err := processClient.Logs(cmd.Context(), ready, cmd.OutOrStdout()); err != nil {
@@ -260,25 +269,32 @@ func loadDefaults(contextName string, namespace string) (workspaceservice.Defaul
 	return (workspaceservice.DefaultStore{Path: path}).Get(contextName, namespace)
 }
 
-func selectAgentCredentials(ctx context.Context, kubeClient client.Client, namespace string, agentType string, explicit []string, generated bool) ([]string, error) {
+func selectAgentCredentials(ctx context.Context, kubeClient client.Client, namespace string, agentType string, explicit []string, generated bool) ([]string, string, string, error) {
 	if len(explicit) > 0 {
+		selectedName := ""
+		selectedType := ""
 		for _, name := range explicit {
 			credential := new(configsv1alpha1.AgentCredential)
 			if err := kubeClient.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, credential); err != nil {
-				return nil, fmt.Errorf("get AgentCredential %q: %w", name, err)
+				return nil, "", "", fmt.Errorf("get AgentCredential %q: %w", name, err)
 			}
-			if agentType != "" && string(credential.Spec.Agent) != agentType {
-				return nil, fmt.Errorf("agent credential %q is for %s, not %s", name, credential.Spec.Agent, agentType)
+			credentialType := string(credential.Spec.Agent)
+			if selectedName == "" && (agentType == "" || credentialType == agentType) {
+				selectedName = name
+				selectedType = credentialType
 			}
 		}
-		return append([]string(nil), explicit...), nil
+		if selectedName == "" {
+			return nil, "", "", fmt.Errorf("none of the selected AgentCredentials are for %s", agentType)
+		}
+		return append([]string(nil), explicit...), selectedName, selectedType, nil
 	}
 	if agentType == "" || !generated {
-		return nil, nil
+		return nil, "", agentType, nil
 	}
 	list := new(configsv1alpha1.AgentCredentialList)
 	if err := kubeClient.List(ctx, list, client.InNamespace(namespace)); err != nil {
-		return nil, fmt.Errorf("list compatible AgentCredentials: %w", err)
+		return nil, "", "", fmt.Errorf("list compatible AgentCredentials: %w", err)
 	}
 	matches := make([]string, 0, len(list.Items))
 	for _, credential := range list.Items {
@@ -287,10 +303,13 @@ func selectAgentCredentials(ctx context.Context, kubeClient client.Client, names
 		}
 	}
 	if len(matches) > 1 {
-		return nil, fmt.Errorf("multiple %s AgentCredentials exist; select an ordered credential with --credential", agentType)
+		return nil, "", "", fmt.Errorf("multiple %s AgentCredentials exist; select an ordered credential with --agent-credential", agentType)
 	}
-
-	return matches, nil
+	selected := ""
+	if len(matches) == 1 {
+		selected = matches[0]
+	}
+	return matches, selected, agentType, nil
 }
 
 func resolveRepositories(ctx context.Context, kubeClient client.Client, namespace string, selectors []string) ([]workspaceservice.MountRequest, error) {

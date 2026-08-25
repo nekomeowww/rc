@@ -19,6 +19,8 @@ const (
 	codexCredentialName = "codex"
 	codexSecretName     = "codex-auth"
 	codexSecretKey      = "auth.json"
+	managedByLabelName  = "app.kubernetes.io/managed-by"
+	managedByRCCTL      = "rcctl"
 )
 
 // ImportAgentRequest contains the identity and secret bytes needed to import
@@ -93,7 +95,7 @@ func (importer *Importer) ImportAgent(ctx context.Context, request ImportAgentRe
 			secret.Labels = make(map[string]string)
 		}
 
-		secret.Labels["app.kubernetes.io/managed-by"] = "rcctl"
+		secret.Labels[managedByLabelName] = managedByRCCTL
 		secret.Type = corev1.SecretTypeOpaque
 		if secret.Data == nil {
 			secret.Data = make(map[string][]byte)

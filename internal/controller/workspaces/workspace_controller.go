@@ -124,9 +124,11 @@ type WorkspaceReconciler struct {
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaceenvironments;agentprocesses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=repositories;worktrees,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims;pods;serviceaccounts;configmaps;secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods/exec;pods/log;pods/portforward,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=agentprocesses/status,verbs=get;list;watch;create;update;patch;delete
 
 //nolint:gocyclo // Reconcile is an explicit lifecycle state machine with guarded transitions.
 func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {

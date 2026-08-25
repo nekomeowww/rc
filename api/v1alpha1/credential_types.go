@@ -26,7 +26,7 @@ import (
 
 // CredentialType describes how a consumer presents credential data to a
 // remote system.
-// +kubebuilder:validation:Enum=SSHPrivateKey;HTTPBasicAuth;HTTPBearerToken;HTTPHeaders
+// +kubebuilder:validation:Enum=SSHPrivateKey;HTTPBasicAuth;HTTPBearerToken;HTTPHeaders;Process
 type CredentialType string
 
 const (
@@ -38,6 +38,8 @@ const (
 	CredentialTypeHTTPBearerToken CredentialType = "HTTPBearerToken"
 	// CredentialTypeHTTPHeaders identifies named HTTP header values.
 	CredentialTypeHTTPHeaders CredentialType = "HTTPHeaders"
+	// CredentialTypeProcess identifies credentials projected into a process.
+	CredentialTypeProcess CredentialType = "Process"
 )
 
 // SecretKeyReference selects one data entry from a Secret in the same
@@ -112,11 +114,54 @@ type HTTPHeadersCredential struct {
 	Headers []HTTPHeader `json:"headers"`
 }
 
+// CredentialEnv projects one non-secret literal environment variable when a
+// Credential is selected for a process.
+type CredentialEnv struct {
+	// name is the environment variable name.
+	// +kubebuilder:validation:Pattern="^[A-Za-z_][A-Za-z0-9_]*$"
+	// +required
+	Name string `json:"name"`
+
+	// value is the literal environment variable value.
+	// +required
+	Value string `json:"value"`
+}
+
+// CredentialFile projects raw Secret data to one process-scoped path.
+type CredentialFile struct {
+	// dataRef selects the raw file bytes from a Secret in the same namespace.
+	// +required
+	DataRef SecretKeyReference `json:"dataRef"`
+
+	// mountPath is the absolute file path exposed while the process is alive.
+	// +kubebuilder:validation:Pattern="^/.*"
+	// +required
+	MountPath string `json:"mountPath"`
+}
+
+// ProcessCredential configures independent file and environment projections.
+// +kubebuilder:validation:XValidation:rule="(has(self.files) && size(self.files) > 0) || (has(self.envs) && size(self.envs) > 0)",message="at least one file or env entry is required"
+type ProcessCredential struct {
+	// files project raw Secret data to process-scoped paths.
+	// +listType=map
+	// +listMapKey=mountPath
+	// +optional
+	Files []CredentialFile `json:"files,omitempty"`
+
+	// envs project non-secret literal environment variables. Explicit process
+	// environment variables take precedence.
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	Envs []CredentialEnv `json:"envs,omitempty"`
+}
+
 // CredentialSpec defines the desired state of Credential.
 // +kubebuilder:validation:XValidation:rule="self.type == 'SSHPrivateKey' ? has(self.sshPrivateKey) : !has(self.sshPrivateKey)",message="sshPrivateKey must be set exactly when type is SSHPrivateKey"
 // +kubebuilder:validation:XValidation:rule="self.type == 'HTTPBasicAuth' ? has(self.httpBasicAuth) : !has(self.httpBasicAuth)",message="httpBasicAuth must be set exactly when type is HTTPBasicAuth"
 // +kubebuilder:validation:XValidation:rule="self.type == 'HTTPBearerToken' ? has(self.httpBearerToken) : !has(self.httpBearerToken)",message="httpBearerToken must be set exactly when type is HTTPBearerToken"
 // +kubebuilder:validation:XValidation:rule="self.type == 'HTTPHeaders' ? has(self.httpHeaders) : !has(self.httpHeaders)",message="httpHeaders must be set exactly when type is HTTPHeaders"
+// +kubebuilder:validation:XValidation:rule="self.type == 'Process' ? has(self.process) : !has(self.process)",message="process must be set exactly when type is Process"
 type CredentialSpec struct {
 	// type describes how consumers present the referenced secret data.
 	// +required
@@ -137,6 +182,10 @@ type CredentialSpec struct {
 	// httpHeaders configures named secret HTTP request headers.
 	// +optional
 	HTTPHeaders *HTTPHeadersCredential `json:"httpHeaders,omitempty"`
+
+	// process configures file and environment projections for explicitly selected processes.
+	// +optional
+	Process *ProcessCredential `json:"process,omitempty"`
 }
 
 // CredentialStatus defines the observed state of Credential.

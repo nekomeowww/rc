@@ -10,6 +10,9 @@ rules:
   - configmaps
   - persistentvolumeclaims
   - pods
+  - pods/exec
+  - pods/log
+  - pods/portforward
   - secrets
   - serviceaccounts
   verbs:
@@ -28,12 +31,6 @@ rules:
   - get
   - list
   - watch
-- apiGroups:
-  - ""
-  resources:
-  - pods/exec
-  verbs:
-  - create
 - apiGroups:
   - batch
   resources:
@@ -133,6 +130,7 @@ rules:
   - workspaces.rc.ayaka.io
   resources:
   - agentprocesses
+  - agentprocesses/status
   - workspaceenvironments
   - workspaces
   verbs:
@@ -154,7 +152,6 @@ rules:
 - apiGroups:
   - workspaces.rc.ayaka.io
   resources:
-  - agentprocesses/status
   - workspaceenvironments/status
   - workspaces/status
   verbs:

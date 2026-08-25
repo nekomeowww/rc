@@ -34,6 +34,7 @@ const (
 	testProcessUID          = "uid"
 	testTrueCommand         = "true"
 	testCredentialsVariable = "RC_CREDENTIALS_DIR"
+	testCredentialDataPath  = "credentials/custom/data"
 )
 
 func TestSupervisorRunsCommandOnceAndPersistsTranscript(t *testing.T) {
@@ -180,6 +181,59 @@ func TestSupervisorKeepsCredentialsOutOfPersistentState(t *testing.T) {
 	requirements.ErrorIs(err, os.ErrNotExist, "remove temporary process credentials after exit")
 	_, err = os.Lstat(filepath.Join(credentialsRoot, "github"))
 	requirements.ErrorIs(err, os.ErrNotExist, "remove generic credential alias after exit")
+}
+
+func TestSupervisorProjectsWritableCredentialFileForProcessLifetime(t *testing.T) {
+	t.Parallel()
+	requirements := require.New(t)
+	stateDirectory := t.TempDir()
+	runtimeRoot := t.TempDir()
+	runtimeDirectory := filepath.Join(runtimeRoot, "credential-consumer")
+	mountPath := filepath.Join(t.TempDir(), ".tool", "credentials.json")
+	supervisor := NewSupervisor(stateDirectory, 100*time.Millisecond)
+	request := processruntime.StartRequest{
+		ID: "credential-consumer", UID: testProcessUID,
+		Command:     []string{"sh", "-c", "cat \"$CREDENTIAL_FILE\"; printf rotated > \"$CREDENTIAL_FILE\""},
+		Environment: map[string]string{"CREDENTIAL_FILE": mountPath}, RuntimeDirectory: runtimeDirectory,
+		CredentialFiles:  map[string][]byte{testCredentialDataPath: []byte("portable")},
+		CredentialMounts: []processruntime.CredentialMount{{Source: testCredentialDataPath, Target: mountPath}},
+	}
+
+	_, err := supervisor.Start(request)
+	requirements.NoError(err, "start native credential consumer")
+	requirements.Eventually(func() bool {
+		state, inspectErr := supervisor.Inspect(request.ID)
+		return inspectErr == nil && state.Phase == phaseExited
+	}, 3*time.Second, 10*time.Millisecond, "wait for native credential consumer")
+	var transcript bytes.Buffer
+	requirements.NoError(supervisor.Logs(request.ID, &transcript), "read native credential consumer output")
+	requirements.Equal("portable", transcript.String(), "read projected native credential file")
+	_, err = os.Lstat(mountPath)
+	requirements.ErrorIs(err, os.ErrNotExist, "remove native credential link after exit")
+	_, err = os.Stat(runtimeDirectory)
+	requirements.ErrorIs(err, os.ErrNotExist, "remove temporary process credential data after exit")
+}
+
+func TestSupervisorDoesNotReplaceExistingCredentialMountTarget(t *testing.T) {
+	t.Parallel()
+	requirements := require.New(t)
+	mountPath := filepath.Join(t.TempDir(), "credentials.json")
+	requirements.NoError(os.WriteFile(mountPath, []byte("user-data"), 0o600), "create existing target")
+	runtimeDirectory := filepath.Join(t.TempDir(), "credential-conflict")
+	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
+	request := processruntime.StartRequest{
+		ID: "credential-conflict", UID: testProcessUID, Command: []string{testTrueCommand}, RuntimeDirectory: runtimeDirectory,
+		CredentialFiles:  map[string][]byte{testCredentialDataPath: []byte("credential")},
+		CredentialMounts: []processruntime.CredentialMount{{Source: testCredentialDataPath, Target: mountPath}},
+	}
+
+	_, err := supervisor.Start(request)
+	requirements.Error(err, "reject a mount over an existing regular file")
+	data, err := os.ReadFile(mountPath)
+	requirements.NoError(err, "read preserved target")
+	requirements.Equal([]byte("user-data"), data, "preserve an existing user file")
+	_, err = os.Stat(runtimeDirectory)
+	requirements.ErrorIs(err, os.ErrNotExist, "clean temporary credential data after rejection")
 }
 
 func TestSharedCredentialProjectionSurvivesAnotherProcessExit(t *testing.T) {

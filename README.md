@@ -1,161 +1,226 @@
 # rc
-// TODO(user): Add simple overview of use/purpose
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+`rc` runs persistent, Kubernetes-backed development workspaces for coding agents.
+It keeps repositories, Git worktrees, home directories, credentials, and agent processes as explicit Kubernetes resources, while `rcctl` provides the day-to-day command-line workflow.
 
-## Getting Started
+The project consists of three programs:
 
-### Prerequisites
-- go version v1.24.6+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+- `rcctl` creates resources, imports credentials, and starts or reconnects to agent processes.
+- `rc-kube` supervises processes inside Workspace and Environment Pods.
+- `rc-controller` reconciles rc resources in Kubernetes.
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+> rc is under active development. Its APIs are currently `v1alpha1` and may
+> change between releases.
 
-```sh
-make docker-build docker-push IMG=<some-registry>/rc:tag
+## Why worktree-native?
+
+rc models a remote Git repository and a writable checkout separately:
+
+```text
+Git remote -> Repository parent PVC -> Worktree child PVC -> Workspace
+                                                        \-> AgentProcess
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+A `Repository` is the synchronized, authoritative mirror of a Git remote. A `Worktree` is an independent CSI clone of that Repository volume initialized with native `git worktree add` semantics. A `Workspace` mounts one or more Worktrees together with a persistent home directory, and can run multiple concurrent `AgentProcess` resources.
 
-**Install the CRDs into the cluster:**
+This gives each task an ordinary Git branch and working tree without repeatedly downloading the same remote. Worktrees remain inspectable after a process exits, and a disconnected terminal does not stop the process it started.
 
-```sh
-make install
-```
+Because Worktrees and prepared Workspace Environments use Kubernetes PVC cloning, the selected StorageClass must support volume cloning. The default `local-path` StorageClass in a standard Kind cluster does not provide that capability. For local development on macOS or Linux, rc uses the SIG Storage `csi-driver-host-path` with a single-node Kind cluster. It is a sample/CI driver, not a production storage system, and implements cloning as a full file copy.
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+## Install
 
-```sh
-make deploy IMG=<some-registry>/rc:tag
-```
+### Deploy the operator
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
-
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
-
-```sh
-kubectl apply -k config/samples/
-```
-
->**NOTE**: Ensure that the samples has default values to test it out.
-
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
-
-```sh
-kubectl delete -k config/samples/
-```
-
-**Delete the APIs(CRDs) from the cluster:**
-
-```sh
-make uninstall
-```
-
-**UnDeploy the controller from the cluster:**
-
-```sh
-make undeploy
-```
-
-## Project Distribution
-
-Following the options to release and provide this solution to the users.
-
-Tagged releases publish:
-
-- `rcctl` archives for Linux, macOS, and Windows on the GitHub Releases page.
-- The multi-platform controller image at
-  `ghcr.io/nekomeowww/rc/controller`.
-- The multi-platform runner image at `ghcr.io/nekomeowww/rc/runner`. The same
-  runner is used by Repository and Worktree Jobs and by blank Workspaces. It
-  includes the LobeHub CLI as `lh`, `lobe`, and `lobehub`.
-- A consolidated Kubebuilder installer named `install.yaml` as a release asset.
-
-Install the latest released operator with:
+Install the latest released controller, CRDs, and RBAC into the current Kubernetes context:
 
 ```sh
 kubectl apply -f https://github.com/nekomeowww/rc/releases/latest/download/install.yaml
+kubectl rollout status deployment/rc-controller-manager -n rc-system
 ```
 
-The OpenAI Codex CLI environment image is versioned independently at
-`ghcr.io/nekomeowww/rc/openai-codex-cli`. Maintainers publish it with the
-dedicated `Release OpenAI Codex CLI image` workflow.
+The released manifest uses matching versions of the public controller and runner images:
 
-The controller and runner packages must be public so a default rc installation
-can start runtime Pods without registry credentials. GitHub Container Registry
-creates a newly published package as private, so maintainers must make each
-package public after its first release.
+- `ghcr.io/nekomeowww/rc/controller`
+- `ghcr.io/nekomeowww/rc/runner`
 
-### By providing a bundle with all YAML files
+Your production StorageClass must support CSI PVC cloning. The local Kind setup described below is intentionally disposable and must not be used for production data.
 
-1. Build the installer for the image built and published in the registry:
+### Install rcctl
+
+Download a binary archive for Linux, macOS, or Windows from [GitHub Releases](https://github.com/nekomeowww/rc/releases), or install it from source with Go:
 
 ```sh
-make build-installer \
-  IMG=<some-registry>/rc/controller:tag \
-  RUNNER_IMG=<some-registry>/rc/runner:tag
+go install github.com/nekomeowww/rc/cmd/rcctl@latest
 ```
 
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
+`rcctl` uses the same kubeconfig resolution as `kubectl`. Every command accepts
+`--kubeconfig`, `--context`, and `--namespace` (`-n`):
 
 ```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/rc/<tag or branch>/dist/install.yaml
+rcctl --context kind-rc-dev -n development repo list
 ```
 
-### By providing a Helm Chart
+## Quick start with rcctl
 
-1. Build the chart using the optional helm plugin
+For a disposable local cluster on macOS or Linux, install Kind and Docker, then create a single-node cluster with the clone-capable CSI hostpath driver:
 
 ```sh
-kubebuilder edit --plugins=helm/v2-alpha
+git clone https://github.com/nekomeowww/rc.git
+cd rc
+make setup-kind KIND_CLUSTER=rc-dev
+kubectl config use-context kind-rc-dev
 ```
 
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
+`setup-kind` pins and installs the upstream `csi-driver-host-path` release and creates the `csi-hostpath-sc` StorageClass. Driver volumes live inside the Kind node and are lost when the cluster or driver Pod is recreated.
 
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
+The examples below use the `development` namespace and the local StorageClass. When using another cluster, replace `csi-hostpath-sc` with one whose CSI driver supports PVC cloning.
+
+```sh
+kubectl create namespace development --dry-run=client -o yaml | kubectl apply -f -
+```
+
+The top-level command groups follow the rc resource model:
+
+| Command | Purpose |
+| --- | --- |
+| `rcctl credentials` | Import Git, agent, and process credentials |
+| `rcctl repo` | Clone, inspect, execute commands in, and delete Repository mirrors |
+| `rcctl worktree` | Create and list independent native Git worktrees |
+| `rcctl env` | Prepare and commit reusable Workspace home environments |
+| `rcctl workspace` | Create persistent development machines and manage their mounts |
+| `rcctl agent` | Run, list, reconnect to, stop, and inspect persistent processes |
+
+### Import credentials
+
+For a public repository, no Git credential is required. For GitHub repositories, `rcctl` can read the token from an authenticated GitHub CLI session and store it as a namespaced rc `Credential` backed by a Kubernetes Secret:
+
+```sh
+gh auth login
+rcctl -n development credentials import --type github
+```
+
+The default resource name is `github-com`. Pass it when cloning a private repository. Placeholder commands are comments so copying the block does not run them accidentally:
+
+```sh
+# rcctl -n development repo clone https://github.com/OWNER/REPOSITORY.git \
+#   --name repository \
+#   --storage-class csi-hostpath-sc \
+#   --credential-ref github-com
+```
+
+To make an existing Codex login available to an Agent Process, import the local credential file:
+
+```sh
+rcctl -n development credentials import --type agent --agent codex --file "$HOME/.codex/auth.json"
+```
+
+This creates an `AgentCredential` named `codex`. Credential resources and their Secrets stay in the selected namespace. A generic credential file can also be projected into explicitly selected processes:
+
+```sh
+# rcctl -n development credentials import \
+#   --type process \
+#   --name tool-auth \
+#   --file ./credentials.json \
+#   --mount-path /home/agent/.tool/credentials.json \
+#   --env TOOL_HOME=/home/agent/.tool
+```
+
+### Clone a repository
+
+Create the persistent Repository mirror and wait for its initial synchronization:
+
+```sh
+rcctl -n development repo clone https://github.com/nekomeowww/rc.git --name rc --storage-class csi-hostpath-sc
+```
+
+Inspect it or run an exact command against the parent volume:
+
+```sh
+rcctl -n development repo list
+rcctl -n development repo exec rc -- git status --short
+```
+
+Repository parents are not writable Workspace checkouts. Create a Worktree when you want an isolated branch:
+
+```sh
+rcctl -n development worktree add --repo rc --name rc-readme --branch docs/readme
+rcctl -n development worktree list
+```
+
+The command creates a child PVC through CSI cloning and initializes a native Git worktree on it. Advanced `git worktree add` modes are available through flags such as `--ref`, `--detach`, `--orphan`, `--no-checkout`, and `--lock`.
+
+### Run a process
+
+The shortest path is to let `rcctl` create a generated Workspace and a writable Worktree from an existing Repository:
+
+```sh
+rcctl -n development agent run --repo rc --image ghcr.io/nekomeowww/rc/runner:latest --storage-class csi-hostpath-sc --agent-credential codex --cwd /workspace/rc -- codex
+```
+
+For a named development machine, create the Workspace first and mount the Worktree explicitly:
+
+```sh
+rcctl -n development workspace create dev --image ghcr.io/nekomeowww/rc/runner:latest --storage-class csi-hostpath-sc
+rcctl -n development workspace mount worktree rc-readme --workspace dev --path rc
+rcctl -n development workspace default dev
+
+rcctl -n development agent run --agent-credential codex --cwd /workspace/rc -- codex
+```
+
+`agent run` attaches an interactive terminal. `agent exec` runs a non-terminal command and returns its exit code. Agent Processes are persistent resources, so you can inspect and reconnect to them independently of the original terminal:
+
+```sh
+rcctl -n development agent list
+
+# Replace PROCESS_ID with a value printed by `agent list`:
+# rcctl -n development agent logs PROCESS_ID
+# rcctl -n development agent resume PROCESS_ID
+```
+
+Use `rcctl --help` and `rcctl <command> --help` for the complete command surface.
+
+## Deploy a development build
+
+To deploy images built from the checkout into the local Kind cluster, build and load both images with matching development tags:
+
+```sh
+make docker-build IMG=rc-controller:dev
+make docker-build-runner RUNNER_IMG=rc-runner:dev
+kind load docker-image rc-controller:dev rc-runner:dev --name rc-dev
+make deploy IMG=rc-controller:dev RUNNER_IMG=rc-runner:dev
+```
+
+To publish the images, replace the commented registry names with repositories that the target cluster can pull:
+
+```sh
+# make docker-build docker-push IMG=REGISTRY/rc/controller:TAG
+# make docker-build-runner docker-push-runner RUNNER_IMG=REGISTRY/rc/runner:TAG
+```
+
+To generate one distributable manifest for the locally loaded images, run:
+
+```sh
+make build-installer IMG=rc-controller:dev RUNNER_IMG=rc-runner:dev
+kubectl apply -f dist/install.yaml
+```
+
+## Uninstall
+
+Delete rc custom resources before removing the CRDs if their persistent data is no longer needed. Then remove the released installation:
+
+```sh
+kubectl delete -f https://github.com/nekomeowww/rc/releases/latest/download/install.yaml
+```
+
+Removing the CRDs deletes all rc custom resources from the cluster. Review the associated PVC retention behavior before uninstalling a production deployment.
 
 ## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
 
-**NOTE:** Run `make help` for more information on all potential `make` targets
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the Kind development loop, tests, generated-file rules, and pull request checklist.
 
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
+Design decisions and the detailed runtime model live under [`docs/`](docs/).
 
 ## License
 
-Copyright 2026.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+Licensed under the
+[Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0).

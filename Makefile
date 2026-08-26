@@ -74,29 +74,73 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # CertManager is installed by default; skip with:
 # - CERT_MANAGER_INSTALL_SKIP=true
 KIND_CLUSTER ?= rc-test-e2e
+CSI_HOSTPATH_VERSION ?= v1.18.0
+CSI_HOSTPATH_STORAGE_CLASS ?= csi-hostpath-sc
 
-.PHONY: setup-test-e2e
-setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
+.PHONY: setup-kind
+setup-kind: ## Set up a single-node Kind cluster with CSI volume cloning.
 	@command -v $(KIND) >/dev/null 2>&1 || { \
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
 	}
-	@case "$$($(KIND) get clusters)" in \
-		*"$(KIND_CLUSTER)"*) \
-			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
-		*) \
-			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
-	esac
+	@if $(KIND) get clusters | grep -Fxq "$(KIND_CLUSTER)"; then \
+		echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation."; \
+	else \
+		echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
+		$(KIND) create cluster --name "$(KIND_CLUSTER)"; \
+	fi
+	@$(MAKE) setup-csi-hostpath KIND_CLUSTER="$(KIND_CLUSTER)"
+
+.PHONY: setup-csi-hostpath
+setup-csi-hostpath: ## Install the non-production CSI hostpath driver in a Kind cluster.
+	@command -v git >/dev/null 2>&1 || { \
+		echo "Git is not installed."; \
+		exit 1; \
+	}
+	@command -v $(KUBECTL) >/dev/null 2>&1 || { \
+		echo "kubectl is not installed."; \
+		exit 1; \
+	}
+	@$(KIND) get clusters | grep -Fxq "$(KIND_CLUSTER)" || { \
+		echo "Kind cluster '$(KIND_CLUSTER)' does not exist."; \
+		exit 1; \
+	}
+	@driver_tmp="$$(mktemp -d)"; \
+	trap 'rm -rf "$$driver_tmp"' EXIT; \
+	$(KIND) get kubeconfig --name "$(KIND_CLUSTER)" > "$$driver_tmp/kubeconfig"; \
+	git -c advice.detachedHead=false clone --quiet --depth 1 --single-branch \
+		--branch "$(CSI_HOSTPATH_VERSION)" \
+		https://github.com/kubernetes-csi/csi-driver-host-path.git "$$driver_tmp/csi-driver-host-path"; \
+	mv "$$driver_tmp/csi-driver-host-path/deploy/kubernetes-latest/hostpath/csi-hostpath-snapshotclass.yaml" \
+		"$$driver_tmp/csi-hostpath-snapshotclass.yaml"; \
+	mv "$$driver_tmp/csi-driver-host-path/deploy/kubernetes-latest/hostpath/csi-hostpath-testing.yaml" \
+		"$$driver_tmp/csi-hostpath-testing.yaml"; \
+	KUBECONFIG="$$driver_tmp/kubeconfig" \
+		"$$driver_tmp/csi-driver-host-path/deploy/kubernetes-latest/deploy.sh"; \
+	KUBECONFIG="$$driver_tmp/kubeconfig" $(KUBECTL) apply \
+		-f "$$driver_tmp/csi-driver-host-path/examples/csi-storageclass.yaml"; \
+	KUBECONFIG="$$driver_tmp/kubeconfig" $(KUBECTL) rollout status \
+		statefulset/csi-hostpathplugin --timeout=5m; \
+	KUBECONFIG="$$driver_tmp/kubeconfig" $(KUBECTL) get storageclass "$(CSI_HOSTPATH_STORAGE_CLASS)"
+
+.PHONY: setup-test-e2e
+setup-test-e2e: setup-kind ## Set up a Kind cluster for e2e tests if it does not exist.
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+	@e2e_tmp="$$(mktemp -d)"; \
+	trap 'rm -rf "$$e2e_tmp"' EXIT; \
+	$(KIND) get kubeconfig --name "$(KIND_CLUSTER)" > "$$e2e_tmp/kubeconfig"; \
+	KUBECONFIG="$$e2e_tmp/kubeconfig" KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) \
+		go test -tags=e2e ./test/e2e/ -v -ginkgo.v
 	$(MAKE) cleanup-test-e2e
 
+.PHONY: cleanup-kind
+cleanup-kind: ## Tear down a named Kind cluster.
+	@$(KIND) delete cluster --name "$(KIND_CLUSTER)"
+
 .PHONY: cleanup-test-e2e
-cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
-	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+cleanup-test-e2e: cleanup-kind ## Tear down the Kind cluster used for e2e tests.
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter

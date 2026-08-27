@@ -47,6 +47,7 @@ import (
 const (
 	processTargetRequeueDelay = 2 * time.Second
 	agentProcessFinalizer     = "workspaces.rc.ayaka.io/agent-process"
+	workspaceSSHConfigPath    = workspaceHomeMountPath + "/.ssh/config"
 )
 
 type resolvedProcessTarget struct {
@@ -58,6 +59,13 @@ type resolvedProcessTarget struct {
 	credentials           map[string][]byte
 	mounts                []processruntime.CredentialMount
 	credentialEnvironment map[string]string
+	sshConfigFragments    map[string]string
+}
+
+type resolvedCredentialProjection struct {
+	mounts             []processruntime.CredentialMount
+	environment        map[string]string
+	sshConfigFragments map[string]string
 }
 
 // AgentProcessReconciler reconciles an at-most-once command with rc-kube.
@@ -289,7 +297,7 @@ func (r *AgentProcessReconciler) resolveProcessTarget(ctx context.Context, proce
 		if err != nil {
 			return nil, "", "", err
 		}
-		credentialMounts, credentialEnvironment, err := r.resolveCredentialProjections(ctx, process.Namespace, process.Spec.CredentialRefs)
+		credentialProjection, err := r.resolveCredentialProjections(ctx, process.Namespace, process.Spec.CredentialRefs)
 		if err != nil {
 			return nil, "", "", err
 		}
@@ -297,7 +305,8 @@ func (r *AgentProcessReconciler) resolveProcessTarget(ctx context.Context, proce
 		return &resolvedProcessTarget{
 			runtime: processruntime.Target{Namespace: process.Namespace, Pod: pod.Name, Container: runtimeContainerName},
 			podUID:  string(pod.UID), workingDir: workingDirectory, environment: environment,
-			agentHome: agentHome, credentials: credentialFiles, mounts: credentialMounts, credentialEnvironment: credentialEnvironment,
+			agentHome: agentHome, credentials: credentialFiles, mounts: credentialProjection.mounts, credentialEnvironment: credentialProjection.environment,
+			sshConfigFragments: credentialProjection.sshConfigFragments,
 		}, "", "", nil
 	case workspacesv1alpha1.AgentProcessTargetWorkspaceEnvironment:
 		return r.resolveEnvironmentProcessTarget(ctx, process)
@@ -502,39 +511,43 @@ func (r *AgentProcessReconciler) resolveGenericCredential(ctx context.Context, n
 	return files, nil
 }
 
-func (r *AgentProcessReconciler) resolveCredentialProjections(ctx context.Context, namespace string, references []workspacesv1alpha1.LocalReference) ([]processruntime.CredentialMount, map[string]string, error) {
-	mounts := make([]processruntime.CredentialMount, 0)
-	environment := make(map[string]string)
+func (r *AgentProcessReconciler) resolveCredentialProjections(ctx context.Context, namespace string, references []workspacesv1alpha1.LocalReference) (resolvedCredentialProjection, error) {
+	projection := resolvedCredentialProjection{
+		mounts: make([]processruntime.CredentialMount, 0), environment: make(map[string]string), sshConfigFragments: make(map[string]string),
+	}
 	targets := make(map[string]string)
 	for _, reference := range references {
 		credential := new(configsv1alpha1.Credential)
 		if err := r.Get(ctx, types.NamespacedName{Name: reference.Name, Namespace: namespace}, credential); err != nil {
-			return nil, nil, fmt.Errorf("get Credential %s projection: %w", reference.Name, err)
+			return resolvedCredentialProjection{}, fmt.Errorf("get Credential %s projection: %w", reference.Name, err)
+		}
+		if credential.Spec.Type == configsv1alpha1.CredentialTypeSSHPrivateKey && credential.Spec.SSHPrivateKey != nil && credential.Spec.SSHPrivateKey.Config != "" {
+			projection.sshConfigFragments[reference.Name] = credential.Spec.SSHPrivateKey.Config
 		}
 		if credential.Spec.Type != configsv1alpha1.CredentialTypeProcess {
 			continue
 		}
 		if credential.Spec.Process == nil {
-			return nil, nil, fmt.Errorf("process Credential %s has no process configuration", reference.Name)
+			return resolvedCredentialProjection{}, fmt.Errorf("process Credential %s has no process configuration", reference.Name)
 		}
 		for index, file := range credential.Spec.Process.Files {
 			mountPath := file.MountPath
 			if owner, exists := targets[mountPath]; exists {
-				return nil, nil, fmt.Errorf("credentials %s and %s project to the same path %s", owner, reference.Name, mountPath)
+				return resolvedCredentialProjection{}, fmt.Errorf("credentials %s and %s project to the same path %s", owner, reference.Name, mountPath)
 			}
 			targets[mountPath] = reference.Name
-			mounts = append(mounts, processruntime.CredentialMount{
+			projection.mounts = append(projection.mounts, processruntime.CredentialMount{
 				Source: filepath.Join("credentials", reference.Name, "files", strconv.Itoa(index)), Target: mountPath,
 			})
 		}
 		for _, variable := range credential.Spec.Process.Envs {
-			if previous, exists := environment[variable.Name]; exists && previous != variable.Value {
-				return nil, nil, fmt.Errorf("selected Credentials define conflicting values for environment variable %s", variable.Name)
+			if previous, exists := projection.environment[variable.Name]; exists && previous != variable.Value {
+				return resolvedCredentialProjection{}, fmt.Errorf("selected Credentials define conflicting values for environment variable %s", variable.Name)
 			}
-			environment[variable.Name] = variable.Value
+			projection.environment[variable.Name] = variable.Value
 		}
 	}
-	return mounts, environment, nil
+	return projection, nil
 }
 
 func (r *AgentProcessReconciler) processStartRequest(ctx context.Context, process *workspacesv1alpha1.AgentProcess, target *resolvedProcessTarget) (processruntime.StartRequest, error) {
@@ -570,7 +583,15 @@ func (r *AgentProcessReconciler) processStartRequest(ctx context.Context, proces
 		AgentHome: target.agentHome, CredentialFiles: target.credentials, CredentialMounts: append([]processruntime.CredentialMount(nil), target.mounts...),
 		RuntimeDirectory: filepath.Join("/run/rc/processes", process.Name), CredentialsRoot: "/run/rc/credentials",
 		TranscriptPath: filepath.Join(workspaceHomeMountPath, ".rc", "processes", process.Name, "transcript.log"),
+		SSHConfigPath:  sshConfigPath(target.sshConfigFragments), SSHConfigFragments: maps.Clone(target.sshConfigFragments),
 	}, nil
+}
+
+func sshConfigPath(fragments map[string]string) string {
+	if len(fragments) == 0 {
+		return ""
+	}
+	return workspaceSSHConfigPath
 }
 
 func (r *AgentProcessReconciler) claimProcessRuntime(ctx context.Context, key types.NamespacedName, target *resolvedProcessTarget) error {

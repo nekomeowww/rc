@@ -18,7 +18,7 @@ package rckube
 
 import processruntime "github.com/nekomeowww/rc/internal/agentprocess"
 
-const protocolVersion = 3
+const protocolVersion = 4
 
 type protocolRequest struct {
 	Version  int                          `json:"version"`

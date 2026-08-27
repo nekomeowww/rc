@@ -184,19 +184,78 @@ func TestProcessCredentialProjectsFilesAndEnvsIndependently(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, agentHome)
 	assert.Equal(t, []byte("raw\x00credential"), files["credentials/"+credentialName+"/files/0"])
-	mounts, environment, err := reconciler.resolveCredentialProjections(ctx, testNamespace, process.Spec.CredentialRefs)
+	projection, err := reconciler.resolveCredentialProjections(ctx, testNamespace, process.Spec.CredentialRefs)
 	require.NoError(t, err)
-	assert.Equal(t, []processruntime.CredentialMount{{Source: "credentials/" + credentialName + "/files/0", Target: mountPath}}, mounts)
-	assert.Equal(t, map[string]string{"TOOL_HOME": "/home/agent/.tool"}, environment)
+	assert.Equal(t, []processruntime.CredentialMount{{Source: "credentials/" + credentialName + "/files/0", Target: mountPath}}, projection.mounts)
+	assert.Equal(t, map[string]string{"TOOL_HOME": "/home/agent/.tool"}, projection.environment)
+	assert.Empty(t, projection.sshConfigFragments)
 
 	request, err := reconciler.processStartRequest(ctx, process, &resolvedProcessTarget{
 		credentials:           files,
-		mounts:                mounts,
-		credentialEnvironment: environment,
+		mounts:                projection.mounts,
+		credentialEnvironment: projection.environment,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "/home/agent/.tool", request.Environment["TOOL_HOME"])
-	assert.Equal(t, mounts, request.CredentialMounts)
+	assert.Equal(t, projection.mounts, request.CredentialMounts)
+}
+
+func TestSSHCredentialProjectsNativeConfiguration(t *testing.T) {
+	t.Parallel()
+	const credentialName = "github-ssh"
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme), "register core API types")
+	require.NoError(t, configsv1alpha1.AddToScheme(scheme), "register config API types")
+	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
+
+	credential := &configsv1alpha1.Credential{
+		ObjectMeta: metav1.ObjectMeta{Name: credentialName, Namespace: testNamespace},
+		Spec: configsv1alpha1.CredentialSpec{
+			Type: configsv1alpha1.CredentialTypeSSHPrivateKey,
+			SSHPrivateKey: &configsv1alpha1.SSHPrivateKeyCredential{
+				PrivateKeyRef: configsv1alpha1.SecretKeyReference{Name: credentialName, Key: "ssh-privatekey"},
+				KnownHostsRef: configsv1alpha1.SecretKeyReference{Name: credentialName, Key: "known_hosts"},
+				Config:        "Host github.com\n  User git\n  IdentityFile ${identityFile}\n  UserKnownHostsFile ${knownHostsFile}\n  IdentitiesOnly yes\n",
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: credentialName, Namespace: testNamespace},
+		Data: map[string][]byte{
+			"ssh-privatekey": []byte("private-key"),
+			"known_hosts":    []byte("github.com ssh-ed25519 host-key"),
+		},
+	}
+	workspace := &workspacesv1alpha1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testNamespace},
+		Spec:       workspacesv1alpha1.WorkspaceSpec{CredentialRefs: []workspacesv1alpha1.LocalReference{{Name: credentialName}}},
+	}
+	process := &workspacesv1alpha1.AgentProcess{
+		ObjectMeta: metav1.ObjectMeta{Name: "ssh-process", Namespace: testNamespace},
+		Spec:       workspacesv1alpha1.AgentProcessSpec{CredentialRefs: []workspacesv1alpha1.LocalReference{{Name: credentialName}}},
+	}
+	reconciler := &AgentProcessReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(credential, secret).Build(),
+		Scheme: scheme,
+	}
+
+	_, files, err := reconciler.resolveProcessCredentials(ctx, workspace, process)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("private-key"), files["credentials/"+credentialName+"/id"])
+	assert.Equal(t, []byte("github.com ssh-ed25519 host-key"), files["credentials/"+credentialName+"/known_hosts"])
+	projection, err := reconciler.resolveCredentialProjections(ctx, testNamespace, process.Spec.CredentialRefs)
+	require.NoError(t, err)
+	assert.Empty(t, projection.mounts)
+	assert.Empty(t, projection.environment)
+	assert.Equal(t, credential.Spec.SSHPrivateKey.Config, projection.sshConfigFragments[credentialName])
+
+	request, err := reconciler.processStartRequest(ctx, process, &resolvedProcessTarget{
+		credentials: files, sshConfigFragments: projection.sshConfigFragments,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, workspaceSSHConfigPath, request.SSHConfigPath)
+	assert.Equal(t, projection.sshConfigFragments, request.SSHConfigFragments)
 }
 
 func TestRunningAgentProcessBecomesLostWhenOriginalPodDisappears(t *testing.T) {

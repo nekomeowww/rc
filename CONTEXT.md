@@ -56,6 +56,11 @@ token's origin, such as OAuth, does not determine its Credential Type.
 **SSH Private Key**:
 A Credential Type that authenticates an SSH connection with a private key.
 
+**SSH Configuration Fragment**:
+Non-secret OpenSSH client configuration carried by an SSH Private Key
+Credential and exposed only while a process uses that Credential.
+_Avoid_: SSH options
+
 **HTTP Basic Authentication**:
 A Credential Type that presents a username and a secret password or token
 through HTTP Basic authentication.

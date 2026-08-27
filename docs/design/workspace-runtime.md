@@ -418,7 +418,13 @@ AgentCredential. A caller explicitly selects generic Credentials with repeated
 Credential. Credentials use `/run/rc/credentials/<name>/`, and
 `RC_CREDENTIALS_DIR` points to `/run/rc/credentials`. A Process Credential may
 independently configure raw Secret-backed `files` and non-secret literal
-`envs`; selecting it applies both sets of projections.
+`envs`; selecting it applies both sets of projections. An SSH Private Key
+Credential may carry a native OpenSSH configuration fragment. rc replaces its
+`${identityFile}` and `${knownHostsFile}` placeholders with temporary
+credential paths, exposes the rendered fragment through
+`~/.ssh/config.d/rc-<credential>.conf`, and idempotently adds the corresponding
+`Include` to `~/.ssh/config`. OpenSSH remains responsible for interpreting all
+other directives.
 
 ### Terminal and attach behavior
 
@@ -487,6 +493,13 @@ authentication are projected through a temporary runtime path and linked or
 otherwise exposed inside the Agent home; they are never copied into the
 persistent home PVC. A restarted runtime receives a fresh Secret projection
 while retaining the non-secret Agent home.
+
+SSH configuration follows the same lifetime split. The non-secret managed
+`Include` in `~/.ssh/config` persists, while rendered SSH Configuration
+Fragments, identity files, and known-host files exist only while at least one
+Agent Process uses their Credential. Existing user SSH configuration is
+preserved. Fragment names are derived from Credential names and load in lexical
+order.
 
 Environment edit operations do not permanently associate Credentials with an
 Environment. A process targeting an Environment draft may request a Credential

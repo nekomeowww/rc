@@ -37,7 +37,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Publish rcctl and the operator install manifest
-        uses: goreleaser/goreleaser-action@v6 # v6.4.0
+        uses: goreleaser/goreleaser-action@v7 # v7.2.3
         with:
           distribution: goreleaser
           version: v2.15.2

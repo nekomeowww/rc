@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"os/exec"
@@ -737,6 +738,41 @@ func writeCredentialFiles(processDirectory string, files map[string][]byte) erro
 	return nil
 }
 
+func copyCredentialDirectory(target string, source string) error {
+	sourceFS := os.DirFS(source)
+	return fs.WalkDir(sourceFS, ".", func(name string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		destination, err := safeChildPath(target, filepath.FromSlash(name))
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if err := os.MkdirAll(destination, 0o700); err != nil {
+				return fmt.Errorf("create private credential directory: %w", err)
+			}
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("inspect credential file: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("credential path %q is not a regular file", name)
+		}
+		data, err := fs.ReadFile(sourceFS, name)
+		if err != nil {
+			return fmt.Errorf("read credential file: %w", err)
+		}
+		if err := os.WriteFile(destination, data, 0o600); err != nil {
+			return fmt.Errorf("write private credential file: %w", err)
+		}
+
+		return nil
+	})
+}
+
 func (supervisor *Supervisor) prepareCredentialAliases(processID string, processDirectory string, credentialsRoot string, files map[string][]byte) ([]string, error) {
 	if credentialsRoot == "" {
 		return nil, nil
@@ -766,7 +802,11 @@ func (supervisor *Supervisor) prepareCredentialAliases(processID string, process
 			if err := os.RemoveAll(target); err != nil {
 				return err
 			}
-			return os.CopyFS(target, os.DirFS(source))
+			if err := copyCredentialDirectory(target, source); err != nil {
+				_ = os.RemoveAll(target)
+				return err
+			}
+			return nil
 		}); err != nil {
 			return nil, fmt.Errorf("project generic credential directory: %w", err)
 		}

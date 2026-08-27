@@ -183,6 +183,48 @@ func TestSupervisorKeepsCredentialsOutOfPersistentState(t *testing.T) {
 	requirements.ErrorIs(err, os.ErrNotExist, "remove generic credential alias after exit")
 }
 
+func TestSupervisorProjectsGenericCredentialsWithPrivatePermissions(t *testing.T) {
+	t.Parallel()
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	runtimeRoot := t.TempDir()
+	runtimeDirectory := filepath.Join(runtimeRoot, "private-credentials")
+	credentialsRoot := filepath.Join(runtimeRoot, "credentials")
+	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
+	request := processruntime.StartRequest{
+		ID: "private-credentials", UID: testProcessUID, Command: []string{"sh", "-c", "sleep 30"},
+		RuntimeDirectory: runtimeDirectory, CredentialsRoot: credentialsRoot,
+		CredentialFiles: map[string][]byte{
+			"credentials/github/id":           []byte("private-key"),
+			"credentials/github/nested/token": []byte("nested-secret"),
+			"credentials/github/known_hosts":  []byte("github.com ssh-ed25519 host-key"),
+		},
+	}
+
+	_, err := supervisor.Start(request)
+	requirements.NoError(err, "start credential consumer")
+	t.Cleanup(func() { _, _ = supervisor.Stop(request.ID) })
+
+	credentialDirectory, err := os.Stat(filepath.Join(credentialsRoot, "github"))
+	requirements.NoError(err, "stat projected credential directory")
+	assertions.Equal(os.FileMode(0o700), credentialDirectory.Mode().Perm(), "keep projected credential directory private")
+	identityFile, err := os.Stat(filepath.Join(credentialsRoot, "github", "id"))
+	requirements.NoError(err, "stat projected identity file")
+	assertions.Equal(os.FileMode(0o600), identityFile.Mode().Perm(), "keep projected identity file private")
+	knownHostsFile, err := os.Stat(filepath.Join(credentialsRoot, "github", "known_hosts"))
+	requirements.NoError(err, "stat projected known hosts file")
+	assertions.Equal(os.FileMode(0o600), knownHostsFile.Mode().Perm(), "keep projected known hosts file private")
+	nestedDirectory, err := os.Stat(filepath.Join(credentialsRoot, "github", "nested"))
+	requirements.NoError(err, "stat nested projected credential directory")
+	assertions.Equal(os.FileMode(0o700), nestedDirectory.Mode().Perm(), "keep nested projected credential directory private")
+	nestedFile, err := os.Stat(filepath.Join(credentialsRoot, "github", "nested", "token"))
+	requirements.NoError(err, "stat nested projected credential file")
+	assertions.Equal(os.FileMode(0o600), nestedFile.Mode().Perm(), "keep nested projected credential file private")
+
+	_, err = supervisor.Stop(request.ID)
+	requirements.NoError(err, "stop credential consumer")
+}
+
 func TestSupervisorProjectsSSHConfigAndPreservesUserConfiguration(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)

@@ -160,11 +160,11 @@ rcctl -n development agent run --repo rc --image ghcr.io/nekomeowww/rc/runner:la
 For a named development machine, create the Workspace first and mount the Worktree explicitly:
 
 ```sh
-rcctl -n development workspace create dev --image ghcr.io/nekomeowww/rc/runner:latest --storage-class csi-hostpath-sc
+rcctl -n development workspace create dev --image ghcr.io/nekomeowww/rc/runner:latest --storage-class csi-hostpath-sc --agent-credential codex
 rcctl -n development workspace mount worktree rc-readme --workspace dev --path rc
 rcctl -n development workspace default dev
 
-rcctl -n development agent run --agent-credential codex --cwd /workspace/rc -- codex
+rcctl -n development agent run --workspace dev --agent-credential codex --cwd /workspace/rc -- codex
 ```
 
 `agent run` attaches an interactive terminal. `agent exec` runs a non-terminal command and returns its exit code. Agent Processes are persistent resources, so you can inspect and reconnect to them independently of the original terminal:

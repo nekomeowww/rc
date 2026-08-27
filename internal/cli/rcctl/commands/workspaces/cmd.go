@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/cluster"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/command"
@@ -49,6 +50,8 @@ type createOptions struct {
 	image            string
 	storageClass     string
 	size             string
+	agentCredentials []string
+	credentials      []string
 	defaultCwd       string
 	serviceAccount   string
 	noServiceAccount bool
@@ -118,6 +121,9 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 				}
 				workspace.Spec.Storage = &workspacesv1alpha1.PersistentStorageSpec{StorageClassName: options.storageClass, Size: size}
 			}
+			if err := setWorkspaceCredentialReferences(cmd.Context(), clusterClient.Kube, workspace, options.agentCredentials, options.credentials); err != nil {
+				return err
+			}
 			if options.noServiceAccount && options.serviceAccount != "" {
 				return fmt.Errorf("--no-service-account and --service-account are mutually exclusive")
 			}
@@ -145,6 +151,8 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	cmd.Flags().StringVar(&options.image, "image", "", "Runner image for a blank Workspace")
 	cmd.Flags().StringVar(&options.storageClass, "storage-class", "", "StorageClass for a blank Workspace")
 	cmd.Flags().StringVar(&options.size, "size", "20Gi", "Home volume size for a blank Workspace")
+	cmd.Flags().StringArrayVar(&options.agentCredentials, "agent-credential", nil, "Ordered AgentCredential names available to Agent Processes; repeat")
+	cmd.Flags().StringArrayVar(&options.credentials, "credential", nil, "Credential names available to Agent Processes; repeat")
 	cmd.Flags().StringVar(&options.defaultCwd, "cwd", "", "Default process working directory")
 	cmd.Flags().StringVar(&options.serviceAccount, "service-account", "", "Same-namespace ServiceAccount")
 	cmd.Flags().BoolVar(&options.noServiceAccount, "no-service-account", false, "Disable ServiceAccount token mounting")
@@ -153,6 +161,35 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	options.gpu.AddFlags(cmd.Flags())
 
 	return cmd
+}
+
+func setWorkspaceCredentialReferences(
+	ctx context.Context,
+	kubeClient client.Client,
+	workspace *workspacesv1alpha1.Workspace,
+	agentCredentialNames []string,
+	credentialNames []string,
+) error {
+	agentCredentialRefs := make([]workspacesv1alpha1.LocalReference, 0, len(agentCredentialNames))
+	for _, name := range agentCredentialNames {
+		credential := new(configsv1alpha1.AgentCredential)
+		if err := kubeClient.Get(ctx, client.ObjectKey{Name: name, Namespace: workspace.Namespace}, credential); err != nil {
+			return fmt.Errorf("get AgentCredential %q: %w", name, err)
+		}
+		agentCredentialRefs = append(agentCredentialRefs, workspacesv1alpha1.LocalReference{Name: name})
+	}
+	credentialRefs := make([]workspacesv1alpha1.LocalReference, 0, len(credentialNames))
+	for _, name := range credentialNames {
+		credential := new(configsv1alpha1.Credential)
+		if err := kubeClient.Get(ctx, client.ObjectKey{Name: name, Namespace: workspace.Namespace}, credential); err != nil {
+			return fmt.Errorf("get Credential %q: %w", name, err)
+		}
+		credentialRefs = append(credentialRefs, workspacesv1alpha1.LocalReference{Name: name})
+	}
+	workspace.Spec.AgentCredentialRefs = agentCredentialRefs
+	workspace.Spec.CredentialRefs = credentialRefs
+
+	return nil
 }
 
 func newMountCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {

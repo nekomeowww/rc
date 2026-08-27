@@ -39,18 +39,20 @@ type CredentialMount struct {
 
 // StartRequest is the versioned process contract sent to rc-kube.
 type StartRequest struct {
-	ID               string            `json:"id"`
-	UID              string            `json:"uid"`
-	Command          []string          `json:"command"`
-	WorkingDirectory string            `json:"workingDirectory"`
-	TTY              bool              `json:"tty"`
-	Environment      map[string]string `json:"environment,omitempty"`
-	AgentHome        string            `json:"agentHome,omitempty"`
-	CredentialFiles  map[string][]byte `json:"credentialFiles,omitempty"`
-	CredentialMounts []CredentialMount `json:"credentialMounts,omitempty"`
-	RuntimeDirectory string            `json:"runtimeDirectory,omitempty"`
-	CredentialsRoot  string            `json:"credentialsRoot,omitempty"`
-	TranscriptPath   string            `json:"transcriptPath"`
+	ID                 string            `json:"id"`
+	UID                string            `json:"uid"`
+	Command            []string          `json:"command"`
+	WorkingDirectory   string            `json:"workingDirectory"`
+	TTY                bool              `json:"tty"`
+	Environment        map[string]string `json:"environment,omitempty"`
+	AgentHome          string            `json:"agentHome,omitempty"`
+	CredentialFiles    map[string][]byte `json:"credentialFiles,omitempty"`
+	CredentialMounts   []CredentialMount `json:"credentialMounts,omitempty"`
+	SSHConfigPath      string            `json:"sshConfigPath,omitempty"`
+	SSHConfigFragments map[string]string `json:"sshConfigFragments,omitempty"`
+	RuntimeDirectory   string            `json:"runtimeDirectory,omitempty"`
+	CredentialsRoot    string            `json:"credentialsRoot,omitempty"`
+	TranscriptPath     string            `json:"transcriptPath"`
 }
 
 // State is the supervisor's observable process state.

@@ -45,9 +45,11 @@ var ErrProcessConflict = errors.New("process ID belongs to another UID")
 var ErrSlowClient = errors.New("attach client was disconnected because it could not keep up with process output")
 
 const (
-	phaseStarting = "Starting"
-	phaseRunning  = "Running"
-	phaseExited   = "Exited"
+	phaseStarting                = "Starting"
+	phaseRunning                 = "Running"
+	phaseExited                  = "Exited"
+	sshIdentityFilePlaceholder   = "${identityFile}"
+	sshKnownHostsFilePlaceholder = "${knownHostsFile}"
 )
 
 type supervisedProcess struct {
@@ -194,6 +196,14 @@ func (supervisor *Supervisor) Start(request processruntime.StartRequest) (proces
 		return processruntime.State{}, err
 	}
 	credentialLinks = append(credentialLinks, mountedCredentialLinks...)
+	sshConfigLinks, err := supervisor.prepareSSHConfig(request.ID, runtimeDirectory, request.CredentialsRoot, request.SSHConfigPath, request.SSHConfigFragments)
+	if err != nil {
+		_ = transcript.Close()
+		supervisor.releaseCredentialAliasesLocked(request.ID, credentialLinks, "")
+		_ = os.RemoveAll(runtimeDirectory)
+		return processruntime.State{}, err
+	}
+	credentialLinks = append(credentialLinks, sshConfigLinks...)
 	agentCredentialLink, err := supervisor.prepareAgentHome(request.ID, runtimeDirectory, request.AgentHome, request.CredentialFiles)
 	if err != nil {
 		_ = transcript.Close()
@@ -807,6 +817,94 @@ func (supervisor *Supervisor) prepareCredentialMounts(processID string, processD
 	}
 	completed = true
 	return links, nil
+}
+
+func (supervisor *Supervisor) prepareSSHConfig(processID string, processDirectory string, credentialsRoot string, configPath string, fragments map[string]string) ([]string, error) {
+	if len(fragments) == 0 {
+		return nil, nil
+	}
+	if credentialsRoot == "" {
+		return nil, errors.New("SSH config fragments require a credentials root")
+	}
+	if !filepath.IsAbs(configPath) || filepath.Clean(configPath) != configPath || configPath == string(filepath.Separator) {
+		return nil, fmt.Errorf("SSH config path %q must be a clean absolute file path", configPath)
+	}
+	fragmentDirectory := configPath + ".d"
+	includePattern := filepath.Join(fragmentDirectory, "*.conf")
+	if err := ensureSSHConfigInclude(configPath, includePattern); err != nil {
+		return nil, fmt.Errorf("ensure managed SSH config include: %w", err)
+	}
+	if err := os.MkdirAll(fragmentDirectory, 0o700); err != nil {
+		return nil, fmt.Errorf("create managed SSH config fragment directory: %w", err)
+	}
+
+	names := make([]string, 0, len(fragments))
+	for name := range fragments {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	links := make([]string, 0, len(names))
+	completed := false
+	defer func() {
+		if !completed {
+			supervisor.releaseCredentialAliasesLocked(processID, links, "")
+		}
+	}()
+	for _, name := range names {
+		if filepath.Base(name) != name || name == "." || name == ".." {
+			return nil, fmt.Errorf("SSH config fragment name %q must be one safe path segment", name)
+		}
+		identityFile := filepath.Join(credentialsRoot, name, "id")
+		knownHostsFile := filepath.Join(credentialsRoot, name, "known_hosts")
+		content := strings.ReplaceAll(fragments[name], sshIdentityFilePlaceholder, identityFile)
+		content = strings.ReplaceAll(content, sshKnownHostsFilePlaceholder, knownHostsFile)
+		if !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+
+		link := filepath.Join(fragmentDirectory, "rc-"+name+".conf")
+		sum := sha256.Sum256([]byte(link))
+		targetDirectory := filepath.Join(filepath.Dir(processDirectory), "ssh-config-fragments", hex.EncodeToString(sum[:10]))
+		target := filepath.Join(targetDirectory, filepath.Base(link))
+		if err := supervisor.claimCredentialAliasLocked(processID, link, target, func() error {
+			if err := os.MkdirAll(targetDirectory, 0o700); err != nil {
+				return err
+			}
+			return os.WriteFile(target, []byte(content), 0o600)
+		}); err != nil {
+			return nil, fmt.Errorf("project SSH config fragment %s: %w", name, err)
+		}
+		links = append(links, link)
+	}
+	completed = true
+	return links, nil
+}
+
+func ensureSSHConfigInclude(configPath string, includePattern string) error {
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	managedBlock := "# rc: managed SSH Credential fragments\nHost *\n  Include " + includePattern + "\n"
+	if strings.Contains(string(data), managedBlock) {
+		return nil
+	}
+	file, err := os.OpenFile(configPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close() }()
+	prefix := ""
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		prefix = "\n"
+	}
+	if _, err := file.WriteString(prefix + managedBlock); err != nil {
+		return err
+	}
+	return file.Sync()
 }
 
 func (supervisor *Supervisor) prepareAgentHome(processID string, processDirectory string, agentHome string, files map[string][]byte) (string, error) {

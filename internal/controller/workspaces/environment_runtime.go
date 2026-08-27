@@ -133,7 +133,7 @@ func (r *AgentProcessReconciler) resolveEnvironmentProcessTarget(ctx context.Con
 	if err != nil {
 		return nil, "", "", err
 	}
-	credentialMounts, credentialEnvironment, err := r.resolveCredentialProjections(ctx, process.Namespace, process.Spec.CredentialRefs)
+	credentialProjection, err := r.resolveCredentialProjections(ctx, process.Namespace, process.Spec.CredentialRefs)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -141,7 +141,8 @@ func (r *AgentProcessReconciler) resolveEnvironmentProcessTarget(ctx context.Con
 	return &resolvedProcessTarget{
 		runtime: processruntime.Target{Namespace: environment.Namespace, Pod: editor.Name, Container: runtimeContainerName},
 		podUID:  string(editor.UID), workingDir: workingDirectory, environment: environmentVariables,
-		agentHome: agentHome, credentials: credentialFiles, mounts: credentialMounts, credentialEnvironment: credentialEnvironment,
+		agentHome: agentHome, credentials: credentialFiles, mounts: credentialProjection.mounts, credentialEnvironment: credentialProjection.environment,
+		sshConfigFragments: credentialProjection.sshConfigFragments,
 	}, "", "", nil
 }
 

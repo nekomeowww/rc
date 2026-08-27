@@ -67,6 +67,14 @@ type SSHPrivateKeyCredential struct {
 	// namespace.
 	// +required
 	KnownHostsRef SecretKeyReference `json:"knownHostsRef"`
+
+	// config is an OpenSSH client configuration fragment. rc replaces the
+	// ${identityFile} and ${knownHostsFile} placeholders with process-scoped
+	// credential paths before exposing the fragment through ~/.ssh/config.
+	// The fragment must not contain secret values.
+	// +kubebuilder:validation:MaxLength=65536
+	// +optional
+	Config string `json:"config,omitempty"`
 }
 
 // HTTPBasicAuthCredential identifies the username and secret password or token

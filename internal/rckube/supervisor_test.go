@@ -183,6 +183,61 @@ func TestSupervisorKeepsCredentialsOutOfPersistentState(t *testing.T) {
 	requirements.ErrorIs(err, os.ErrNotExist, "remove generic credential alias after exit")
 }
 
+func TestSupervisorProjectsSSHConfigAndPreservesUserConfiguration(t *testing.T) {
+	t.Parallel()
+	requirements := require.New(t)
+	runtimeRoot := t.TempDir()
+	runtimeDirectory := filepath.Join(runtimeRoot, "ssh-config")
+	credentialsRoot := filepath.Join(runtimeRoot, "credentials")
+	sshDirectory := filepath.Join(t.TempDir(), ".ssh")
+	sshConfigPath := filepath.Join(sshDirectory, "config")
+	requirements.NoError(os.MkdirAll(sshDirectory, 0o700), "create SSH directory")
+	requirements.NoError(os.WriteFile(sshConfigPath, []byte("Host existing\n  User existing\n"), 0o600), "create user SSH config")
+	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
+	request := processruntime.StartRequest{
+		ID: "ssh-config", UID: testProcessUID,
+		Command: []string{"sh", "-c", "cat \"$SSH_CONFIG\"; cat \"$SSH_FRAGMENT\"; cat \"$RC_CREDENTIALS_DIR/github/id\""},
+		Environment: map[string]string{
+			testCredentialsVariable: credentialsRoot,
+			"SSH_CONFIG":            sshConfigPath,
+			"SSH_FRAGMENT":          sshConfigPath + ".d/rc-github.conf",
+		},
+		RuntimeDirectory: runtimeDirectory,
+		CredentialsRoot:  credentialsRoot,
+		CredentialFiles: map[string][]byte{
+			"credentials/github/id":          []byte("private-key"),
+			"credentials/github/known_hosts": []byte("github.com ssh-ed25519 host-key"),
+		},
+		SSHConfigPath: sshConfigPath,
+		SSHConfigFragments: map[string]string{
+			"github": "Host github.com\n  IdentityFile ${identityFile}\n  UserKnownHostsFile ${knownHostsFile}\n",
+		},
+	}
+
+	_, err := supervisor.Start(request)
+	requirements.NoError(err, "start SSH credential consumer")
+	requirements.Eventually(func() bool {
+		state, inspectErr := supervisor.Inspect(request.ID)
+		return inspectErr == nil && state.Phase == phaseExited
+	}, 3*time.Second, 10*time.Millisecond, "wait for SSH credential consumer")
+	var transcript bytes.Buffer
+	requirements.NoError(supervisor.Logs(request.ID, &transcript), "read SSH credential consumer output")
+	requirements.Contains(transcript.String(), "Host existing\n  User existing\n", "preserve user SSH configuration")
+	requirements.Contains(transcript.String(), "Host *\n  Include "+sshConfigPath+".d/*.conf\n", "load rc-managed SSH fragments")
+	requirements.Contains(transcript.String(), "IdentityFile "+credentialsRoot+"/github/id", "render identity file placeholder")
+	requirements.Contains(transcript.String(), "UserKnownHostsFile "+credentialsRoot+"/github/known_hosts", "render known hosts placeholder")
+	requirements.Contains(transcript.String(), "private-key", "keep identity available while process runs")
+
+	requirements.NoError(ensureSSHConfigInclude(sshConfigPath, sshConfigPath+".d/*.conf"), "reconcile managed include idempotently")
+	persistedConfig, err := os.ReadFile(sshConfigPath)
+	requirements.NoError(err, "read persistent SSH config")
+	requirements.Equal("Host existing\n  User existing\n# rc: managed SSH Credential fragments\nHost *\n  Include "+sshConfigPath+".d/*.conf\n", string(persistedConfig), "retain one managed include")
+	_, err = os.Lstat(sshConfigPath + ".d/rc-github.conf")
+	requirements.ErrorIs(err, os.ErrNotExist, "remove SSH config fragment after process exit")
+	_, err = os.Lstat(filepath.Join(credentialsRoot, "github"))
+	requirements.ErrorIs(err, os.ErrNotExist, "remove SSH credential files after process exit")
+}
+
 func TestSupervisorProjectsWritableCredentialFileForProcessLifetime(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)

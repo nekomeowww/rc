@@ -30,37 +30,43 @@ import (
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 )
 
+const (
+	testWorkspaceNamespace      = "development"
+	testWorkspaceName           = "dev"
+	testPersonalAgentCredential = "codex-personal"
+	testTeamAgentCredential     = "codex-team"
+	testWorkspaceCredential     = "github-ssh"
+)
+
 func TestSetWorkspaceCredentialReferences(t *testing.T) {
 	t.Parallel()
-	const namespace = "development"
 	scheme := runtime.NewScheme()
 	require.NoError(t, configsv1alpha1.AddToScheme(scheme), "register config API types")
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		&configsv1alpha1.AgentCredential{ObjectMeta: metav1.ObjectMeta{Name: "codex-personal", Namespace: namespace}},
-		&configsv1alpha1.AgentCredential{ObjectMeta: metav1.ObjectMeta{Name: "codex-team", Namespace: namespace}},
-		&configsv1alpha1.Credential{ObjectMeta: metav1.ObjectMeta{Name: "github-ssh", Namespace: namespace}},
+		&configsv1alpha1.AgentCredential{ObjectMeta: metav1.ObjectMeta{Name: testPersonalAgentCredential, Namespace: testWorkspaceNamespace}},
+		&configsv1alpha1.AgentCredential{ObjectMeta: metav1.ObjectMeta{Name: testTeamAgentCredential, Namespace: testWorkspaceNamespace}},
+		&configsv1alpha1.Credential{ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceCredential, Namespace: testWorkspaceNamespace}},
 	).Build()
-	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "dev", Namespace: namespace}}
+	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testWorkspaceNamespace}}
 
 	err := setWorkspaceCredentialReferences(
 		context.Background(), kubeClient, workspace,
-		[]string{"codex-personal", "codex-team"}, []string{"github-ssh"},
+		[]string{testPersonalAgentCredential, testTeamAgentCredential}, []string{testWorkspaceCredential},
 	)
 	require.NoError(t, err, "attach existing credentials to a Workspace")
 
-	assert.Equal(t, []workspacesv1alpha1.LocalReference{{Name: "codex-personal"}, {Name: "codex-team"}}, workspace.Spec.AgentCredentialRefs, "preserve AgentCredential order")
-	assert.Equal(t, []workspacesv1alpha1.LocalReference{{Name: "github-ssh"}}, workspace.Spec.CredentialRefs, "attach generic Credentials")
+	assert.Equal(t, []workspacesv1alpha1.LocalReference{{Name: testPersonalAgentCredential}, {Name: testTeamAgentCredential}}, workspace.Spec.AgentCredentialRefs, "preserve AgentCredential order")
+	assert.Equal(t, []workspacesv1alpha1.LocalReference{{Name: testWorkspaceCredential}}, workspace.Spec.CredentialRefs, "attach generic Credentials")
 }
 
 func TestSetWorkspaceCredentialReferencesRejectsMissingResource(t *testing.T) {
 	t.Parallel()
-	const namespace = "development"
 	scheme := runtime.NewScheme()
 	require.NoError(t, configsv1alpha1.AddToScheme(scheme), "register config API types")
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	t.Run("AgentCredential", func(t *testing.T) {
-		workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "dev", Namespace: namespace}}
+		workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testWorkspaceNamespace}}
 		err := setWorkspaceCredentialReferences(context.Background(), kubeClient, workspace, []string{"missing"}, nil)
 
 		require.Error(t, err, "reject a missing AgentCredential")
@@ -69,7 +75,7 @@ func TestSetWorkspaceCredentialReferencesRejectsMissingResource(t *testing.T) {
 	})
 
 	t.Run("Credential", func(t *testing.T) {
-		workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "dev", Namespace: namespace}}
+		workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testWorkspaceNamespace}}
 		err := setWorkspaceCredentialReferences(context.Background(), kubeClient, workspace, nil, []string{"missing"})
 
 		require.Error(t, err, "reject a missing Credential")

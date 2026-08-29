@@ -9,3 +9,6 @@
 # Re-include Go module files
 !go.mod
 !go.sum
+
+# Re-include the Wayland runner runtime files copied by its Dockerfile.
+!images/runner-wayland/rootfs/**

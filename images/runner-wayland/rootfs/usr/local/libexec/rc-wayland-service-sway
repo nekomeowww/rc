@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+rm -f "${XDG_RUNTIME_DIR}/${RC_WAYLAND_DISPLAY}"
+if test -e /dev/dri/renderD128; then
+  export WLR_RENDERER=gles2
+else
+  export WLR_RENDERER=pixman
+fi
+export WLR_BACKENDS=headless
+export WLR_HEADLESS_OUTPUTS=1
+export WLR_LIBINPUT_NO_DEVICES=1
+
+sway --unsupported-gpu -c /etc/rc-wayland/sway.conf &
+pid=$!
+trap 'kill -TERM "$pid" 2>/dev/null || true; rm -f "${XDG_RUNTIME_DIR}/${RC_WAYLAND_DISPLAY}"' TERM INT EXIT
+
+for _ in $(seq 1 150); do
+  socket=$(find "${XDG_RUNTIME_DIR}" -maxdepth 1 -type s -name 'wayland-*' -print -quit)
+  if test -n "${socket}"; then
+    ln -s "$(basename "${socket}")" "${XDG_RUNTIME_DIR}/${RC_WAYLAND_DISPLAY}"
+    printf '\n' >&3
+    wait "$pid"
+    exit $?
+  fi
+  kill -0 "$pid" 2>/dev/null || wait "$pid"
+  sleep 0.1
+done
+
+echo "Sway Wayland socket did not become ready" >&2
+exit 1

@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = serve ]; then
+  # rc Workspace containers set no_new_privs through
+  # allowPrivilegeEscalation=false. In that mode s6-overlay cannot run its CMD
+  # through the privileged preinit path reliably, so keep rc-kube inside the
+  # rootless s6 supervision tree with the Wayland services instead.
+  args_file=/run/rc/rc-kube-serve.args
+  mkdir -p "$(dirname "${args_file}")"
+  : > "${args_file}"
+  shift
+  for arg do
+    case "${arg}" in
+      *'
+'*)
+        echo "rc-kube serve arguments must not contain newlines" >&2
+        exit 2
+        ;;
+    esac
+    printf '%s\n' "${arg}" >> "${args_file}"
+  done
+  exec /init
+fi
+
+exec /usr/local/libexec/rc-kube "$@"

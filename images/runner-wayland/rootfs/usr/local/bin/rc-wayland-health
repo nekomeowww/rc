@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+test -S "${XDG_RUNTIME_DIR}/pipewire-0"
+test -S "${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}"
+test -S /run/rc/rc-kube.sock
+gdbus introspect \
+  --address "${DBUS_SESSION_BUS_ADDRESS}" \
+  --dest org.freedesktop.portal.Desktop \
+  --object-path /org/freedesktop/portal/desktop \
+  | grep -q 'org.freedesktop.portal.ScreenCast'

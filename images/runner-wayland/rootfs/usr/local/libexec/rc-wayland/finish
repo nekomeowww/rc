@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /run/s6/basedir/bin/halt

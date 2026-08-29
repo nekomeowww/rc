@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+args_file=/run/rc/rc-kube-serve.args
+if ! test -f "${args_file}"; then
+  echo "rc-kube serve argument file does not exist" >&2
+  exit 2
+fi
+
+set -- serve
+while IFS= read -r arg; do
+  set -- "$@" "${arg}"
+done < "${args_file}"
+
+exec /usr/local/libexec/rc-kube "$@"

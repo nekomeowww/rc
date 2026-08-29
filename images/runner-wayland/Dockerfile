@@ -162,14 +162,14 @@ COPY images/runner-wayland/rootfs/ /
 RUN chmod 0755 \
         /usr/local/bin/rc-kube \
         /usr/local/bin/rc-wayland-health \
-        /usr/local/libexec/rc-wayland-service-* \
+        /usr/local/libexec/rc-wayland/* \
     && mkdir -p /etc/s6-overlay/user-bundles.d/user/contents.d \
     && for service in dbus pipewire wireplumber sway portal-wlr portal; do \
         mkdir -p "/etc/s6-overlay/s6-rc.d/${service}/dependencies.d"; \
         printf 'longrun\n' > "/etc/s6-overlay/s6-rc.d/${service}/type"; \
         printf '3\n' > "/etc/s6-overlay/s6-rc.d/${service}/notification-fd"; \
-        ln -s "/usr/local/libexec/rc-wayland-service-${service}" "/etc/s6-overlay/s6-rc.d/${service}/run"; \
-        ln -s /usr/local/libexec/rc-wayland-service-finish "/etc/s6-overlay/s6-rc.d/${service}/finish"; \
+        ln -s "/usr/local/libexec/rc-wayland/${service}" "/etc/s6-overlay/s6-rc.d/${service}/run"; \
+        ln -s /usr/local/libexec/rc-wayland/finish "/etc/s6-overlay/s6-rc.d/${service}/finish"; \
         touch "/etc/s6-overlay/user-bundles.d/user/contents.d/${service}"; \
       done \
     && touch /etc/s6-overlay/s6-rc.d/dbus/dependencies.d/base \
@@ -185,8 +185,8 @@ RUN chmod 0755 \
     && touch /etc/s6-overlay/s6-rc.d/portal/dependencies.d/portal-wlr \
     && mkdir -p /etc/s6-overlay/s6-rc.d/rc-kube/dependencies.d \
     && printf 'longrun\n' > /etc/s6-overlay/s6-rc.d/rc-kube/type \
-    && ln -s /usr/local/libexec/rc-wayland-service-rc-kube /etc/s6-overlay/s6-rc.d/rc-kube/run \
-    && ln -s /usr/local/libexec/rc-wayland-service-finish /etc/s6-overlay/s6-rc.d/rc-kube/finish \
+    && ln -s /usr/local/libexec/rc-wayland/rc-kube /etc/s6-overlay/s6-rc.d/rc-kube/run \
+    && ln -s /usr/local/libexec/rc-wayland/finish /etc/s6-overlay/s6-rc.d/rc-kube/finish \
     && touch /etc/s6-overlay/s6-rc.d/rc-kube/dependencies.d/base \
     && touch /etc/s6-overlay/user-bundles.d/user/contents.d/rc-kube \
     && mkdir -p /run/user/1000 /run/rc-wayland/config /run/rc \

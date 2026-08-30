@@ -1,0 +1,12 @@
+diff --git a/src/screencast/wlr_screencast.c b/src/screencast/wlr_screencast.c
+index 205d9c4..b806ef1 100644
+--- a/src/screencast/wlr_screencast.c
++++ b/src/screencast/wlr_screencast.c
+@@ -15,6 +15,7 @@
+ #include <sys/mman.h>
+ #include <sys/param.h>
+ #include <sys/stat.h>
++#include <unistd.h>
+ #include <assert.h>
+ #include <wayland-client-protocol.h>
+ #include <xf86drm.h>

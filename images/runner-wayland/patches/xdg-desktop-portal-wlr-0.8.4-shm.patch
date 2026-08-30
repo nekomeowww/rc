@@ -1,0 +1,58 @@
+diff --git a/src/screencast/wlr_screencast.c b/src/screencast/wlr_screencast.c
+index b806ef1..c9bf5f7 100644
+--- a/src/screencast/wlr_screencast.c
++++ b/src/screencast/wlr_screencast.c
+@@ -574,19 +574,23 @@ int xdpw_wlr_screencopy_init(struct xdpw_state *state) {
+-	} else if (ctx->screencopy_manager && ctx->linux_dmabuf) {
+-		if (zwp_linux_dmabuf_v1_get_version(ctx->linux_dmabuf) >= ZWP_LINUX_DMABUF_V1_GET_DEFAULT_FEEDBACK_SINCE_VERSION) {
+-			ctx->linux_dmabuf_feedback = zwp_linux_dmabuf_v1_get_default_feedback(ctx->linux_dmabuf);
+-			zwp_linux_dmabuf_feedback_v1_add_listener(ctx->linux_dmabuf_feedback, &linux_dmabuf_listener_feedback, ctx);
+-		} else {
+-			zwp_linux_dmabuf_v1_add_listener(ctx->linux_dmabuf, &linux_dmabuf_listener, ctx);
+-		}
+-
+-		wl_display_roundtrip(state->wl_display);
+-
+-		logprint(DEBUG, "wayland: dmabuf_feedback listeners run");
+-
+-		// make sure we have a gbm device
+-		if (!ctx->gbm) {
+-			ctx->gbm = xdpw_gbm_device_create(NULL);
+-			if (!ctx->gbm) {
+-				logprint(ERROR, "System doesn't support gbm!");
+-			}
+-		}
++	} else if (ctx->screencopy_manager) {
++		if (ctx->linux_dmabuf) {
++			if (zwp_linux_dmabuf_v1_get_version(ctx->linux_dmabuf) >= ZWP_LINUX_DMABUF_V1_GET_DEFAULT_FEEDBACK_SINCE_VERSION) {
++				ctx->linux_dmabuf_feedback = zwp_linux_dmabuf_v1_get_default_feedback(ctx->linux_dmabuf);
++				zwp_linux_dmabuf_feedback_v1_add_listener(ctx->linux_dmabuf_feedback, &linux_dmabuf_listener_feedback, ctx);
++			} else {
++				zwp_linux_dmabuf_v1_add_listener(ctx->linux_dmabuf, &linux_dmabuf_listener, ctx);
++			}
++
++			wl_display_roundtrip(state->wl_display);
++
++			logprint(DEBUG, "wayland: dmabuf_feedback listeners run");
++
++			// make sure we have a gbm device
++			if (!ctx->gbm) {
++				ctx->gbm = xdpw_gbm_device_create(NULL);
++				if (!ctx->gbm) {
++					logprint(ERROR, "System doesn't support gbm!");
++				}
++			}
++		} else {
++			logprint(INFO, "wayland: linux-dmabuf unavailable, using wl_shm");
++		}
+diff --git a/src/screencast/wlr_screencopy.c b/src/screencast/wlr_screencopy.c
+index 86c7925..d934f1b 100644
+--- a/src/screencast/wlr_screencopy.c
++++ b/src/screencast/wlr_screencopy.c
+@@ -158 +158,5 @@ static void wlr_frame_buffer_done(void *data,
+-	zwlr_screencopy_frame_v1_copy_with_damage(frame, cast->current_frame.xdpw_buffer->buffer);
++	if (cast->seq == 0) {
++		zwlr_screencopy_frame_v1_copy(frame, cast->current_frame.xdpw_buffer->buffer);
++	} else {
++		zwlr_screencopy_frame_v1_copy_with_damage(frame, cast->current_frame.xdpw_buffer->buffer);
++	}

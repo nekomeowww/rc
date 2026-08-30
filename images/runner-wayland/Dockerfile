@@ -40,6 +40,51 @@ RUN set -eux; \
 
 FROM node:26-bookworm-slim AS node-runtime
 
+FROM ubuntu:24.04 AS xdpw-builder
+ARG XDPW_VERSION=0.8.4
+ARG XDPW_SHA256=3122966d46ab108f505525bcb2498f9121b446ee8438fbfceb73a7a1fa1ad400
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        libdrm-dev \
+        libgbm-dev \
+        libinih-dev \
+        libpipewire-0.3-dev \
+        libsystemd-dev \
+        libwayland-dev \
+        meson \
+        ninja-build \
+        pkg-config \
+        wayland-protocols \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY images/runner-wayland/patches/xdg-desktop-portal-wlr-0.8.4-*.patch /tmp/
+
+RUN set -eux; \
+    curl -fsSLo /tmp/xdg-desktop-portal-wlr.tar.gz \
+        "https://github.com/emersion/xdg-desktop-portal-wlr/archive/refs/tags/v${XDPW_VERSION}.tar.gz"; \
+    echo "${XDPW_SHA256}  /tmp/xdg-desktop-portal-wlr.tar.gz" | sha256sum --check --strict; \
+    mkdir -p /tmp/xdg-desktop-portal-wlr; \
+    tar -xzf /tmp/xdg-desktop-portal-wlr.tar.gz \
+        -C /tmp/xdg-desktop-portal-wlr --strip-components=1; \
+    patch --directory=/tmp/xdg-desktop-portal-wlr --fuzz=0 --strip=1 \
+        < /tmp/xdg-desktop-portal-wlr-0.8.4-build.patch; \
+    patch --directory=/tmp/xdg-desktop-portal-wlr --fuzz=0 --strip=1 \
+        < /tmp/xdg-desktop-portal-wlr-0.8.4-shm.patch; \
+    meson setup /tmp/xdg-desktop-portal-wlr/build /tmp/xdg-desktop-portal-wlr \
+        --buildtype=release \
+        --prefix=/usr \
+        --libexecdir=libexec \
+        -Dman-pages=disabled \
+        -Dsystemd=disabled; \
+    meson compile -C /tmp/xdg-desktop-portal-wlr/build; \
+    install -Dm755 \
+        /tmp/xdg-desktop-portal-wlr/build/xdg-desktop-portal-wlr \
+        /out/xdg-desktop-portal-wlr
+
 FROM ubuntu:24.04
 
 ARG TARGETARCH
@@ -157,6 +202,7 @@ COPY --from=builder /out/rc-kube /usr/local/libexec/rc-kube
 COPY --from=tool-downloader /out/mise /usr/local/bin/mise
 COPY --from=tool-downloader /out/proto /usr/local/bin/proto
 COPY --from=tool-downloader /out/proto-shim /usr/local/bin/proto-shim
+COPY --from=xdpw-builder /out/xdg-desktop-portal-wlr /usr/libexec/xdg-desktop-portal-wlr
 COPY images/runner-wayland/rootfs/ /
 
 RUN chmod 0755 \

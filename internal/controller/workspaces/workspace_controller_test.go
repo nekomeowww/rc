@@ -168,6 +168,44 @@ func TestWorkspaceRuntimeUsesDeferredWorktreeAndLifecycleActions(t *testing.T) {
 	assertions.Equal([]string{lifecycleToolTestName, "cleanup"}, beforeStop[0].Command)
 }
 
+func TestWorkspaceMountsExplicitWorktreeMetadataAtStableVolumeRoot(t *testing.T) {
+	t.Parallel()
+	const mountName = "source"
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	requirements.NoError(corev1.AddToScheme(scheme))
+	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme))
+	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme))
+	worktree := &repositoriesv1alpha1.Worktree{
+		ObjectMeta: metav1.ObjectMeta{Name: "explicit", Namespace: testNamespace},
+		Status: repositoriesv1alpha1.WorktreeStatus{
+			VolumeClaimName: "explicit",
+			WorktreePath:    "/repository/worktree/explicit",
+			Conditions: []metav1.Condition{{
+				Type: repositoriesv1alpha1.WorktreeConditionReady, Status: metav1.ConditionTrue, Reason: "WorktreeReady",
+			}},
+		},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()
+	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
+	workspace := &workspacesv1alpha1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "explicit-worktree", Namespace: testNamespace},
+		Spec: workspacesv1alpha1.WorkspaceSpec{Mounts: []workspacesv1alpha1.WorkspaceMount{{
+			Name: mountName, Path: mountName, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: worktree.Name},
+		}}},
+	}
+
+	resolved, reason, message, err := reconciler.resolveWorkspaceDependencies(ctx, workspace, &resolvedWorkspace{})
+	requirements.NoError(err)
+	assertions.Empty(reason)
+	assertions.Empty(message)
+	requirements.Len(resolved.volumeMounts, 2)
+	assertions.Equal(corev1.VolumeMount{Name: mountName, MountPath: "/workspace/source", SubPath: "worktree/explicit"}, resolved.volumeMounts[0])
+	assertions.Equal(corev1.VolumeMount{Name: mountName, MountPath: "/mnt/rc/worktrees/explicit"}, resolved.volumeMounts[1])
+}
+
 func TestWorkspaceInitializationFailureReportsCrashLoopExit(t *testing.T) {
 	t.Parallel()
 	pod := &corev1.Pod{Status: corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{{

@@ -530,6 +530,7 @@ func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspac
 
 func (r *WorkspaceReconciler) resolveWorkspaceDependencies(ctx context.Context, workspace *workspacesv1alpha1.Workspace, resolved *resolvedWorkspace) (*resolvedWorkspace, string, string, error) {
 	initializerNames := make(map[string]struct{})
+	worktreeRootMountIndexes := make(map[string]int)
 	for _, mount := range workspace.Spec.Mounts {
 		volume, volumeMount, claim, initializer, reason, message, err := r.resolveWorkspaceMount(ctx, workspace.Namespace, mount)
 		if err != nil {
@@ -540,6 +541,22 @@ func (r *WorkspaceReconciler) resolveWorkspaceDependencies(ctx context.Context, 
 		}
 		resolved.volumes = append(resolved.volumes, volume)
 		resolved.volumeMounts = append(resolved.volumeMounts, volumeMount)
+		if mount.WorktreeRef != nil && volumeMount.SubPath != "" {
+			rootMountPath := worktreebootstrap.VolumeRootMountPath(mount.WorktreeRef.Name)
+			if index, exists := worktreeRootMountIndexes[rootMountPath]; exists {
+				// Native Git metadata is shared by every visible mount of the same
+				// Worktree, so its hidden root must be writable when any mount is writable.
+				if resolved.volumeMounts[index].ReadOnly && !volumeMount.ReadOnly {
+					resolved.volumeMounts[index].Name = volumeMount.Name
+					resolved.volumeMounts[index].ReadOnly = false
+				}
+			} else {
+				resolved.volumeMounts = append(resolved.volumeMounts, corev1.VolumeMount{
+					Name: volumeMount.Name, MountPath: rootMountPath, ReadOnly: volumeMount.ReadOnly,
+				})
+				worktreeRootMountIndexes[rootMountPath] = len(resolved.volumeMounts) - 1
+			}
+		}
 		if claim != nil {
 			resolved.writeClaims = append(resolved.writeClaims, *claim)
 		}

@@ -2,6 +2,10 @@ package repositories
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -184,8 +188,10 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(container.Args).To(ContainElement("add"))
 		Expect(container.Args).To(ContainElement("-b"))
 		Expect(container.Args).To(ContainElement("feature/worktree"))
-		Expect(container.Args).To(ContainElement(worktreePath(worktree)))
+		Expect(container.Args).To(ContainElement("/mnt/rc/worktrees/worktree-child/worktree/worktree-child"))
 		Expect(container.Args[1]).To(ContainSubstring("checkout.workers=8"))
+		Expect(container.WorkingDir).To(Equal("/mnt/rc/worktrees/worktree-child"))
+		Expect(container.VolumeMounts).To(ConsistOf(corev1.VolumeMount{Name: workerVolumeName, MountPath: "/mnt/rc/worktrees/worktree-child"}))
 		Expect(job.Spec.Template.Spec.SecurityContext.RunAsUser).To(HaveValue(Equal(int64(1000))))
 		Expect(job.Spec.Template.Spec.SecurityContext.RunAsGroup).To(HaveValue(Equal(int64(1000))))
 		Expect(job.Spec.Template.Spec.SecurityContext.FSGroup).To(HaveValue(Equal(int64(1000))))
@@ -214,7 +220,52 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(persisted.Status.VolumeClaimName).To(Equal(worktreeName))
 		Expect(persisted.Status.WorktreePath).To(Equal(worktreePath(worktree)))
 	})
+
+	It("creates a native Git worktree that remains usable at the runtime mount path", func() {
+		// ROOT CAUSE:
+		//
+		// The bootstrap Job previously created the linked worktree below
+		// /repository, but Workspace Pods mounted only that linked-worktree
+		// subdirectory. Its .git file therefore referenced an absolute metadata
+		// path that did not exist in the Workspace container. Creating the worktree
+		// below the same stable volume root mounted by the runtime keeps both sides
+		// of Git's native worktree link reachable.
+		temporaryDirectory := GinkgoT().TempDir()
+		stableRoot := filepath.Join(temporaryDirectory, "stable-root")
+		stableTarget := filepath.Join(stableRoot, "worktree", "portable")
+
+		runGitCommand(temporaryDirectory, "init", stableRoot)
+		runGitCommand(stableRoot, "config", "user.name", "RC Test")
+		runGitCommand(stableRoot, "config", "user.email", "rc@example.invalid")
+		Expect(os.WriteFile(filepath.Join(stableRoot, "README.md"), []byte("portable worktree\n"), 0o600)).To(Succeed())
+		runGitCommand(stableRoot, "add", "README.md")
+		runGitCommand(stableRoot, "commit", "-m", "initial")
+
+		testHome := filepath.Join(temporaryDirectory, "home")
+		Expect(os.Mkdir(testHome, 0o700)).To(Succeed())
+		command := exec.Command("sh", "-ceu", worktreeBootstrapScript, "worktree-bootstrap", "worktree", "add", "-b", "portable", stableTarget)
+		command.Dir = stableRoot
+		command.Env = append(os.Environ(), "HOME="+testHome)
+		output, err := command.CombinedOutput()
+		Expect(err).NotTo(HaveOccurred(), string(output))
+		gitDirectory, err := os.ReadFile(filepath.Join(stableTarget, ".git"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.TrimSpace(string(gitDirectory))).To(ContainSubstring(stableRoot))
+
+		status := exec.Command("git", "status", "--short")
+		status.Dir = stableTarget
+		status.Env = append(os.Environ(), "HOME="+testHome)
+		output, err = status.CombinedOutput()
+		Expect(err).NotTo(HaveOccurred(), string(output))
+	})
 })
+
+func runGitCommand(directory string, arguments ...string) {
+	command := exec.Command("git", arguments...)
+	command.Dir = directory
+	output, err := command.CombinedOutput()
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), string(output))
+}
 
 func metav1Object(name string) metav1.ObjectMeta {
 	return metav1.ObjectMeta{Name: name, Namespace: testNamespace}

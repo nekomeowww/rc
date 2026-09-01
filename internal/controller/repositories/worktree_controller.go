@@ -403,7 +403,9 @@ func worktreeBootstrapJob(worktree *repositoriesv1alpha1.Worktree, claimName, ru
 		}
 	}
 
-	gitArgs = append(gitArgs, worktreePath(worktree))
+	volumeRootMountPath := worktreebootstrap.VolumeRootMountPath(worktree.Name)
+	nativeWorktreeMountPath := worktreebootstrap.NativeWorktreeMountPath(worktree.Name)
+	gitArgs = append(gitArgs, nativeWorktreeMountPath)
 	if worktree.Spec.Ref != "" {
 		gitArgs = append(gitArgs, worktree.Spec.Ref)
 	}
@@ -434,13 +436,13 @@ func worktreeBootstrapJob(worktree *repositoriesv1alpha1.Worktree, claimName, ru
 						Image:      runnerImage,
 						Command:    []string{"sh"},
 						Args:       append([]string{"-ceu", worktreeBootstrapScript, "worktree-bootstrap"}, gitArgs...),
-						WorkingDir: workerMountPath,
+						WorkingDir: volumeRootMountPath,
 						Env:        []corev1.EnvVar{{Name: "HOME", Value: "/tmp"}},
 						SecurityContext: &corev1.SecurityContext{
 							AllowPrivilegeEscalation: &allowPrivilegeEscalation,
 							Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{allCapabilitiesDrop}},
 						},
-						VolumeMounts: []corev1.VolumeMount{{Name: workerVolumeName, MountPath: workerMountPath}},
+						VolumeMounts: []corev1.VolumeMount{{Name: workerVolumeName, MountPath: volumeRootMountPath}},
 					}},
 					Volumes: []corev1.Volume{{
 						Name: workerVolumeName,
@@ -584,9 +586,9 @@ func (r *WorktreeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 const worktreeBootstrapScript = `
-git config --global --add safe.directory /repository
-mkdir -p /repository/worktree
-git -C /repository worktree prune
-git -C /repository -c checkout.workers=8 -c checkout.thresholdForParallelism=100 "$@"
-git -C /repository worktree list --porcelain
+git config --global --add safe.directory "$PWD"
+mkdir -p "$PWD/worktree"
+git -C "$PWD" worktree prune
+git -C "$PWD" -c checkout.workers=8 -c checkout.thresholdForParallelism=100 "$@"
+git -C "$PWD" worktree list --porcelain
 `

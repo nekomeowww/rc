@@ -21,6 +21,7 @@ package worktreebootstrap
 import (
 	"crypto/sha256"
 	"fmt"
+	"path"
 
 	"k8s.io/apimachinery/pkg/types"
 
@@ -31,7 +32,21 @@ import (
 const (
 	containerNamePrefix     = "rc-worktree-"
 	generatedWorkspaceLabel = "workspaces.rc.ayaka.io/generated-for"
+	volumeRootMountPath     = "/mnt/rc/worktrees"
 )
+
+// VolumeRootMountPath returns the stable container path for a Worktree child
+// volume. Both bootstrap Jobs and Workspace runtimes must mount the volume at
+// this path because native Git worktree metadata stores absolute paths.
+func VolumeRootMountPath(name string) string {
+	return path.Join(volumeRootMountPath, name)
+}
+
+// NativeWorktreeMountPath returns the native linked-worktree path inside its
+// stable child-volume root.
+func NativeWorktreeMountPath(name string) string {
+	return path.Join(VolumeRootMountPath(name), "worktree", name)
+}
 
 // Deferred reports whether a generated Worktree can initialize its branch in
 // the consuming Workspace runtime instead of a separate bootstrap Job.

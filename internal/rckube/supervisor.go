@@ -557,12 +557,19 @@ func (supervisor *Supervisor) process(id string) (*supervisedProcess, error) {
 func (process *supervisedProcess) wait(outputDone <-chan struct{}) {
 	err := process.command.Wait()
 	if process.terminal != nil {
+		// The PTY can still contain output after the child exits. Closing the
+		// master first discards those unread bytes on Linux, so let the reader
+		// observe the slave-side close and drain the kernel buffer before the
+		// descriptor is released.
+		if outputDone != nil {
+			<-outputDone
+		}
 		_ = process.terminal.Close()
 	} else if process.input != nil {
 		_ = process.input.Close()
-	}
-	if outputDone != nil {
-		<-outputDone
+		if outputDone != nil {
+			<-outputDone
+		}
 	}
 	process.cleanupCredentials()
 	exitCode := int32(-1)

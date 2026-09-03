@@ -450,3 +450,22 @@ func TestTerminalAttachAppliesInitialSizeBeforeForwardingInput(t *testing.T) {
 	requirements.NoError(supervisor.Attach(context.Background(), request.ID, "viewer", input, &attached, 42, 120), "attach with local terminal size")
 	requirements.Contains(attached.String(), "42 120", "resize the child PTY before forwarding attached input")
 }
+
+func TestTerminalProcessDrainsPTYOutputBeforeExit(t *testing.T) {
+	t.Parallel()
+	requirements := require.New(t)
+	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
+	request := processruntime.StartRequest{
+		ID: "drain-terminal", UID: testProcessUID,
+		Command: []string{"sh", "-c", "i=0; while [ $i -lt 4096 ]; do printf '0123456789abcdef'; i=$((i+1)); done; printf 'tail-marker'"}, TTY: true,
+	}
+	_, err := supervisor.Start(request)
+	requirements.NoError(err, "start terminal process")
+	requirements.Eventually(func() bool {
+		state, inspectErr := supervisor.Inspect(request.ID)
+		return inspectErr == nil && state.Phase == phaseExited
+	}, 3*time.Second, 10*time.Millisecond, "wait for terminal process")
+	var transcript bytes.Buffer
+	requirements.NoError(supervisor.Logs(request.ID, &transcript), "read terminal transcript")
+	requirements.Contains(transcript.String(), "tail-marker", "drain output buffered by the PTY before reporting process exit")
+}

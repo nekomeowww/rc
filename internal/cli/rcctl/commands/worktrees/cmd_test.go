@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
-	clioutput "github.com/nekomeowww/rc/internal/cli/rcctl/output"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
+	clioutput "github.com/nekomeowww/rc/pkg/output"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

@@ -16,8 +16,8 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/command"
-	clioutput "github.com/nekomeowww/rc/internal/cli/rcctl/output"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
+	clioutput "github.com/nekomeowww/rc/pkg/output"
 )
 
 type listOptions struct {
@@ -96,11 +96,7 @@ func newGetCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err := kubeClient.Get(cmd.Context(), client.ObjectKey{Namespace: namespace, Name: args[0]}, repository); err != nil {
 				return fmt.Errorf("get Repository %q: %w", args[0], err)
 			}
-			if options.Structured() {
-				return options.WriteObject(cmd.OutOrStdout(), repository, kubeClient.Scheme())
-			}
-
-			return clioutput.WriteDetails(cmd.OutOrStdout(), repositoryDetailFields(repository))
+			return options.PrintDetails(cmd.OutOrStdout(), repository, kubeClient.Scheme(), repositoryDetailFields(repository))
 		},
 	}
 	options.AddFlags(cmd, false)
@@ -150,21 +146,18 @@ func runRepositoryList(ctx context.Context, writer io.Writer, kubeClient client.
 		return fmt.Errorf("list Repositories: %w", err)
 	}
 	list.Items = repositoryListItems(list.Items)
-	if options.Structured() {
-		return options.WriteObject(writer, list, kubeClient.Scheme())
-	}
 	rows := make([][]any, 0, len(list.Items))
 	for _, row := range repositoryListRows(list.Items) {
 		rows = append(rows, []any{row.name, row.ready, row.remote, row.ref, row.volume, row.updated})
 	}
 
-	return clioutput.WriteTable(writer, clioutput.Table{
+	return options.PrintList(writer, list, kubeClient.Scheme(), clioutput.Table{
 		Columns: []clioutput.Column{
 			{Name: "NAME", MaxWidth: 32}, {Name: "READY"}, {Name: "REMOTE", MinWidth: 12, MaxWidth: 48, Flexible: true},
 			{Name: "REF", MaxWidth: 32}, {Name: "VOLUME", MaxWidth: 32, Wide: true}, {Name: "UPDATED"},
 		},
 		Rows: rows,
-	}, options.Wide())
+	})
 }
 
 func repositoryListItems(repositories []repositoriesv1alpha1.Repository) []repositoriesv1alpha1.Repository {

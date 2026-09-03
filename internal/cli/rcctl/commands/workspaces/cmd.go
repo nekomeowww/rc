@@ -42,11 +42,11 @@ import (
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/cluster"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/command"
-	clioutput "github.com/nekomeowww/rc/internal/cli/rcctl/output"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/progress"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	repositoryservice "github.com/nekomeowww/rc/internal/repositories"
 	workspaceservice "github.com/nekomeowww/rc/internal/workspaces"
+	clioutput "github.com/nekomeowww/rc/pkg/output"
 )
 
 type createOptions struct {
@@ -586,11 +586,9 @@ func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 				return err
 			}
 			list.Items = workspaceListItems(list.Items)
-			if options.output.Structured() {
-				return options.output.WriteObject(cmd.OutOrStdout(), list, clusterClient.Kube.Scheme())
-			}
-
-			return clioutput.WriteTable(cmd.OutOrStdout(), workspaceListTable(list.Items, time.Now()), options.output.Wide())
+			return options.output.PrintList(
+				cmd.OutOrStdout(), list, clusterClient.Kube.Scheme(), workspaceListTable(list.Items, time.Now()),
+			)
 		},
 	}
 	options.output.AddFlags(cmd, true)
@@ -618,11 +616,7 @@ func newGetCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err := clusterClient.Kube.Get(cmd.Context(), client.ObjectKey{Namespace: namespace, Name: args[0]}, workspace); err != nil {
 				return fmt.Errorf("get Workspace %q: %w", args[0], err)
 			}
-			if options.Structured() {
-				return options.WriteObject(cmd.OutOrStdout(), workspace, clusterClient.Kube.Scheme())
-			}
-
-			return clioutput.WriteDetails(cmd.OutOrStdout(), workspaceDetailFields(workspace))
+			return options.PrintDetails(cmd.OutOrStdout(), workspace, clusterClient.Kube.Scheme(), workspaceDetailFields(workspace))
 		},
 	}
 	options.AddFlags(cmd, false)

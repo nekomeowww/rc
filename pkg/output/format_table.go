@@ -17,150 +17,14 @@ limitations under the License.
 package output
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
-	"time"
 
 	prettytable "github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
-	"github.com/spf13/cobra"
 	"golang.org/x/term"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
-	"sigs.k8s.io/yaml"
 )
-
-const (
-	FormatTable = "table"
-	FormatWide  = "wide"
-	FormatJSON  = "json"
-	FormatYAML  = "yaml"
-)
-
-// Options selects the human-readable or structured representation of a command result.
-type Options struct {
-	Format string
-}
-
-// AddFlags adds the common output format flag to a command.
-func (options *Options) AddFlags(command *cobra.Command, allowWide bool) {
-	formats := "table, json, or yaml"
-	if allowWide {
-		formats = "table, wide, json, or yaml"
-	}
-	command.Flags().StringVarP(&options.Format, "output", "o", "", "Output format: "+formats)
-}
-
-// Validate rejects unsupported output formats. An empty format selects the
-// command's default human-readable representation.
-func (options Options) Validate(allowWide bool) error {
-	switch options.Format {
-	case "", FormatTable, FormatJSON, FormatYAML:
-		return nil
-	case FormatWide:
-		if allowWide {
-			return nil
-		}
-	}
-
-	return fmt.Errorf("unsupported output format %q", options.Format)
-}
-
-// Structured reports whether the selected format represents the Kubernetes object.
-func (options Options) Structured() bool {
-	return options.Format == FormatJSON || options.Format == FormatYAML
-}
-
-// Wide reports whether columns marked as wide should be included.
-func (options Options) Wide() bool {
-	return options.Format == FormatWide
-}
-
-// WriteObject restores Kubernetes type metadata and serializes an object in
-// the selected structured format.
-func (options Options) WriteObject(writer io.Writer, object runtime.Object, scheme *runtime.Scheme) error {
-	gvk := object.GetObjectKind().GroupVersionKind()
-	if gvk.Empty() {
-		resolved, err := apiutil.GVKForObject(object, scheme)
-		if err != nil {
-			return fmt.Errorf("resolve Kubernetes object type: %w", err)
-		}
-		object.GetObjectKind().SetGroupVersionKind(resolved)
-	}
-	var (
-		data []byte
-		err  error
-	)
-	switch options.Format {
-	case FormatJSON:
-		data, err = json.MarshalIndent(object, "", "  ")
-	case FormatYAML:
-		data, err = yaml.Marshal(object)
-	default:
-		return fmt.Errorf("output format %q is not structured", options.Format)
-	}
-	if err != nil {
-		return fmt.Errorf("marshal %s output: %w", options.Format, err)
-	}
-	terminated := make([]byte, 0, len(data)+1)
-	terminated = append(terminated, data...)
-	terminated = append(terminated, '\n')
-	if _, err := writer.Write(terminated); err != nil {
-		return fmt.Errorf("write %s output: %w", options.Format, err)
-	}
-
-	return nil
-}
-
-// ValueOrDash makes an absent scalar explicit in human-readable output.
-func ValueOrDash(value string) string {
-	if value == "" {
-		return "-"
-	}
-
-	return value
-}
-
-// Timestamp renders a Kubernetes timestamp in a stable UTC representation.
-func Timestamp(value metav1.Time) string {
-	if value.IsZero() {
-		return "-"
-	}
-
-	return value.UTC().Format(time.RFC3339)
-}
-
-// OptionalTimestamp renders an optional Kubernetes timestamp.
-func OptionalTimestamp(value *metav1.Time) string {
-	if value == nil {
-		return "-"
-	}
-
-	return Timestamp(*value)
-}
-
-// Conditions summarizes Kubernetes conditions without hiding their reason or message.
-func Conditions(conditions []metav1.Condition) string {
-	if len(conditions) == 0 {
-		return "-"
-	}
-	summaries := make([]string, 0, len(conditions))
-	for _, condition := range conditions {
-		summary := fmt.Sprintf("%s=%s", condition.Type, condition.Status)
-		if condition.Reason != "" {
-			summary += " (" + condition.Reason + ")"
-		}
-		if condition.Message != "" {
-			summary += ": " + condition.Message
-		}
-		summaries = append(summaries, summary)
-	}
-
-	return strings.Join(summaries, "; ")
-}
 
 // Column describes one human-readable table column.
 type Column struct {
@@ -185,23 +49,20 @@ type Field struct {
 	Value any
 }
 
-// WriteDetails renders an untruncated two-column detail view.
-func WriteDetails(writer io.Writer, fields []Field) error {
+func writeDetails(writer io.Writer, fields []Field) error {
 	rows := make([][]any, 0, len(fields))
 	for _, field := range fields {
 		rows = append(rows, []any{field.Name + ":", field.Value})
 	}
 
-	return WriteTable(writer, Table{
+	return writeTable(writer, Table{
 		Columns:  []Column{{Name: "FIELD"}, {Name: "VALUE"}},
 		Rows:     rows,
 		NoHeader: true,
 	}, false)
 }
 
-// WriteTable renders a compact, borderless table. Long cells are shortened
-// with an ellipsis and wide-only columns are omitted unless requested.
-func WriteTable(writer io.Writer, value Table, wide bool) error {
+func writeTable(writer io.Writer, value Table, wide bool) error {
 	rendered, err := renderTable(value, wide, terminalWidth(writer))
 	if err != nil {
 		return err

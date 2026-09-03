@@ -37,11 +37,11 @@ import (
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/cluster"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/command"
-	clioutput "github.com/nekomeowww/rc/internal/cli/rcctl/output"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/progress"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	repositoryservice "github.com/nekomeowww/rc/internal/repositories"
 	workspaceservice "github.com/nekomeowww/rc/internal/workspaces"
+	clioutput "github.com/nekomeowww/rc/pkg/output"
 )
 
 type runOptions struct {
@@ -490,11 +490,10 @@ func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 				return err
 			}
 			list.Items = agentListItems(list.Items, *options)
-			if options.output.Structured() {
-				return options.output.WriteObject(cmd.OutOrStdout(), list, clusterClient.Kube.Scheme())
-			}
-
-			return clioutput.WriteTable(cmd.OutOrStdout(), agentListTable(list.Items, options.allNamespaces, time.Now()), options.output.Wide())
+			return options.output.PrintList(
+				cmd.OutOrStdout(), list, clusterClient.Kube.Scheme(),
+				agentListTable(list.Items, options.allNamespaces, time.Now()),
+			)
 		},
 	}
 	cmd.Flags().StringVar(&options.workspace, "workspace", "", "Filter by target Workspace")
@@ -523,11 +522,7 @@ func newGetCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if options.Structured() {
-				return options.WriteObject(cmd.OutOrStdout(), process, processClient.Kube.Scheme())
-			}
-
-			return clioutput.WriteDetails(cmd.OutOrStdout(), agentDetailFields(process))
+			return options.PrintDetails(cmd.OutOrStdout(), process, processClient.Kube.Scheme(), agentDetailFields(process))
 		},
 	}
 	options.AddFlags(cmd, false)

@@ -17,24 +17,23 @@ limitations under the License.
 package output
 
 import (
-	"bytes"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 )
 
-const testCommandHeader = "COMMAND"
+const (
+	testCommandHeader = "COMMAND"
+	testNameHeader    = "NAME"
+)
 
 func TestRenderTableSelectsColumnsAndSnipsLongCells(t *testing.T) {
 	t.Parallel()
 	value := Table{
 		Columns: []Column{
-			{Name: "NAME"},
+			{Name: testNameHeader},
 			{Name: testCommandHeader, MaxWidth: 8},
 			{Name: "CLIENTS", Wide: true},
 		},
@@ -65,7 +64,7 @@ func TestRenderTableNormalizesCellBreaks(t *testing.T) {
 func TestRenderTableRejectsMismatchedRows(t *testing.T) {
 	t.Parallel()
 	_, err := renderTable(Table{
-		Columns: []Column{{Name: "NAME"}, {Name: "AGE"}},
+		Columns: []Column{{Name: testNameHeader}, {Name: "AGE"}},
 		Rows:    [][]any{{"process"}},
 	}, false, 0)
 	require.Error(t, err, "reject a row with missing cells")
@@ -77,18 +76,6 @@ func TestSnipCellLeavesShortValuesUnpadded(t *testing.T) {
 
 	assert.Equal(t, "short", snipCell("short", 20), "do not pad a value to its maximum width")
 	assert.Equal(t, 8, len([]rune(snipCell(strings.Repeat("x", 20), 8))), "include the ellipsis within the maximum width")
-}
-
-func TestOptionsValidateSupportedFormats(t *testing.T) {
-	t.Parallel()
-
-	for _, format := range []string{"", FormatTable, FormatJSON, FormatYAML} {
-		assert.NoError(t, (Options{Format: format}).Validate(false), "accept %q for every command", format)
-	}
-	assert.NoError(t, (Options{Format: FormatWide}).Validate(true), "accept wide output for list commands")
-	err := (Options{Format: FormatWide}).Validate(false)
-	require.Error(t, err, "reject wide output for detail commands")
-	assert.EqualError(t, err, `unsupported output format "wide"`)
 }
 
 func TestRenderTableFitsTerminalWidthWithoutDroppingTrailingColumns(t *testing.T) {
@@ -106,18 +93,4 @@ func TestRenderTableFitsTerminalWidthWithoutDroppingTrailingColumns(t *testing.T
 		assert.LessOrEqual(t, len([]rune(line)), 60, "fit every rendered line within the terminal")
 	}
 	assert.Contains(t, rendered, "137", "preserve the trailing exit-code column")
-}
-
-func TestWriteObjectRestoresKubernetesTypeMetadata(t *testing.T) {
-	t.Parallel()
-	scheme := runtime.NewScheme()
-	require.NoError(t, corev1.AddToScheme(scheme), "register core Kubernetes types")
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "example"}}
-	var output bytes.Buffer
-
-	err := (Options{Format: FormatJSON}).WriteObject(&output, pod, scheme)
-	require.NoError(t, err, "write a registered Kubernetes object")
-
-	assert.Contains(t, output.String(), `"apiVersion": "v1"`, "include the resolved API version")
-	assert.Contains(t, output.String(), `"kind": "Pod"`, "include the resolved object kind")
 }

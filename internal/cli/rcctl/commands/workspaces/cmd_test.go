@@ -19,6 +19,7 @@ package workspaces
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -28,6 +29,7 @@ import (
 
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/kubeconfig"
 )
 
 const (
@@ -82,4 +84,43 @@ func TestSetWorkspaceCredentialReferencesRejectsMissingResource(t *testing.T) {
 		assert.ErrorContains(t, err, `get Credential "missing"`, "identify the missing Credential")
 		assert.Empty(t, workspace.Spec.CredentialRefs, "do not partially attach Credentials")
 	})
+}
+
+func TestWorkspaceListItemsSortsByName(t *testing.T) {
+	t.Parallel()
+	items := workspaceListItems([]workspacesv1alpha1.Workspace{
+		{ObjectMeta: metav1.ObjectMeta{Name: "zeta"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "alpha"}},
+	})
+
+	require.Len(t, items, 2, "retain every Workspace")
+	assert.Equal(t, "alpha", items[0].Name, "sort inventory by name")
+	assert.Equal(t, "zeta", items[1].Name, "retain the second sorted Workspace")
+}
+
+func TestWorkspaceListTableUsesHumanAgeAndWideMetadata(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)
+	table := workspaceListTable([]workspacesv1alpha1.Workspace{{
+		ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Hour))},
+		Spec: workspacesv1alpha1.WorkspaceSpec{
+			DesiredState: workspacesv1alpha1.WorkspaceDesiredStateRunning, Generated: true,
+		},
+	}}, now)
+
+	require.Len(t, table.Rows, 1, "create one row per Workspace")
+	assert.Equal(t, "120m", table.Rows[0][7], "use a compact Kubernetes-style age")
+	assert.True(t, table.Columns[3].Wide, "keep generated metadata in wide output")
+}
+
+func TestWorkspaceListAndGetCommandsExposeOutputFormats(t *testing.T) {
+	t.Parallel()
+	listCommand := newListCommand(kubeconfig.NewFlags())
+	getCommand := newGetCommand(kubeconfig.NewFlags())
+
+	assert.Contains(t, listCommand.Aliases, "ls", "offer the conventional list alias")
+	require.NotNil(t, listCommand.Flag("output"), "list accepts an output format")
+	require.NotNil(t, getCommand.Flag("output"), "get accepts a structured output format")
+	require.NoError(t, getCommand.Args(getCommand, []string{testWorkspaceName}), "get accepts exactly one Workspace name")
+	require.Error(t, getCommand.Args(getCommand, nil), "get requires a Workspace name")
 }

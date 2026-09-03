@@ -656,9 +656,16 @@ The initial Workspace and process commands are expected to include:
 
 ```text
 rcctl repo clone <url> [--with-submodules] [--recursive-submodules]
+rcctl repo list [-o table|wide|json|yaml]
+rcctl repo get <name> [-o table|json|yaml]
 rcctl repo delete <name>
 
+rcctl worktree list [-o table|wide|json|yaml]
+rcctl worktree get <name> [-o table|json|yaml]
+
 rcctl workspace create <name>
+rcctl workspace list [-o table|wide|json|yaml]
+rcctl workspace get <name> [-o table|json|yaml]
 rcctl workspace mount repo <repository> [mount options]
 rcctl workspace mount worktree <repository>/<worktree> [mount options]
 rcctl workspace unmount <workspace> <mount> [--force]
@@ -670,7 +677,8 @@ rcctl workspace port-forward <name> <local-port>[:<remote-port>]
 rcctl agent run [target options] [--] <command> [args...]
 rcctl agent exec [target options] [--] <command> [args...]
 rcctl agent resume <id>
-rcctl agent list [--workspace <name>] [--all-namespaces]
+rcctl agent list [--workspace <name>] [--all-namespaces] [-o table|wide|json|yaml]
+rcctl agent get <id> [-o table|json|yaml]
 rcctl agent logs <id>
 rcctl agent stop <id>
 rcctl agent delete <id>
@@ -705,10 +713,14 @@ interactive terminal. Both create a persistent AgentProcess before attaching
 and can run concurrently with other processes in one Workspace.
 
 `agent list` defaults to every AgentProcess in the current namespace, not only
-the XDG default Workspace. Its table includes the process ID, target, command,
-TTY mode, phase, attached client count, age, and exit code. It can filter by
-Workspace, phase, agent type, and ID prefix, in addition to listing all
-namespaces when authorized.
+the XDG default Workspace. Its compact table includes the process ID, target,
+shortened command, agent type, phase, age, and exit code. Records are ordered
+from oldest to newest so the latest process is at the bottom. `-o wide` adds
+TTY mode and attached client count. The command can filter by Workspace,
+phase, agent type, and ID prefix, in addition to listing all namespaces when
+authorized. Every list command accepts `-o json` and `-o yaml` for complete,
+machine-readable resource data; the corresponding `get` command prints an
+untruncated human-readable detail view by default.
 
 `workspace port-forward` uses Kubernetes Pod port-forward and does not require
 a declared container port. Closing the client stops only the forwarding

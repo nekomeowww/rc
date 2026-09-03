@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	clioutput "github.com/nekomeowww/rc/internal/cli/rcctl/output"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 )
 
@@ -59,7 +60,7 @@ func TestRepositoryListReturnsKubernetesAPIError(t *testing.T) {
 	t.Parallel()
 	kubeClient := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
 
-	err := runRepositoryList(context.Background(), io.Discard, kubeClient, listTestNamespace)
+	err := runRepositoryList(context.Background(), io.Discard, kubeClient, listTestNamespace, clioutput.Options{})
 
 	require.Error(t, err, "listing an unregistered Repository type fails")
 	assert.ErrorContains(t, err, "list Repositories", "identify the failed resource operation")
@@ -70,7 +71,17 @@ func TestRepositoryListCommandHasAliasAndRejectsArguments(t *testing.T) {
 	command := newListCommand(kubeconfig.NewFlags())
 
 	assert.Contains(t, command.Aliases, "ls", "offer the conventional list alias")
+	require.NotNil(t, command.Flag("output"), "list accepts an output format")
 	require.Error(t, command.Args(command, []string{"unexpected"}), "list accepts no positional arguments")
+}
+
+func TestRepositoryGetCommandRequiresNameAndSupportsStructuredOutput(t *testing.T) {
+	t.Parallel()
+	command := newGetCommand(kubeconfig.NewFlags())
+
+	require.NotNil(t, command.Flag("output"), "get accepts a structured output format")
+	require.NoError(t, command.Args(command, []string{deleteTestName}), "get accepts exactly one Repository name")
+	require.Error(t, command.Args(command, nil), "get requires a Repository name")
 }
 
 func TestRepositoryDeleteCommandHasAliasesAndRequiresName(t *testing.T) {

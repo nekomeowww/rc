@@ -20,13 +20,15 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/duration"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -35,6 +37,7 @@ import (
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/cluster"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/command"
+	clioutput "github.com/nekomeowww/rc/internal/cli/rcctl/output"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/progress"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	repositoryservice "github.com/nekomeowww/rc/internal/repositories"
@@ -69,6 +72,7 @@ type listOptions struct {
 	agent         string
 	idPrefix      string
 	allNamespaces bool
+	output        clioutput.Options
 }
 
 // Register attaches Agent Process commands to rcctl.
@@ -79,7 +83,7 @@ func Register(root *cobra.Command, kubeconfigFlags *kubeconfig.Flags) {
 // NewCommand returns the Agent Process command group.
 func NewCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	root := &cobra.Command{Use: "agent", Aliases: []string{"agents"}, Short: "Run and reconnect to persistent Agent Processes", GroupID: command.AgentsGroup}
-	root.AddCommand(newRunCommand(kubeconfigFlags, true), newRunCommand(kubeconfigFlags, false), newResumeCommand(kubeconfigFlags), newListCommand(kubeconfigFlags), newLogsCommand(kubeconfigFlags), newStopCommand(kubeconfigFlags), newDeleteCommand(kubeconfigFlags))
+	root.AddCommand(newRunCommand(kubeconfigFlags, true), newRunCommand(kubeconfigFlags, false), newResumeCommand(kubeconfigFlags), newListCommand(kubeconfigFlags), newGetCommand(kubeconfigFlags), newLogsCommand(kubeconfigFlags), newStopCommand(kubeconfigFlags), newDeleteCommand(kubeconfigFlags))
 
 	return root
 }
@@ -466,6 +470,9 @@ func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use: "list", Aliases: []string{"ls"}, Short: "List Agent Process records", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := options.output.Validate(true); err != nil {
+				return err
+			}
 			config, namespace, err := kubeconfigFlags.Resolve()
 			if err != nil {
 				return err
@@ -482,37 +489,12 @@ func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err := clusterClient.Kube.List(cmd.Context(), list, listOptions...); err != nil {
 				return err
 			}
-			writer := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-			if _, err := fmt.Fprintln(writer, "NAMESPACE\tID\tTARGET\tCOMMAND\tTTY\tAGENT\tPHASE\tCLIENTS\tAGE\tEXIT"); err != nil {
-				return err
+			list.Items = agentListItems(list.Items, *options)
+			if options.output.Structured() {
+				return options.output.WriteObject(cmd.OutOrStdout(), list, clusterClient.Kube.Scheme())
 			}
-			for _, process := range list.Items {
-				if options.workspace != "" && process.Spec.TargetRef.Name != options.workspace {
-					continue
-				}
-				if options.phase != "" && !strings.EqualFold(string(process.Status.Phase), options.phase) {
-					continue
-				}
-				if options.agent != "" && process.Spec.AgentType != options.agent {
-					continue
-				}
-				if options.idPrefix != "" && !strings.HasPrefix(process.Name, options.idPrefix) {
-					continue
-				}
-				exit := "-"
-				if process.Status.ExitCode != nil {
-					exit = fmt.Sprint(*process.Status.ExitCode)
-				}
-				age := time.Since(process.CreationTimestamp.Time).Round(time.Second)
-				if process.CreationTimestamp.IsZero() {
-					age = 0
-				}
-				command := strings.Join(process.Spec.Command, " ")
-				if _, err := fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%t\t%s\t%s\t%d\t%s\t%s\n", process.Namespace, process.Name, process.Spec.TargetRef.Name, command, process.Spec.TTY, process.Spec.AgentType, process.Status.Phase, process.Status.AttachedClients, age, exit); err != nil {
-					return err
-				}
-			}
-			return writer.Flush()
+
+			return clioutput.WriteTable(cmd.OutOrStdout(), agentListTable(list.Items, options.allNamespaces, time.Now()), options.output.Wide())
 		},
 	}
 	cmd.Flags().StringVar(&options.workspace, "workspace", "", "Filter by target Workspace")
@@ -520,8 +502,178 @@ func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	cmd.Flags().StringVar(&options.agent, "agent", "", "Filter by recognized agent type")
 	cmd.Flags().StringVar(&options.idPrefix, "id-prefix", "", "Filter by managed ID prefix")
 	cmd.Flags().BoolVarP(&options.allNamespaces, "all-namespaces", "A", false, "List across all permitted namespaces")
+	options.output.AddFlags(cmd, true)
 
 	return cmd
+}
+
+func newGetCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
+	options := new(clioutput.Options)
+	cmd := &cobra.Command{
+		Use: "get ID", Short: "Show an Agent Process record", Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := options.Validate(false); err != nil {
+				return err
+			}
+			processClient, namespace, err := processClient(kubeconfigFlags)
+			if err != nil {
+				return err
+			}
+			process, err := processClient.Resolve(cmd.Context(), namespace, args[0])
+			if err != nil {
+				return err
+			}
+			if options.Structured() {
+				return options.WriteObject(cmd.OutOrStdout(), process, processClient.Kube.Scheme())
+			}
+
+			return clioutput.WriteDetails(cmd.OutOrStdout(), agentDetailFields(process))
+		},
+	}
+	options.AddFlags(cmd, false)
+
+	return cmd
+}
+
+func agentListItems(processes []workspacesv1alpha1.AgentProcess, options listOptions) []workspacesv1alpha1.AgentProcess {
+	items := make([]workspacesv1alpha1.AgentProcess, 0, len(processes))
+	for _, process := range processes {
+		if options.workspace != "" && process.Spec.TargetRef.Name != options.workspace {
+			continue
+		}
+		if options.phase != "" && !strings.EqualFold(string(process.Status.Phase), options.phase) {
+			continue
+		}
+		if options.agent != "" && process.Spec.AgentType != options.agent {
+			continue
+		}
+		if options.idPrefix != "" && !strings.HasPrefix(process.Name, options.idPrefix) {
+			continue
+		}
+		items = append(items, process)
+	}
+	slices.SortStableFunc(items, func(left, right workspacesv1alpha1.AgentProcess) int {
+		if compared := left.CreationTimestamp.Compare(right.CreationTimestamp.Time); compared != 0 {
+			return compared
+		}
+		if compared := strings.Compare(left.Namespace, right.Namespace); compared != 0 {
+			return compared
+		}
+		return strings.Compare(left.Name, right.Name)
+	})
+
+	return items
+}
+
+func agentListTable(processes []workspacesv1alpha1.AgentProcess, includeNamespace bool, now time.Time) clioutput.Table {
+	columns := make([]clioutput.Column, 0, 10)
+	if includeNamespace {
+		columns = append(columns, clioutput.Column{Name: "NAMESPACE", MaxWidth: 24})
+	}
+	columns = append(columns,
+		clioutput.Column{Name: "ID", MaxWidth: 32},
+		clioutput.Column{Name: "TARGET", MaxWidth: 24},
+		clioutput.Column{Name: "COMMAND", MinWidth: 12, MaxWidth: 48, Flexible: true},
+		clioutput.Column{Name: "TTY", Wide: true},
+		clioutput.Column{Name: "AGENT", MaxWidth: 16},
+		clioutput.Column{Name: "PHASE"},
+		clioutput.Column{Name: "CLIENTS", Wide: true},
+		clioutput.Column{Name: "AGE"},
+		clioutput.Column{Name: "EXIT"},
+	)
+	rows := make([][]any, 0, len(processes))
+	for _, process := range processes {
+		exit := "-"
+		if process.Status.ExitCode != nil {
+			exit = fmt.Sprint(*process.Status.ExitCode)
+		}
+		age := "<unknown>"
+		if !process.CreationTimestamp.IsZero() {
+			age = duration.HumanDuration(now.Sub(process.CreationTimestamp.Time))
+		}
+		row := make([]any, 0, len(columns))
+		if includeNamespace {
+			row = append(row, process.Namespace)
+		}
+		row = append(row, process.Name, process.Spec.TargetRef.Name, strings.Join(process.Spec.Command, " "), process.Spec.TTY,
+			clioutput.ValueOrDash(process.Spec.AgentType), clioutput.ValueOrDash(string(process.Status.Phase)), process.Status.AttachedClients, age, exit)
+		rows = append(rows, row)
+	}
+
+	return clioutput.Table{Columns: columns, Rows: rows}
+}
+
+func agentDetailFields(process *workspacesv1alpha1.AgentProcess) []clioutput.Field {
+	return []clioutput.Field{
+		{Name: "Name", Value: process.Name},
+		{Name: "Namespace", Value: process.Namespace},
+		{Name: "Created", Value: clioutput.Timestamp(process.CreationTimestamp)},
+		{Name: "Target", Value: fmt.Sprintf("%s/%s", process.Spec.TargetRef.Kind, process.Spec.TargetRef.Name)},
+		{Name: "Command", Value: quotedArguments(process.Spec.Command)},
+		{Name: "Working directory", Value: clioutput.ValueOrDash(process.Spec.WorkingDirectory)},
+		{Name: "TTY", Value: process.Spec.TTY},
+		{Name: "Desired state", Value: clioutput.ValueOrDash(string(process.Spec.DesiredState))},
+		{Name: "Agent", Value: clioutput.ValueOrDash(process.Spec.AgentType)},
+		{Name: "Agent credential", Value: localReferenceName(process.Spec.AgentCredentialRef)},
+		{Name: "Credentials", Value: localReferenceNames(process.Spec.CredentialRefs)},
+		{Name: "Environment", Value: processEnvironmentNames(process.Spec.Env)},
+		{Name: "Phase", Value: clioutput.ValueOrDash(string(process.Status.Phase))},
+		{Name: "Attached clients", Value: process.Status.AttachedClients},
+		{Name: "Runtime Pod", Value: clioutput.ValueOrDash(process.Status.RuntimePodName)},
+		{Name: "Started", Value: clioutput.OptionalTimestamp(process.Status.StartedAt)},
+		{Name: "Completed", Value: clioutput.OptionalTimestamp(process.Status.CompletedAt)},
+		{Name: "Exit code", Value: exitCodeOrDash(process.Status.ExitCode)},
+		{Name: "Termination reason", Value: clioutput.ValueOrDash(process.Status.TerminationReason)},
+		{Name: "Transcript", Value: clioutput.ValueOrDash(process.Status.TranscriptPath)},
+		{Name: "Conditions", Value: clioutput.Conditions(process.Status.Conditions)},
+	}
+}
+
+func quotedArguments(arguments []string) string {
+	quoted := make([]string, len(arguments))
+	for index, argument := range arguments {
+		quoted[index] = strconv.Quote(argument)
+	}
+
+	return strings.Join(quoted, " ")
+}
+
+func localReferenceName(reference *workspacesv1alpha1.LocalReference) string {
+	if reference == nil {
+		return "-"
+	}
+
+	return clioutput.ValueOrDash(reference.Name)
+}
+
+func localReferenceNames(references []workspacesv1alpha1.LocalReference) string {
+	names := make([]string, 0, len(references))
+	for _, reference := range references {
+		names = append(names, reference.Name)
+	}
+
+	return clioutput.ValueOrDash(strings.Join(names, ", "))
+}
+
+func processEnvironmentNames(environment []workspacesv1alpha1.ProcessEnvironmentVariable) string {
+	names := make([]string, 0, len(environment))
+	for _, variable := range environment {
+		name := variable.Name
+		if variable.Key != "" && variable.Key != variable.Name {
+			name += "=" + variable.Key
+		}
+		names = append(names, name)
+	}
+
+	return clioutput.ValueOrDash(strings.Join(names, ", "))
+}
+
+func exitCodeOrDash(exitCode *int32) string {
+	if exitCode == nil {
+		return "-"
+	}
+
+	return fmt.Sprint(*exitCode)
 }
 
 func processClient(kubeconfigFlags *kubeconfig.Flags) (*workspaceservice.ProcessClient, string, error) {

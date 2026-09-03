@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/duration"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
@@ -39,6 +42,7 @@ import (
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/cluster"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/command"
+	clioutput "github.com/nekomeowww/rc/internal/cli/rcctl/output"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/progress"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	repositoryservice "github.com/nekomeowww/rc/internal/repositories"
@@ -68,13 +72,17 @@ type mountOptions struct {
 	force     bool
 }
 
+type listOptions struct {
+	output clioutput.Options
+}
+
 func Register(root *cobra.Command, kubeconfigFlags *kubeconfig.Flags) {
 	root.AddCommand(NewCommand(kubeconfigFlags))
 }
 
 func NewCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	root := &cobra.Command{Use: "workspace", Aliases: []string{"workspaces"}, Short: "Manage persistent development machines", GroupID: command.WorkspacesGroup}
-	root.AddCommand(newCreateCommand(kubeconfigFlags), newMountCommand(kubeconfigFlags), newUnmountCommand(kubeconfigFlags), newStateCommand(kubeconfigFlags, true), newStateCommand(kubeconfigFlags, false), newDeleteCommand(kubeconfigFlags), newPortForwardCommand(kubeconfigFlags), newDefaultCommand(kubeconfigFlags), newListCommand(kubeconfigFlags))
+	root.AddCommand(newCreateCommand(kubeconfigFlags), newMountCommand(kubeconfigFlags), newUnmountCommand(kubeconfigFlags), newStateCommand(kubeconfigFlags, true), newStateCommand(kubeconfigFlags, false), newDeleteCommand(kubeconfigFlags), newPortForwardCommand(kubeconfigFlags), newDefaultCommand(kubeconfigFlags), newListCommand(kubeconfigFlags), newGetCommand(kubeconfigFlags))
 
 	return root
 }
@@ -558,9 +566,13 @@ func newDefaultCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 }
 
 func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
-	return &cobra.Command{
+	options := new(listOptions)
+	cmd := &cobra.Command{
 		Use: "list", Aliases: []string{"ls"}, Short: "List Workspaces in the current namespace", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := options.output.Validate(true); err != nil {
+				return err
+			}
 			config, namespace, err := kubeconfigFlags.Resolve()
 			if err != nil {
 				return err
@@ -573,15 +585,175 @@ func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err := clusterClient.Kube.List(cmd.Context(), list, client.InNamespace(namespace)); err != nil {
 				return err
 			}
-			for _, workspace := range list.Items {
-				ready := meta.IsStatusConditionTrue(workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady)
-				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%t\t%s\n", workspace.Name, workspace.Spec.DesiredState, ready, workspace.Status.RuntimePodName); err != nil {
-					return err
-				}
+			list.Items = workspaceListItems(list.Items)
+			if options.output.Structured() {
+				return options.output.WriteObject(cmd.OutOrStdout(), list, clusterClient.Kube.Scheme())
 			}
-			return nil
+
+			return clioutput.WriteTable(cmd.OutOrStdout(), workspaceListTable(list.Items, time.Now()), options.output.Wide())
 		},
 	}
+	options.output.AddFlags(cmd, true)
+
+	return cmd
+}
+
+func newGetCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
+	options := new(clioutput.Options)
+	cmd := &cobra.Command{
+		Use: "get NAME", Short: "Show a Workspace", Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := options.Validate(false); err != nil {
+				return err
+			}
+			config, namespace, err := kubeconfigFlags.Resolve()
+			if err != nil {
+				return err
+			}
+			clusterClient, err := cluster.New(config)
+			if err != nil {
+				return err
+			}
+			workspace := new(workspacesv1alpha1.Workspace)
+			if err := clusterClient.Kube.Get(cmd.Context(), client.ObjectKey{Namespace: namespace, Name: args[0]}, workspace); err != nil {
+				return fmt.Errorf("get Workspace %q: %w", args[0], err)
+			}
+			if options.Structured() {
+				return options.WriteObject(cmd.OutOrStdout(), workspace, clusterClient.Kube.Scheme())
+			}
+
+			return clioutput.WriteDetails(cmd.OutOrStdout(), workspaceDetailFields(workspace))
+		},
+	}
+	options.AddFlags(cmd, false)
+
+	return cmd
+}
+
+func workspaceListItems(workspaces []workspacesv1alpha1.Workspace) []workspacesv1alpha1.Workspace {
+	items := slices.Clone(workspaces)
+	slices.SortFunc(items, func(left workspacesv1alpha1.Workspace, right workspacesv1alpha1.Workspace) int {
+		return strings.Compare(left.Name, right.Name)
+	})
+
+	return items
+}
+
+func workspaceListTable(workspaces []workspacesv1alpha1.Workspace, now time.Time) clioutput.Table {
+	rows := make([][]any, 0, len(workspaces))
+	for _, workspace := range workspaces {
+		ready := meta.IsStatusConditionTrue(workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady)
+		environment := "-"
+		if workspace.Spec.EnvironmentRef != nil {
+			environment = clioutput.ValueOrDash(workspace.Spec.EnvironmentRef.Name)
+		}
+		age := "<unknown>"
+		if !workspace.CreationTimestamp.IsZero() {
+			age = duration.HumanDuration(now.Sub(workspace.CreationTimestamp.Time))
+		}
+		rows = append(rows, []any{
+			workspace.Name, clioutput.ValueOrDash(string(workspace.Spec.DesiredState)), ready, workspace.Spec.Generated,
+			environment, clioutput.ValueOrDash(workspace.Status.RuntimeImage), clioutput.ValueOrDash(workspace.Status.RuntimePodName), age,
+		})
+	}
+
+	return clioutput.Table{
+		Columns: []clioutput.Column{
+			{Name: "NAME", MaxWidth: 32}, {Name: "STATE"}, {Name: "READY"}, {Name: "GENERATED", Wide: true},
+			{Name: "ENVIRONMENT", MaxWidth: 32, Wide: true}, {Name: "IMAGE", MaxWidth: 40, Flexible: true, Wide: true},
+			{Name: "RUNTIME POD", MaxWidth: 40, Flexible: true}, {Name: "AGE"},
+		},
+		Rows: rows,
+	}
+}
+
+func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.Field {
+	environment := "-"
+	if workspace.Spec.EnvironmentRef != nil {
+		environment = clioutput.ValueOrDash(workspace.Spec.EnvironmentRef.Name)
+	}
+	storage := "-"
+	if workspace.Spec.Storage != nil {
+		storage = workspaceStorageSummary(*workspace.Spec.Storage)
+	}
+	idleTimeout := "-"
+	if workspace.Spec.IdleTimeout != nil {
+		idleTimeout = workspace.Spec.IdleTimeout.Duration.String()
+	}
+	automountToken := "default"
+	if workspace.Spec.AutomountServiceAccountToken != nil {
+		automountToken = strconv.FormatBool(*workspace.Spec.AutomountServiceAccountToken)
+	}
+	runtimeClass := "-"
+	if workspace.Spec.RuntimeClassName != nil {
+		runtimeClass = clioutput.ValueOrDash(*workspace.Spec.RuntimeClassName)
+	}
+	lifecycle := "-"
+	if workspace.Spec.Lifecycle != nil {
+		lifecycle = fmt.Sprintf("%d initialize, %d before-stop", len(workspace.Spec.Lifecycle.Initialize), len(workspace.Spec.Lifecycle.BeforeStop))
+	}
+
+	return []clioutput.Field{
+		{Name: "Name", Value: workspace.Name},
+		{Name: "Namespace", Value: workspace.Namespace},
+		{Name: "Created", Value: clioutput.Timestamp(workspace.CreationTimestamp)},
+		{Name: "Desired state", Value: clioutput.ValueOrDash(string(workspace.Spec.DesiredState))},
+		{Name: "Ready", Value: meta.IsStatusConditionTrue(workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady)},
+		{Name: "Generated", Value: workspace.Spec.Generated},
+		{Name: "Environment", Value: environment},
+		{Name: "Source environment revision", Value: workspace.Status.SourceEnvironmentRevision},
+		{Name: "Configured image", Value: clioutput.ValueOrDash(workspace.Spec.Image)},
+		{Name: "Runtime image", Value: clioutput.ValueOrDash(workspace.Status.RuntimeImage)},
+		{Name: "Storage", Value: storage},
+		{Name: "Home volume", Value: clioutput.ValueOrDash(workspace.Status.HomeVolumeClaimName)},
+		{Name: "Runtime Pod", Value: clioutput.ValueOrDash(workspace.Status.RuntimePodName)},
+		{Name: "Default working directory", Value: clioutput.ValueOrDash(workspace.Spec.DefaultWorkingDirectory)},
+		{Name: "Service account", Value: clioutput.ValueOrDash(workspace.Spec.ServiceAccountName)},
+		{Name: "Automount service account token", Value: automountToken},
+		{Name: "Runtime class", Value: runtimeClass},
+		{Name: "Idle timeout", Value: idleTimeout},
+		{Name: "Mounts", Value: workspaceMountSummary(workspace.Spec.Mounts)},
+		{Name: "Agent credentials", Value: workspaceReferenceNames(workspace.Spec.AgentCredentialRefs)},
+		{Name: "Credentials", Value: workspaceReferenceNames(workspace.Spec.CredentialRefs)},
+		{Name: "ConfigMaps", Value: workspaceReferenceNames(workspace.Spec.ConfigMapRefs)},
+		{Name: "Secrets", Value: workspaceReferenceNames(workspace.Spec.SecretRefs)},
+		{Name: "Lifecycle", Value: lifecycle},
+		{Name: "Last auto-suspend", Value: clioutput.OptionalTimestamp(workspace.Status.LastAutoSuspendTime)},
+		{Name: "Conditions", Value: clioutput.Conditions(workspace.Status.Conditions)},
+	}
+}
+
+func workspaceStorageSummary(storage workspacesv1alpha1.PersistentStorageSpec) string {
+	modes := make([]string, len(storage.AccessModes))
+	for index, mode := range storage.AccessModes {
+		modes[index] = string(mode)
+	}
+	return fmt.Sprintf("class=%s, size=%s, access=%s", clioutput.ValueOrDash(storage.StorageClassName), storage.Size.String(), clioutput.ValueOrDash(strings.Join(modes, ",")))
+}
+
+func workspaceMountSummary(mounts []workspacesv1alpha1.WorkspaceMount) string {
+	summaries := make([]string, 0, len(mounts))
+	for _, mount := range mounts {
+		source := "-"
+		if mount.WorktreeRef != nil {
+			source = "worktree/" + mount.WorktreeRef.Name
+		}
+		if mount.RepositoryRef != nil {
+			source = "repository/" + mount.RepositoryRef.Name
+		}
+		summaries = append(summaries, fmt.Sprintf("%s=%s@%s (readOnly=%t)", mount.Name, source, mount.Path, mount.ReadOnly))
+	}
+
+	return clioutput.ValueOrDash(strings.Join(summaries, ", "))
+}
+
+func workspaceReferenceNames(references []workspacesv1alpha1.LocalReference) string {
+	names := make([]string, len(references))
+	for index, reference := range references {
+		names[index] = reference.Name
+	}
+
+	return clioutput.ValueOrDash(strings.Join(names, ", "))
 }
 
 func selectedWorkspace(ctx context.Context, kubeClient client.Client, namespace string, contextName string, explicit string) (*workspacesv1alpha1.Workspace, error) {

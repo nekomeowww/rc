@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	clioutput "github.com/nekomeowww/rc/internal/cli/rcctl/output"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -60,7 +61,7 @@ func TestWorktreeListReturnsKubernetesAPIError(t *testing.T) {
 	t.Parallel()
 	kubeClient := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
 
-	err := runWorktreeList(context.Background(), io.Discard, kubeClient, listTestNamespace)
+	err := runWorktreeList(context.Background(), io.Discard, kubeClient, listTestNamespace, clioutput.Options{})
 
 	require.Error(t, err, "listing an unregistered Worktree type fails")
 	assert.ErrorContains(t, err, "list Worktrees", "identify the failed resource operation")
@@ -71,5 +72,15 @@ func TestWorktreeListCommandHasAliasAndRejectsArguments(t *testing.T) {
 	command := newListCommand(kubeconfig.NewFlags())
 
 	assert.Contains(t, command.Aliases, "ls", "offer the conventional list alias")
+	require.NotNil(t, command.Flag("output"), "list accepts an output format")
 	require.Error(t, command.Args(command, []string{"unexpected"}), "list accepts no positional arguments")
+}
+
+func TestWorktreeGetCommandRequiresNameAndSupportsStructuredOutput(t *testing.T) {
+	t.Parallel()
+	command := newGetCommand(kubeconfig.NewFlags())
+
+	require.NotNil(t, command.Flag("output"), "get accepts a structured output format")
+	require.NoError(t, command.Args(command, []string{"example-main"}), "get accepts exactly one Worktree name")
+	require.Error(t, command.Args(command, nil), "get requires a Worktree name")
 }

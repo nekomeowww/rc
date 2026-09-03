@@ -173,9 +173,15 @@ rcctl -n development agent run --workspace dev --agent-credential codex --cwd /w
 rcctl -n development agent list
 
 # Replace PROCESS_ID with a value printed by `agent list`:
+# rcctl -n development agent get PROCESS_ID
 # rcctl -n development agent logs PROCESS_ID
 # rcctl -n development agent resume PROCESS_ID
 ```
+
+List commands use compact, width-aware tables and shorten long values with an
+ellipsis. Pass `-o wide` for secondary columns, or `-o json`/`-o yaml` for the
+complete resource data. `agent get`, `workspace get`, `repo get`, and
+`worktree get` show an untruncated detail view of one resource.
 
 Use `rcctl --help` and `rcctl <command> --help` for the complete command surface.
 

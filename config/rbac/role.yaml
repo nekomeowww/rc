@@ -99,6 +99,7 @@ rules:
   resources:
   - repositories
   - repositoryexecs
+  - worktreeexecs
   - worktrees
   verbs:
   - create
@@ -113,6 +114,7 @@ rules:
   resources:
   - repositories/finalizers
   - repositoryexecs/finalizers
+  - worktreeexecs/finalizers
   - worktrees/finalizers
   verbs:
   - update
@@ -121,6 +123,7 @@ rules:
   resources:
   - repositories/status
   - repositoryexecs/status
+  - worktreeexecs/status
   - worktrees/status
   verbs:
   - get

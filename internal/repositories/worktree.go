@@ -2,8 +2,10 @@ package repositories
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -11,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
@@ -38,6 +41,8 @@ type WorktreeAddRequest struct {
 // WorktreeClient creates Worktree resources and observes their bootstrap Jobs.
 type WorktreeClient struct {
 	client.Client
+	Kubernetes kubernetes.Interface
+	writeLogs  func(context.Context, string, string, io.Writer) ([]string, error)
 }
 
 // Start resolves the Repository selector and creates a Worktree resource.
@@ -83,7 +88,7 @@ func (c *WorktreeClient) Start(ctx context.Context, request WorktreeAddRequest) 
 }
 
 // Wait waits for the native worktree bootstrap to complete.
-func (c *WorktreeClient) Wait(ctx context.Context, worktree *repositoriesv1alpha1.Worktree, _ io.Writer) error {
+func (c *WorktreeClient) Wait(ctx context.Context, worktree *repositoriesv1alpha1.Worktree, output io.Writer) error {
 	var result *repositoriesv1alpha1.Worktree
 
 	err := wait.PollUntilContextCancel(ctx, 500*time.Millisecond, true, func(ctx context.Context) (bool, error) {
@@ -99,7 +104,8 @@ func (c *WorktreeClient) Wait(ctx context.Context, worktree *repositoriesv1alpha
 		if condition.Status == metav1.ConditionFalse {
 			switch condition.Reason {
 			case "RepositoryNotFound", "VolumeClaimConflict", "VolumeClaimSpecChanged", bootstrapFailedReason, "BootstrapJobConflict":
-				return false, fmt.Errorf("worktree failed: %s", condition.Message)
+				result = current
+				return true, nil
 			}
 			return false, nil
 		}
@@ -113,6 +119,29 @@ func (c *WorktreeClient) Wait(ctx context.Context, worktree *repositoriesv1alpha
 	}
 	if result == nil {
 		return fmt.Errorf("worktree did not produce a result")
+	}
+	condition := meta.FindStatusCondition(result.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady)
+	if condition.Status == metav1.ConditionFalse {
+		baseErr := fmt.Errorf("worktree %q failed: %s", result.Name, condition.Message)
+		if condition.Reason != bootstrapFailedReason || result.Status.JobName == "" || (c.Kubernetes == nil && c.writeLogs == nil) {
+			return baseErr
+		}
+		var podNames []string
+		var logErr error
+		if c.writeLogs != nil {
+			podNames, logErr = c.writeLogs(ctx, result.Namespace, result.Status.JobName, output)
+		} else {
+			podNames, logErr = writeJobLogs(ctx, c.Kubernetes, result.Namespace, result.Status.JobName, "Worktree Bootstrap", output)
+		}
+		location := fmt.Sprintf("Worktree %q, Job %q", result.Name, result.Status.JobName)
+		if len(podNames) > 0 {
+			location += fmt.Sprintf(", Pod %q", strings.Join(podNames, `", "`))
+		}
+		conditionErr := fmt.Errorf("%s: %w", location, baseErr)
+		if logErr != nil {
+			return errors.Join(conditionErr, logErr)
+		}
+		return conditionErr
 	}
 
 	return nil

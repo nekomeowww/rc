@@ -1,0 +1,14 @@
+apiVersion: repositories.rc.ayaka.io/v1alpha1
+kind: WorktreeExec
+metadata:
+  labels:
+    app.kubernetes.io/name: rc
+    app.kubernetes.io/managed-by: kustomize
+  name: worktreeexec-sample
+spec:
+  worktreeRef:
+    name: example-main
+  command:
+    - git
+    - status
+    - --short

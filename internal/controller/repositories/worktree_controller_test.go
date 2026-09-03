@@ -10,20 +10,28 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
+	"github.com/nekomeowww/rc/internal/worktreeclaim"
 )
 
 const (
 	generatedWorkspaceTestName = "generated-workspace"
 	worktreeVolumeTestName     = "worktree"
+	testMountName              = "source"
+	testDeveloperName          = "developer"
 )
 
 var _ = Describe("Worktree Controller", func() {
@@ -77,8 +85,8 @@ var _ = Describe("Worktree Controller", func() {
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: generatedWorkspaceTestName, Namespace: testNamespace},
 			Spec: corev1.PodSpec{
-				InitContainers: []corev1.Container{{Name: containerName, Image: "runner:test", Command: []string{"true"}}},
-				Containers:     []corev1.Container{{Name: "runtime", Image: "runner:test", Command: []string{"sleep", "3600"}}},
+				InitContainers: []corev1.Container{{Name: containerName, Image: testRunnerImage, Command: []string{"true"}}},
+				Containers:     []corev1.Container{{Name: "runtime", Image: testRunnerImage, Command: []string{"sleep", "3600"}}},
 				Volumes: []corev1.Volume{{Name: worktreeVolumeTestName, VolumeSource: corev1.VolumeSource{
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: worktreeName},
 				}}},
@@ -258,7 +266,154 @@ var _ = Describe("Worktree Controller", func() {
 		output, err = status.CombinedOutput()
 		Expect(err).NotTo(HaveOccurred(), string(output))
 	})
+
+	It("keeps deletion protected while a Workspace references the Worktree", func() {
+		scheme := runtime.NewScheme()
+		Expect(repositoriesv1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(workspacesv1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(coordinationv1.AddToScheme(scheme)).To(Succeed())
+		now := metav1.Now()
+		worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{
+			Name: "delete-referenced", Namespace: testNamespace, UID: testWorktreeUID, DeletionTimestamp: &now, Finalizers: []string{worktreeDeletionFinalizer},
+		}}
+		workspace := &workspacesv1alpha1.Workspace{
+			ObjectMeta: metav1.ObjectMeta{Name: testDeveloperName, Namespace: testNamespace},
+			Spec: workspacesv1alpha1.WorkspaceSpec{Mounts: []workspacesv1alpha1.WorkspaceMount{{
+				Name: testMountName, Path: testMountName, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: worktree.Name},
+			}}},
+		}
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree, workspace).Build()
+		reconciler := &WorktreeReconciler{Client: client, Scheme: scheme, RunnerImage: testRunnerImage}
+
+		result, err := reconciler.reconcileDelete(context.Background(), worktree)
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+		persisted := new(repositoriesv1alpha1.Worktree)
+		Expect(client.Get(context.Background(), types.NamespacedName{Name: worktree.Name, Namespace: worktree.Namespace}, persisted)).To(Succeed())
+		Expect(persisted.Finalizers).To(ContainElement(worktreeDeletionFinalizer))
+	})
+
+	It("keeps deletion protected while an active writer holds the Lease", func() {
+		scheme := runtime.NewScheme()
+		Expect(repositoriesv1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(workspacesv1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(coordinationv1.AddToScheme(scheme)).To(Succeed())
+		now := metav1.Now()
+		worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{
+			Name: "delete-in-use", Namespace: testNamespace, UID: testWorktreeUID, DeletionTimestamp: &now, Finalizers: []string{worktreeDeletionFinalizer},
+		}}
+		holder := testWorkspaceUID
+		lease := &coordinationv1.Lease{
+			ObjectMeta: metav1.ObjectMeta{Name: worktreeclaim.LeaseName(worktree), Namespace: worktree.Namespace, Labels: map[string]string{worktreeclaim.HolderLabel: testDeveloperName}},
+			Spec:       coordinationv1.LeaseSpec{HolderIdentity: &holder},
+		}
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree, lease).Build()
+		reconciler := &WorktreeReconciler{Client: client, Scheme: scheme, RunnerImage: testRunnerImage}
+
+		result, err := reconciler.reconcileDelete(context.Background(), worktree)
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+		persisted := new(repositoriesv1alpha1.Worktree)
+		Expect(client.Get(context.Background(), types.NamespacedName{Name: worktree.Name, Namespace: worktree.Namespace}, persisted)).To(Succeed())
+		Expect(persisted.Finalizers).To(ContainElement(worktreeDeletionFinalizer))
+	})
+
+	It("completes protected deletion after acquiring the exclusive Lease", func() {
+		scheme := runtime.NewScheme()
+		Expect(repositoriesv1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(workspacesv1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(coordinationv1.AddToScheme(scheme)).To(Succeed())
+		now := metav1.Now()
+		worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{
+			Name: "delete-available", Namespace: testNamespace, UID: testWorktreeUID, DeletionTimestamp: &now, Finalizers: []string{worktreeDeletionFinalizer},
+		}}
+		kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()
+		reconciler := &WorktreeReconciler{Client: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
+
+		result, err := reconciler.reconcileDelete(context.Background(), worktree)
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result).To(Equal(reconcile.Result{}))
+		persisted := new(repositoriesv1alpha1.Worktree)
+		err = kubeClient.Get(context.Background(), types.NamespacedName{Name: worktree.Name, Namespace: worktree.Namespace}, persisted)
+		if err == nil {
+			Expect(persisted.Finalizers).NotTo(ContainElement(worktreeDeletionFinalizer))
+		} else {
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		}
+	})
+
+	It("keeps deletion protected when a Workspace mount races the deletion claim", func() {
+		scheme := runtime.NewScheme()
+		Expect(repositoriesv1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(workspacesv1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(coordinationv1.AddToScheme(scheme)).To(Succeed())
+		now := metav1.Now()
+		worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{
+			Name: "delete-mount-race", Namespace: testNamespace, UID: testWorktreeUID, DeletionTimestamp: &now, Finalizers: []string{worktreeDeletionFinalizer},
+		}}
+		workspace := &workspacesv1alpha1.Workspace{
+			ObjectMeta: metav1.ObjectMeta{Name: "racing-developer", Namespace: testNamespace},
+			Spec: workspacesv1alpha1.WorkspaceSpec{Mounts: []workspacesv1alpha1.WorkspaceMount{{
+				Name: testMountName, Path: testMountName, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: worktree.Name},
+			}}},
+		}
+		baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()
+		raceClient := &workspaceMountRaceClient{Client: baseClient, workspace: workspace}
+		reconciler := &WorktreeReconciler{Client: raceClient, Scheme: scheme, RunnerImage: testRunnerImage}
+
+		result, err := reconciler.reconcileDelete(context.Background(), worktree)
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+		persisted := new(repositoriesv1alpha1.Worktree)
+		Expect(baseClient.Get(context.Background(), types.NamespacedName{Name: worktree.Name, Namespace: worktree.Namespace}, persisted)).To(Succeed())
+		Expect(persisted.Finalizers).To(ContainElement(worktreeDeletionFinalizer))
+	})
+
+	It("maps Workspace and foreign Lease changes back to the referenced Worktree", func() {
+		scheme := runtime.NewScheme()
+		Expect(repositoriesv1alpha1.AddToScheme(scheme)).To(Succeed())
+		worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{
+			Name: "watched-worktree", Namespace: testNamespace, UID: "watched-worktree-uid",
+		}}
+		kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()
+		reconciler := &WorktreeReconciler{Client: kubeClient}
+		workspace := &workspacesv1alpha1.Workspace{
+			ObjectMeta: metav1.ObjectMeta{Name: testDeveloperName, Namespace: testNamespace},
+			Spec: workspacesv1alpha1.WorkspaceSpec{Mounts: []workspacesv1alpha1.WorkspaceMount{{
+				Name: testMountName, Path: testMountName, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: worktree.Name},
+			}}},
+		}
+		lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+			Name: worktreeclaim.LeaseName(worktree), Namespace: worktree.Namespace,
+		}}
+		request := reconcile.Request{NamespacedName: types.NamespacedName{Name: worktree.Name, Namespace: worktree.Namespace}}
+
+		Expect(reconciler.worktreesForWorkspace(context.Background(), workspace)).To(ConsistOf(request))
+		Expect(reconciler.worktreesForLease(context.Background(), lease)).To(ConsistOf(request))
+	})
 })
+
+type workspaceMountRaceClient struct {
+	client.Client
+	workspace *workspacesv1alpha1.Workspace
+	injected  bool
+}
+
+func (c *workspaceMountRaceClient) Create(ctx context.Context, object client.Object, options ...client.CreateOption) error {
+	if err := c.Client.Create(ctx, object, options...); err != nil {
+		return err
+	}
+	if _, ok := object.(*coordinationv1.Lease); !ok || c.injected {
+		return nil
+	}
+	c.injected = true
+
+	return c.Client.Create(ctx, c.workspace.DeepCopy())
+}
 
 func runGitCommand(directory string, arguments ...string) {
 	command := exec.Command("git", arguments...)

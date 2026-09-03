@@ -23,12 +23,11 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -39,12 +38,25 @@ import (
 )
 
 const (
-	repositoryExecJobTTLSeconds = int32(3 * 24 * 60 * 60)
-	repositoryUIDLabel          = "repositories.rc.ayaka.io/repository-uid"
-	workerVolumeName            = "repository"
-	workerMountPath             = "/repository"
-	allCapabilitiesDrop         = "ALL"
+	execJobTTLSeconds   = int32(3 * 24 * 60 * 60)
+	repositoryUIDLabel  = "repositories.rc.ayaka.io/repository-uid"
+	workerVolumeName    = "repository"
+	workerMountPath     = "/repository"
+	allCapabilitiesDrop = "ALL"
 )
+
+var repositoryExecStatus = oneShotStatusAdapter[*repositoriesv1alpha1.RepositoryExec]{
+	newObject: func() *repositoriesv1alpha1.RepositoryExec { return new(repositoriesv1alpha1.RepositoryExec) },
+	status: func(exec *repositoriesv1alpha1.RepositoryExec) (string, []metav1.Condition) {
+		return exec.Status.JobName, exec.Status.Conditions
+	},
+	apply: func(exec *repositoriesv1alpha1.RepositoryExec, jobName string, conditions []metav1.Condition) {
+		exec.Status.JobName = jobName
+		exec.Status.Conditions = conditions
+	},
+	conditionType: repositoriesv1alpha1.RepositoryExecConditionSucceeded,
+	resourceKind:  "RepositoryExec",
+}
 
 // RepositoryExecReconciler reconciles a RepositoryExec object.
 type RepositoryExecReconciler struct {
@@ -73,13 +85,17 @@ func (r *RepositoryExecReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, nil
 	}
 
-	job := new(batchv1.Job)
-	err = r.Get(ctx, req.NamespacedName, job)
-	if err == nil {
-		return ctrl.Result{}, r.reflectJobStatus(ctx, exec, job)
+	job, jobState, err := observeOneShotJob(ctx, r.Client, exec, exec.Status.JobName)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("observe Repository Exec Job: %w", err)
 	}
-	if !errors.IsNotFound(err) {
-		return ctrl.Result{}, fmt.Errorf("get Repository Exec Job: %w", err)
+	switch jobState {
+	case oneShotJobPresent:
+		return ctrl.Result{}, r.reflectJobStatus(ctx, exec, job)
+	case oneShotJobLost:
+		return ctrl.Result{}, r.setSucceeded(ctx, exec, metav1.ConditionFalse, "JobLost", "Command Job disappeared before its terminal result was recorded", exec.Status.JobName)
+	case oneShotJobConflict:
+		return ctrl.Result{}, r.setSucceeded(ctx, exec, metav1.ConditionFalse, "JobConflict", "A Job with the requested name already exists", "")
 	}
 
 	repository := new(repositoriesv1alpha1.Repository)
@@ -87,7 +103,7 @@ func (r *RepositoryExecReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	err = r.Get(ctx, repositoryKey, repository)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, r.setSucceeded(ctx, exec, metav1.ConditionFalse, "RepositoryNotFound", "Referenced Repository does not exist", "")
 		}
 
@@ -95,7 +111,7 @@ func (r *RepositoryExecReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	ready := meta.FindStatusCondition(repository.Status.Conditions, repositoriesv1alpha1.RepositoryConditionStorageReady)
-	if ready == nil || ready.Status != metav1.ConditionTrue || repository.Status.VolumeClaimName == "" {
+	if repository.Status.ObservedGeneration < repository.Generation || ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration < repository.Generation || repository.Status.VolumeClaimName == "" {
 		err := r.setSucceeded(ctx, exec, metav1.ConditionUnknown, "RepositoryNotReady", "Referenced Repository parent volume is not ready", "")
 		if err != nil {
 			return ctrl.Result{}, err
@@ -120,6 +136,9 @@ func (r *RepositoryExecReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	job = repositoryExecJob(exec, repository, r.RunnerImage)
 	if err := controllerutil.SetControllerReference(exec, job, r.Scheme); err != nil {
 		return ctrl.Result{}, fmt.Errorf("set RepositoryExec owner on Job: %w", err)
+	}
+	if err := r.setSucceeded(ctx, exec, metav1.ConditionUnknown, "JobScheduled", "Command Job is scheduled for creation", job.Name); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	err = r.Create(ctx, job)
@@ -161,7 +180,7 @@ func repositoryExecJob(
 	runnerImage string,
 ) *batchv1.Job {
 	backoffLimit := int32(0)
-	ttlSecondsAfterFinished := repositoryExecJobTTLSeconds
+	ttlSecondsAfterFinished := execJobTTLSeconds
 	allowPrivilegeEscalation := false
 	command := []string{exec.Spec.Command[0]}
 	args := append([]string(nil), exec.Spec.Command[1:]...)
@@ -220,21 +239,8 @@ func (r *RepositoryExecReconciler) reflectJobStatus(
 	exec *repositoriesv1alpha1.RepositoryExec,
 	job *batchv1.Job,
 ) error {
-	for _, condition := range job.Status.Conditions {
-		switch condition.Type {
-		case batchv1.JobComplete:
-			if condition.Status == corev1.ConditionTrue {
-				return r.setSucceeded(ctx, exec, metav1.ConditionTrue, "CommandSucceeded", "Command completed successfully", job.Name)
-			}
-		case batchv1.JobFailed:
-			if condition.Status == corev1.ConditionTrue {
-				message := condition.Message
-				if message == "" {
-					message = "Command failed"
-				}
-				return r.setSucceeded(ctx, exec, metav1.ConditionFalse, "CommandFailed", message, job.Name)
-			}
-		}
+	if status, reason, message, terminal := terminalJobOutcome(job); terminal {
+		return r.setSucceeded(ctx, exec, status, reason, message, job.Name)
 	}
 
 	return r.setSucceeded(ctx, exec, metav1.ConditionUnknown, "CommandRunning", "Command has not completed", job.Name)
@@ -248,48 +254,12 @@ func (r *RepositoryExecReconciler) setSucceeded(
 	message string,
 	jobName string,
 ) error {
-	key := client.ObjectKeyFromObject(exec)
-	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		current := new(repositoriesv1alpha1.RepositoryExec)
-
-		err := r.Get(ctx, key, current)
-		if err != nil {
-			return client.IgnoreNotFound(err)
-		}
-		if condition := meta.FindStatusCondition(current.Status.Conditions, repositoriesv1alpha1.RepositoryExecConditionSucceeded); condition != nil && condition.Status != metav1.ConditionUnknown {
-			return nil
-		}
-
-		before := current.DeepCopy()
-		current.Status.JobName = jobName
-		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-			Type:               repositoriesv1alpha1.RepositoryExecConditionSucceeded,
-			Status:             status,
-			ObservedGeneration: current.Generation,
-			Reason:             reason,
-			Message:            message,
-		})
-		if current.Status.JobName == before.Status.JobName && conditionsEqual(current.Status.Conditions, before.Status.Conditions) {
-			return nil
-		}
-
-		err = r.Status().Patch(ctx, current, client.MergeFrom(before))
-		if err != nil {
-			return fmt.Errorf("patch RepositoryExec status: %w", err)
-		}
-
-		return nil
-	})
+	return repositoryExecStatus.set(ctx, r.Client, client.ObjectKeyFromObject(exec), status, reason, message, jobName)
 }
 
 func jobFinished(job *batchv1.Job) bool {
-	for _, condition := range job.Status.Conditions {
-		if (condition.Type == batchv1.JobComplete || condition.Type == batchv1.JobFailed) && condition.Status == corev1.ConditionTrue {
-			return true
-		}
-	}
-
-	return false
+	_, _, _, terminal := terminalJobOutcome(job)
+	return terminal
 }
 
 // SetupWithManager sets up the controller with the Manager.

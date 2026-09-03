@@ -21,9 +21,12 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"reflect"
+	"slices"
+	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -39,8 +42,10 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/runtimepolicy"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
+	"github.com/nekomeowww/rc/internal/worktreeclaim"
 )
 
 const (
@@ -54,6 +59,7 @@ const (
 	generatedWorkspaceLabel    = "workspaces.rc.ayaka.io/generated-for"
 	worktreeRequeueDelay       = 2 * time.Second
 	gitWorktreeSubcommand      = "worktree"
+	worktreeDeletionFinalizer  = worktreeclaim.DeletionFinalizer
 )
 
 // WorktreeReconciler reconciles an independent child volume and the native
@@ -70,6 +76,8 @@ type WorktreeReconciler struct {
 // +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=repositories,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces,verbs=get;list;watch
 //
 //nolint:gocyclo // Reconcile is an explicit resource lifecycle state machine.
 func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -77,6 +85,16 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	worktree := new(repositoriesv1alpha1.Worktree)
 	if err := r.Get(ctx, req.NamespacedName, worktree); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if !worktree.DeletionTimestamp.IsZero() {
+		return r.reconcileDelete(ctx, worktree)
+	}
+	if !controllerutil.ContainsFinalizer(worktree, worktreeDeletionFinalizer) {
+		before := worktree.DeepCopy()
+		controllerutil.AddFinalizer(worktree, worktreeDeletionFinalizer)
+		if err := r.Patch(ctx, worktree, client.MergeFrom(before)); err != nil {
+			return ctrl.Result{}, fmt.Errorf("add Worktree deletion finalizer: %w", err)
+		}
 	}
 
 	worktreePath := worktreePath(worktree)
@@ -194,6 +212,107 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "Initializing", "Worktree bootstrap Job is running", claim.Name, repository.Status.VolumeClaimName, worktreePath)
+}
+
+func (r *WorktreeReconciler) reconcileDelete(ctx context.Context, worktree *repositoriesv1alpha1.Worktree) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	blockers, err := r.worktreeReferenceBlockers(ctx, worktree)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if len(blockers) > 0 {
+		log.Info("Worktree deletion is waiting for Workspace references", "worktree", worktree.Name, "workspaces", blockers)
+		return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, nil
+	}
+
+	deletionLease := worktreeclaim.DeletionLease(worktree)
+	if err := r.Create(ctx, deletionLease); err != nil {
+		if !errors.IsAlreadyExists(err) {
+			return ctrl.Result{}, fmt.Errorf("acquire Worktree deletion Lease: %w", err)
+		}
+		current := new(coordinationv1.Lease)
+		if err := r.Get(ctx, client.ObjectKeyFromObject(deletionLease), current); err != nil {
+			return ctrl.Result{}, fmt.Errorf("get Worktree deletion Lease: %w", err)
+		}
+		if !worktreeclaim.IsDeletionHolder(worktree, current) {
+			log.Info("Worktree deletion is waiting for active writer", "worktree", worktree.Name, "holder", current.Labels[worktreeclaim.HolderLabel])
+			return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, nil
+		}
+	}
+
+	// Re-list after acquiring the exclusive Lease so a Workspace that raced the
+	// initial availability check cannot be orphaned by finalizer removal.
+	blockers, err = r.worktreeReferenceBlockers(ctx, worktree)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if len(blockers) > 0 {
+		log.Info("Worktree deletion is waiting for Workspace references", "worktree", worktree.Name, "workspaces", blockers)
+		return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, nil
+	}
+
+	key := client.ObjectKeyFromObject(worktree)
+	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := new(repositoriesv1alpha1.Worktree)
+		if err := r.Get(ctx, key, current); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		before := current.DeepCopy()
+		controllerutil.RemoveFinalizer(current, worktreeDeletionFinalizer)
+		return r.Patch(ctx, current, client.MergeFrom(before))
+	}); err != nil {
+		return ctrl.Result{}, fmt.Errorf("remove Worktree deletion finalizer: %w", err)
+	}
+
+	return ctrl.Result{}, nil
+}
+
+func (r *WorktreeReconciler) worktreeReferenceBlockers(ctx context.Context, worktree *repositoriesv1alpha1.Worktree) ([]string, error) {
+	workspaces := new(workspacesv1alpha1.WorkspaceList)
+	if err := r.List(ctx, workspaces, client.InNamespace(worktree.Namespace)); err != nil {
+		return nil, fmt.Errorf("list Workspaces before deleting Worktree: %w", err)
+	}
+	blockers := make([]string, 0)
+	for index := range workspaces.Items {
+		workspace := &workspaces.Items[index]
+		for _, mount := range workspace.Spec.Mounts {
+			if mount.WorktreeRef != nil && mount.WorktreeRef.Name == worktree.Name {
+				blockers = append(blockers, workspace.Name)
+				break
+			}
+		}
+	}
+	slices.Sort(blockers)
+
+	return blockers, nil
+}
+
+func (r *WorktreeReconciler) worktreesForWorkspace(_ context.Context, object client.Object) []ctrl.Request {
+	workspace, ok := object.(*workspacesv1alpha1.Workspace)
+	if !ok {
+		return nil
+	}
+	names := make(map[string]struct{})
+	for _, mount := range workspace.Spec.Mounts {
+		if mount.WorktreeRef != nil {
+			names[mount.WorktreeRef.Name] = struct{}{}
+		}
+	}
+	requests := make([]ctrl.Request, 0, len(names))
+	for name := range names {
+		requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: workspace.Namespace}})
+	}
+	slices.SortFunc(requests, func(left, right ctrl.Request) int { return strings.Compare(left.Name, right.Name) })
+	return requests
+}
+
+func (r *WorktreeReconciler) worktreesForLease(ctx context.Context, object client.Object) []ctrl.Request {
+	names := worktreeNamesForLease(ctx, r.Client, object)
+	requests := make([]ctrl.Request, len(names))
+	for index, name := range names {
+		requests[index] = ctrl.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: object.GetNamespace()}}
+	}
+	return requests
 }
 
 func (r *WorktreeReconciler) reconcileWorkspaceBootstrap(ctx context.Context, worktree *repositoriesv1alpha1.Worktree, claimName, sourceClaimName, path string) error {
@@ -542,6 +661,8 @@ func (r *WorktreeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&repositoriesv1alpha1.Worktree{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&batchv1.Job{}).
+		Watches(&coordinationv1.Lease{}, handler.EnqueueRequestsFromMapFunc(r.worktreesForLease)).
+		Watches(&workspacesv1alpha1.Workspace{}, handler.EnqueueRequestsFromMapFunc(r.worktreesForWorkspace)).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, object client.Object) []ctrl.Request {
 			pod, ok := object.(*corev1.Pod)
 			if !ok {

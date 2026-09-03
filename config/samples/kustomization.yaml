@@ -8,4 +8,5 @@ resources:
 - workspaces_v1alpha1_workspaceenvironment.yaml
 - workspaces_v1alpha1_workspace.yaml
 - workspaces_v1alpha1_agentprocess.yaml
+- repositories_v1alpha1_worktreeexec.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

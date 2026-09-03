@@ -32,7 +32,11 @@ import (
 const (
 	containerNamePrefix     = "rc-worktree-"
 	generatedWorkspaceLabel = "workspaces.rc.ayaka.io/generated-for"
-	volumeRootMountPath     = "/mnt/rc/worktrees"
+	// EagerLabel opts a generated-for Worktree into the ordinary bootstrap Job.
+	// Workspace mount uses this mode so checkout failure is known before an
+	// existing runtime is disrupted.
+	EagerLabel          = "workspaces.rc.ayaka.io/eager-bootstrap"
+	volumeRootMountPath = "/mnt/rc/worktrees"
 )
 
 // VolumeRootMountPath returns the stable container path for a Worktree child
@@ -52,6 +56,7 @@ func NativeWorktreeMountPath(name string) string {
 // the consuming Workspace runtime instead of a separate bootstrap Job.
 func Deferred(worktree *repositoriesv1alpha1.Worktree) bool {
 	return worktree.Labels[generatedWorkspaceLabel] != "" &&
+		worktree.Labels[EagerLabel] != "true" &&
 		worktree.Spec.Branch != "" &&
 		worktree.Spec.ResetBranch == "" &&
 		worktree.Spec.Ref == "" &&

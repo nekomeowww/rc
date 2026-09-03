@@ -10,6 +10,7 @@ resources:
 - bases/workspaces.rc.ayaka.io_workspaceenvironments.yaml
 - bases/workspaces.rc.ayaka.io_workspaces.yaml
 - bases/workspaces.rc.ayaka.io_agentprocesses.yaml
+- bases/repositories.rc.ayaka.io_worktreeexecs.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

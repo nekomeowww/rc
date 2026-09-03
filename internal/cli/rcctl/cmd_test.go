@@ -8,7 +8,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const helpArgument = "--help"
+const (
+	helpArgument    = "--help"
+	execCommandName = "exec"
+)
 
 func TestCommandTreeContainsAgentCredentialImport(t *testing.T) {
 	t.Parallel()
@@ -37,11 +40,36 @@ func TestCommandTreeContainsRepositoryExec(t *testing.T) {
 	output := new(bytes.Buffer)
 	command.SetOut(output)
 	command.SetErr(output)
-	command.SetArgs([]string{"repo", "exec", helpArgument})
+	command.SetArgs([]string{"repo", execCommandName, helpArgument})
 
 	require.NoError(t, command.Execute(), "render Repository Exec command help")
 	assert.Contains(t, output.String(), "exec REPOSITORY -- COMMAND [ARG...]")
 	assert.Contains(t, output.String(), "--wait")
+}
+
+func TestCommandTreeContainsWorktreeExecAndDelete(t *testing.T) {
+	t.Parallel()
+
+	testCases := map[string]struct {
+		arguments []string
+		expected  string
+	}{
+		"Exec":   {arguments: []string{"worktree", execCommandName, helpArgument}, expected: "exec WORKTREE -- COMMAND [ARG...]"},
+		"Delete": {arguments: []string{"worktree", "delete", helpArgument}, expected: "delete NAME"},
+	}
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			command := NewCommand()
+			output := new(bytes.Buffer)
+			command.SetOut(output)
+			command.SetErr(output)
+			command.SetArgs(testCase.arguments)
+
+			require.NoError(t, command.Execute(), "render Worktree command help")
+			assert.Contains(t, output.String(), testCase.expected)
+		})
+	}
 }
 
 func TestCommandTreeContainsRepositoryClone(t *testing.T) {

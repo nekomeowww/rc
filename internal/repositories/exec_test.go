@@ -13,6 +13,14 @@ import (
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 )
 
+const (
+	execTestNamespace = "development"
+	execTestWorktree  = "feature"
+	execTestGit       = "git"
+	execTestStatus    = "status"
+	execTestShort     = "--short"
+)
+
 func TestExecClientStartPreservesArgv(t *testing.T) {
 	t.Parallel()
 
@@ -22,17 +30,17 @@ func TestExecClientStartPreservesArgv(t *testing.T) {
 	execClient := &ExecClient{Client: kubeClient}
 
 	exec, err := execClient.Start(context.Background(), ExecRequest{
-		Namespace:  "development",
+		Namespace:  execTestNamespace,
 		Repository: "auv",
-		Command:    []string{"git", "status", "--short"},
+		Command:    []string{execTestGit, execTestStatus, execTestShort},
 	})
 	require.NoError(t, err)
 	assert.NotEmpty(t, exec.Name)
 
 	persisted := new(repositoriesv1alpha1.RepositoryExec)
 	require.NoError(t, kubeClient.Get(context.Background(), types.NamespacedName{
-		Name: exec.Name, Namespace: "development",
+		Name: exec.Name, Namespace: execTestNamespace,
 	}, persisted))
 	assert.Equal(t, "auv", persisted.Spec.RepositoryRef.Name)
-	assert.Equal(t, []string{"git", "status", "--short"}, persisted.Spec.Command)
+	assert.Equal(t, []string{execTestGit, execTestStatus, execTestShort}, persisted.Spec.Command)
 }

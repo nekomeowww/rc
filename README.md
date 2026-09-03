@@ -85,7 +85,7 @@ The top-level command groups follow the rc resource model:
 | --- | --- |
 | `rcctl credentials` | Import Git, agent, and process credentials |
 | `rcctl repo` | Clone, inspect, execute commands in, and delete Repository mirrors |
-| `rcctl worktree` | Create and list independent native Git worktrees |
+| `rcctl worktree` | Create, inspect, execute in, and delete independent native Git worktrees |
 | `rcctl env` | Prepare and commit reusable Workspace home environments |
 | `rcctl workspace` | Create persistent development machines and manage their mounts |
 | `rcctl agent` | Run, list, reconnect to, stop, and inspect persistent processes |
@@ -145,9 +145,10 @@ Repository parents are not writable Workspace checkouts. Create a Worktree when 
 ```sh
 rcctl -n development worktree add --repo rc --name rc-readme --branch docs/readme
 rcctl -n development worktree list
+rcctl -n development worktree exec rc-readme -- git status --short
 ```
 
-The command creates a child PVC through CSI cloning and initializes a native Git worktree on it. Advanced `git worktree add` modes are available through flags such as `--ref`, `--detach`, `--orphan`, `--no-checkout`, and `--lock`.
+The add command creates a child PVC through CSI cloning and initializes a native Git worktree on it. `worktree exec` is the lightweight path for short commands that need only the base Runner Image: it runs in a separate Job, does not allocate a Workspace home PVC, and holds the same exclusive write Lease as a Workspace mount. It intentionally does not provide Workspace Environment state, caches, credentials, process persistence, or an interactive terminal. Use `agent exec --temporary --worktree rc-readme -- COMMAND` when a command needs those Workspace capabilities. Advanced `git worktree add` modes are available through flags such as `--ref`, `--detach`, `--orphan`, `--no-checkout`, and `--lock`. Delete an unmounted Worktree and its owned PVC and bootstrap Job with `rcctl worktree rm rc-readme`.
 
 ### Run a process
 

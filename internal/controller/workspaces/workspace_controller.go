@@ -49,6 +49,7 @@ import (
 	"github.com/nekomeowww/rc/internal/lifecycle"
 	"github.com/nekomeowww/rc/internal/runtimepolicy"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
+	"github.com/nekomeowww/rc/internal/worktreeclaim"
 )
 
 const (
@@ -67,8 +68,6 @@ const (
 	workspaceRuntimePolicyAnnotation = "workspaces.rc.ayaka.io/runtime-policy"
 	workspaceRuntimePolicyVersion    = "restricted-v1"
 	repositoryRootMountPath          = "/repository"
-	workspaceWriteHolderLabel        = "workspaces.rc.ayaka.io/write-holder"
-	workspaceWriteClaimPrefix        = "rc-worktree-"
 	runtimeContainerName             = "rc-kube"
 	runtimeServeArgument             = "serve"
 	allLinuxCapabilities             = corev1.Capability("ALL")
@@ -428,7 +427,7 @@ func (r *WorkspaceReconciler) acquireWriteClaims(ctx context.Context, workspace 
 	for _, claim := range ordered {
 		holder := string(workspace.UID)
 		lease := &coordinationv1.Lease{
-			ObjectMeta: metav1.ObjectMeta{Name: claim.leaseName, Namespace: workspace.Namespace, Labels: map[string]string{workspaceWriteHolderLabel: workspace.Name}},
+			ObjectMeta: metav1.ObjectMeta{Name: claim.leaseName, Namespace: workspace.Namespace, Labels: map[string]string{worktreeclaim.HolderLabel: workspace.Name}},
 			Spec:       coordinationv1.LeaseSpec{HolderIdentity: &holder},
 		}
 		if err := controllerutil.SetControllerReference(workspace, lease, r.Scheme); err != nil {
@@ -454,7 +453,7 @@ func (r *WorkspaceReconciler) acquireWriteClaims(ctx context.Context, workspace 
 		if worktree == "" {
 			worktree = claim.leaseName
 		}
-		return false, fmt.Sprintf("Worktree %s is mounted read-write by another running Workspace", worktree), nil
+		return false, fmt.Sprintf("Worktree %s is held by another active writer", worktree), nil
 	}
 
 	return true, "", nil
@@ -466,7 +465,7 @@ func (r *WorkspaceReconciler) releaseWriteClaims(ctx context.Context, workspace 
 		kept[claim.leaseName] = struct{}{}
 	}
 	leases := new(coordinationv1.LeaseList)
-	if err := r.List(ctx, leases, client.InNamespace(workspace.Namespace), client.MatchingLabels{workspaceWriteHolderLabel: workspace.Name}); err != nil {
+	if err := r.List(ctx, leases, client.InNamespace(workspace.Namespace), client.MatchingLabels{worktreeclaim.HolderLabel: workspace.Name}); err != nil {
 		return fmt.Errorf("list Workspace Worktree write Leases: %w", err)
 	}
 	for index := range leases.Items {
@@ -673,12 +672,7 @@ func (r *WorkspaceReconciler) resolveWorkspaceMount(ctx context.Context, namespa
 			}
 		}
 		if !mount.ReadOnly {
-			identity := string(worktree.UID)
-			if identity == "" {
-				identity = namespace + "/" + worktree.Name
-			}
-			sum := sha256.Sum256([]byte(identity))
-			claim := &workspaceWriteClaim{leaseName: workspaceWriteClaimPrefix + hex.EncodeToString(sum[:10]), worktree: worktree.Name}
+			claim := &workspaceWriteClaim{leaseName: worktreeclaim.LeaseName(worktree), worktree: worktree.Name}
 			return volume, volumeMount, claim, initializer, "", "", nil
 		}
 

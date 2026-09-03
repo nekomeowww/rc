@@ -20,7 +20,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+
+	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 )
 
 func TestContainerNameIsStableAndBounded(t *testing.T) {
@@ -29,6 +32,16 @@ func TestContainerNameIsStableAndBounded(t *testing.T) {
 	assert.Equal(t, first, ContainerName("another", "name", types.UID("worktree-uid")))
 	assert.LessOrEqual(t, len(first), 63)
 	assert.NotEqual(t, first, ContainerName("development", "generated", types.UID("other-uid")))
+}
+
+func TestEagerGeneratedWorktreeUsesBootstrapJob(t *testing.T) {
+	t.Parallel()
+	worktree := &repositoriesv1alpha1.Worktree{
+		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{generatedWorkspaceLabel: "workspace", EagerLabel: "true"}},
+		Spec:       repositoriesv1alpha1.WorktreeSpec{Branch: "rc/workspace/repository"},
+	}
+
+	assert.False(t, Deferred(worktree), "bootstrap before disrupting an existing Workspace runtime")
 }
 
 func TestActionUsesIdempotentGeneratedCheckout(t *testing.T) {

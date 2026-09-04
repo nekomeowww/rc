@@ -66,6 +66,25 @@ func TestExecCommandDoesNotAcceptDetachFlag(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestTemporaryFlagPromisesAutomaticWorkspaceCleanup(t *testing.T) {
+	t.Parallel()
+	command := newRunCommand(kubeconfig.NewFlags(), false)
+	temporary := command.Flag("temporary")
+	require.NotNil(t, temporary, "exec exposes temporary Workspace mode")
+	assert.Contains(t, temporary.Usage, "delete", "document automatic cleanup as part of the flag contract")
+	assert.Contains(t, temporary.Usage, "AgentProcess terminates", "define the cleanup point")
+}
+
+func TestTemporaryWorkspaceConfigurationRequiresTemporaryFlag(t *testing.T) {
+	t.Parallel()
+	command := newRunCommand(kubeconfig.NewFlags(), false)
+	command.SetArgs([]string{"--image", "workspace:test", testAgentCommand})
+
+	err := command.Execute()
+
+	require.EqualError(t, err, "--image requires --temporary")
+}
+
 func TestAgentListItemsFiltersAndSortsOldestFirst(t *testing.T) {
 	t.Parallel()
 	oldest := metav1.NewTime(time.Date(2026, time.September, 1, 1, 0, 0, 0, time.UTC))

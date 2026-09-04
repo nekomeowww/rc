@@ -18,6 +18,7 @@ package agents
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -113,10 +114,11 @@ func newRunCommand(kubeconfigFlags *kubeconfig.Flags, tty bool) *cobra.Command {
 
 func addRunFlags(cmd *cobra.Command, options *runOptions) {
 	cmd.Flags().StringVar(&options.workspace, "workspace", "", "Existing Workspace name")
-	cmd.Flags().BoolVar(&options.temporary, "temporary", false, "Create a generated Workspace even when a default exists")
-	cmd.Flags().StringVar(&options.environment, "environment", "", "WorkspaceEnvironment for a generated Workspace or existing-target requirement")
-	cmd.Flags().StringArrayVar(&options.repositories, "repo", nil, "Repository requirement or generated writable Worktree source; repeat")
-	cmd.Flags().StringArrayVar(&options.worktrees, "worktree", nil, "Worktree requirement or generated mount; repeat")
+	cmd.Flags().BoolVar(&options.temporary, "temporary", false, "Create an isolated Workspace and delete it after the AgentProcess terminates")
+	cmd.MarkFlagsMutuallyExclusive("workspace", "temporary")
+	cmd.Flags().StringVar(&options.environment, "environment", "", "WorkspaceEnvironment for a temporary Workspace or existing-target requirement")
+	cmd.Flags().StringArrayVar(&options.repositories, "repo", nil, "Repository requirement or temporary writable Worktree source; repeat")
+	cmd.Flags().StringArrayVar(&options.worktrees, "worktree", nil, "Worktree requirement or temporary mount; repeat")
 	cmd.Flags().StringArrayVar(&options.agentCredentials, "agent-credential", nil, "Ordered AgentCredential names; repeat")
 	cmd.Flags().StringArrayVar(&options.credentials, "credential", nil, "Credential names to project into the process; repeat")
 	cmd.Flags().StringArrayVar(&options.legacyGeneric, "dangerously-include-credentials", nil, "Deprecated alias for --credential; repeat")
@@ -125,16 +127,23 @@ func addRunFlags(cmd *cobra.Command, options *runOptions) {
 	cmd.Flags().StringArrayVar(&options.environmentFiles, "env-file", nil, "Read environment values from a file; repeat")
 	cmd.Flags().BoolVar(&options.noPassthrough, "no-env-passthrough", false, "Disable caller environment pass-through")
 	cmd.Flags().StringVar(&options.cwd, "cwd", "", "Working directory")
-	cmd.Flags().StringVar(&options.image, "image", "", "Runner image for a generated blank Workspace")
-	cmd.Flags().StringVar(&options.storageClass, "storage-class", "", "StorageClass for a generated blank Workspace")
-	cmd.Flags().StringVar(&options.size, "size", "20Gi", "Home volume size for a generated blank Workspace")
-	cmd.Flags().StringVar(&options.serviceAccount, "service-account", "", "Same-namespace ServiceAccount for a generated Workspace")
-	cmd.Flags().BoolVar(&options.noServiceAccount, "no-service-account", false, "Disable ServiceAccount token mounting for a generated Workspace")
+	cmd.Flags().StringVar(&options.image, "image", "", "Runner image for a temporary blank Workspace")
+	cmd.Flags().StringVar(&options.storageClass, "storage-class", "", "StorageClass for a temporary blank Workspace")
+	cmd.Flags().StringVar(&options.size, "size", "20Gi", "Home volume size for a temporary blank Workspace")
+	cmd.Flags().StringVar(&options.serviceAccount, "service-account", "", "Same-namespace ServiceAccount for a temporary Workspace")
+	cmd.Flags().BoolVar(&options.noServiceAccount, "no-service-account", false, "Disable ServiceAccount token mounting for a temporary Workspace")
 	options.gpu.AddFlags(cmd.Flags())
 }
 
 //nolint:gocyclo // This command coordinates target, credential, environment, and terminal setup.
-func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []string, tty bool, options runOptions) error {
+func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []string, tty bool, options runOptions) (returnedErr error) {
+	if !options.temporary {
+		for _, name := range []string{"image", "storage-class", "size", "service-account", "no-service-account"} {
+			if cmd.Flags().Changed(name) {
+				return fmt.Errorf("--%s requires --temporary", name)
+			}
+		}
+	}
 	resources, err := options.gpu.ResourceRequirements(cmd.Flags().Changed("gpu"), cmd.Flags().Changed("gpu-vram"))
 	if err != nil {
 		return err
@@ -167,7 +176,7 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 	}
 	credentialRefs := append(append([]string(nil), options.credentials...), options.legacyGeneric...)
 	credentialNames, agentCredential, selectedAgentType, err := selectAgentCredentials(
-		cmd.Context(), clusterClient.Kube, namespace, agentType, options.agentCredentials, runRequest.UsesGeneratedWorkspace(),
+		cmd.Context(), clusterClient.Kube, namespace, agentType, options.agentCredentials, options.temporary,
 	)
 	if err != nil {
 		return err
@@ -180,9 +189,12 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 			return err
 		}
 	}
-	storage, err := generatedStorage(options)
-	if err != nil {
-		return err
+	var storage *workspacesv1alpha1.PersistentStorageSpec
+	if options.temporary {
+		storage, err = temporaryStorage(options)
+		if err != nil {
+			return err
+		}
 	}
 	automount := (*bool)(nil)
 	if options.noServiceAccount {
@@ -203,6 +215,17 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 	if err != nil {
 		return err
 	}
+	cleanupTemporaryOnReturn := target.Created && target.Workspace.Spec.IsTemporary()
+	defer func() {
+		if !cleanupTemporaryOnReturn {
+			return
+		}
+		cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(cmd.Context()), 30*time.Second)
+		defer cancel()
+		if err := client.IgnoreNotFound(clusterClient.Kube.Delete(cleanupContext, target.Workspace)); err != nil {
+			returnedErr = errors.Join(returnedErr, fmt.Errorf("delete temporary Workspace %q: %w", target.Workspace.Name, err))
+		}
+	}()
 	if target.Created {
 		if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "workspace/%s created\n", target.Workspace.Name); err != nil {
 			return err
@@ -243,6 +266,7 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 		return err
 	}
 	if options.detach && !processTerminal(ready.Status.Phase) {
+		cleanupTemporaryOnReturn = false
 		return nil
 	}
 	if processTerminal(ready.Status.Phase) {
@@ -273,7 +297,7 @@ func loadDefaults(contextName string, namespace string) (workspaceservice.Defaul
 	return (workspaceservice.DefaultStore{Path: path}).Get(contextName, namespace)
 }
 
-func selectAgentCredentials(ctx context.Context, kubeClient client.Client, namespace string, agentType string, explicit []string, generated bool) ([]string, string, string, error) {
+func selectAgentCredentials(ctx context.Context, kubeClient client.Client, namespace string, agentType string, explicit []string, temporary bool) ([]string, string, string, error) {
 	if len(explicit) > 0 {
 		selectedName := ""
 		selectedType := ""
@@ -293,7 +317,7 @@ func selectAgentCredentials(ctx context.Context, kubeClient client.Client, names
 		}
 		return append([]string(nil), explicit...), selectedName, selectedType, nil
 	}
-	if agentType == "" || !generated {
+	if agentType == "" || !temporary {
 		return nil, "", agentType, nil
 	}
 	list := new(configsv1alpha1.AgentCredentialList)
@@ -357,7 +381,7 @@ func resolveWorktrees(ctx context.Context, kubeClient client.Client, namespace s
 	return result, nil
 }
 
-func generatedStorage(options runOptions) (*workspacesv1alpha1.PersistentStorageSpec, error) {
+func temporaryStorage(options runOptions) (*workspacesv1alpha1.PersistentStorageSpec, error) {
 	size, err := resource.ParseQuantity(options.size)
 	if err != nil || size.Sign() <= 0 {
 		return nil, fmt.Errorf("parse --size: value must be a positive Kubernetes quantity")

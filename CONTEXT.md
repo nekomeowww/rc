@@ -129,10 +129,13 @@ code mounts, credentials, and compute capacity for concurrent Agent Processes.
 _Avoid_: Agent Pod, workspace template
 
 **Temporary Workspace**:
-A Workspace created by rcctl because a run explicitly requests `--temporary`
-or declares topology without selecting an existing Workspace. It has the same
-persistence and cleanup rules as any other Workspace.
-_Avoid_: Ephemeral Workspace
+A short-lived Workspace created because a run explicitly requests `--temporary`.
+rcctl requests its deletion when the synchronous invocation finishes or fails;
+the retention controller also deletes it after all of its Agent Processes are
+terminal, including detached processes, and collects abandoned instances whose
+first Agent Process was never created. Its `DeleteAfterProcessesExit` retention
+policy is the complete lifecycle marker. Deletion includes Worktrees created
+from `--repo` and owned by the Temporary Workspace.
 
 **Workspace Mount**:
 A named association between a Workspace path and either a writable Worktree or

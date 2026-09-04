@@ -105,7 +105,7 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(persisted.Status.JobName).To(BeEmpty())
 	})
 
-	It("reuses the cloned Repository root for generated Workspace Worktrees", func() {
+	It("reuses the cloned Repository root for temporary Workspace Worktrees", func() {
 		worktree := &repositoriesv1alpha1.Worktree{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "generated-worktree",

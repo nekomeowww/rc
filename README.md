@@ -152,11 +152,17 @@ The add command creates a child PVC through CSI cloning and initializes a native
 
 ### Run a process
 
-The shortest path is to let `rcctl` create a generated Workspace and a writable Worktree from an existing Repository:
+The shortest isolated path is to explicitly request a temporary Workspace and a writable Worktree from an existing Repository:
 
 ```sh
-rcctl -n development agent run --repo rc --image ghcr.io/nekomeowww/rc/runner:latest --storage-class csi-hostpath-sc --agent-credential codex --cwd /workspace/rc -- codex
+rcctl -n development agent run --temporary --repo rc --image ghcr.io/nekomeowww/rc/runner:latest --storage-class csi-hostpath-sc --agent-credential codex --cwd /workspace/rc -- codex
 ```
+
+The temporary Workspace and any Worktree created by `--repo` are deleted after
+the AgentProcess terminates. An existing Worktree selected with `--worktree` is
+never deleted by this cleanup. Without `--temporary`, rcctl uses the explicitly
+selected or configured default Workspace and reports an error when neither is
+available.
 
 For a named development machine, create the Workspace first and mount the Worktree explicitly:
 

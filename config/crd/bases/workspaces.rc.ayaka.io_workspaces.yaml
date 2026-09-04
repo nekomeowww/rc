@@ -1195,10 +1195,6 @@ spec:
                 required:
                 - name
                 type: object
-              generated:
-                description: generated marks a Workspace created by rcctl for one
-                  invocation.
-                type: boolean
               idleTimeout:
                 description: idleTimeout suspends an idle named Workspace. Zero or
                   omitted disables it.
@@ -1392,6 +1388,15 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
+              retentionPolicy:
+                default: Retain
+                description: |-
+                  retentionPolicy controls whether the Workspace is retained after all of its
+                  Agent Processes exit. It defaults to Retain.
+                enum:
+                - Retain
+                - DeleteAfterProcessesExit
+                type: string
               runtimeClassName:
                 description: runtimeClassName selects a RuntimeClass for the runtime
                   Pod.
@@ -1569,12 +1574,6 @@ spec:
               homeVolumeClaimName:
                 description: homeVolumeClaimName contains mutable Workspace home state
                   and transcripts.
-                type: string
-              lastAutoSuspendTime:
-                description: |-
-                  lastAutoSuspendTime records the newest process completion consumed by
-                  generated-Workspace auto-suspension.
-                format: date-time
                 type: string
               observedGeneration:
                 description: observedGeneration is the latest generation reflected

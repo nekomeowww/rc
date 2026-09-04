@@ -379,7 +379,7 @@ func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 	assertions.Error(kubeClient.Get(ctx, key, removedPod), "stop runtime Pod immediately after losing write claim")
 }
 
-func TestGeneratedWorkspaceSuspendsAfterItsProcessFinishes(t *testing.T) {
+func TestWorkspaceSuspendsAfterIdleTimeout(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
 	scheme := runtime.NewScheme()
@@ -390,13 +390,14 @@ func TestGeneratedWorkspaceSuspendsAfterItsProcessFinishes(t *testing.T) {
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
 	now := metav1.NewTime(time.Now().Add(-time.Second))
 	workspace := &workspacesv1alpha1.Workspace{
-		ObjectMeta: metav1.ObjectMeta{Name: "generated", Namespace: testNamespace, UID: types.UID("workspace-uid")},
+		ObjectMeta: metav1.ObjectMeta{Name: "idle", Namespace: testNamespace, UID: types.UID("workspace-uid")},
 		Spec: workspacesv1alpha1.WorkspaceSpec{
-			DesiredState: workspacesv1alpha1.WorkspaceDesiredStateRunning, Generated: true, Image: testRuntimeImage,
-			Storage: &workspacesv1alpha1.PersistentStorageSpec{StorageClassName: testStorageClass, Size: resource.MustParse("20Gi")},
+			DesiredState: workspacesv1alpha1.WorkspaceDesiredStateRunning, Image: testRuntimeImage,
+			Storage:     &workspacesv1alpha1.PersistentStorageSpec{StorageClassName: testStorageClass, Size: resource.MustParse("20Gi")},
+			IdleTimeout: &metav1.Duration{Duration: time.Nanosecond},
 		},
 		Status: workspacesv1alpha1.WorkspaceStatus{RuntimeImage: testRuntimeImage, Conditions: []metav1.Condition{{
-			Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionTrue, Reason: "WorkspaceReady", LastTransitionTime: now,
+			Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionTrue, Reason: testWorkspaceReadyReason, LastTransitionTime: now,
 		}}},
 	}
 	home := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: workspace.Name, Namespace: workspace.Namespace, OwnerReferences: []metav1.OwnerReference{{UID: workspace.UID, Controller: boolPointer(true)}}}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
@@ -408,10 +409,10 @@ func TestGeneratedWorkspaceSuspendsAfterItsProcessFinishes(t *testing.T) {
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, process, home).WithObjects(workspace, home, process).Build()
 	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme}
 	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: workspace.Name, Namespace: workspace.Namespace}})
-	requirements.NoError(err, "reconcile completed generated Workspace")
+	requirements.NoError(err, "reconcile idle Workspace")
 	persisted := new(workspacesv1alpha1.Workspace)
-	requirements.NoError(kubeClient.Get(context.Background(), client.ObjectKeyFromObject(workspace), persisted), "get generated Workspace")
-	requirements.Equal(workspacesv1alpha1.WorkspaceDesiredStateSuspended, persisted.Spec.DesiredState, "release runtime compute after process completion")
+	requirements.NoError(kubeClient.Get(context.Background(), client.ObjectKeyFromObject(workspace), persisted), "get idle Workspace")
+	requirements.Equal(workspacesv1alpha1.WorkspaceDesiredStateSuspended, persisted.Spec.DesiredState, "release runtime compute after the idle timeout")
 }
 
 func TestWorkspaceNeverMutatesUnownedRuntimePod(t *testing.T) {

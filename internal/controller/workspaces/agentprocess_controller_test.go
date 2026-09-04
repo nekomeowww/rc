@@ -37,12 +37,13 @@ import (
 )
 
 const (
-	testNamespace     = "development"
-	testWorkspaceName = "coding"
-	testStorageClass  = "clone-capable"
-	testTrueValue     = "true"
-	testAPINamespace  = "default"
-	testRuntimeImage  = "workspace:test"
+	testNamespace            = "development"
+	testWorkspaceName        = "coding"
+	testStorageClass         = "clone-capable"
+	testTrueValue            = "true"
+	testAPINamespace         = "default"
+	testRuntimeImage         = "workspace:test"
+	testWorkspaceReadyReason = "WorkspaceReady"
 )
 
 type recordingProcessRuntime struct {
@@ -92,7 +93,7 @@ func TestAgentProcessReconcileStartsCommandAtReadyWorkspace(t *testing.T) {
 		Status: workspacesv1alpha1.WorkspaceStatus{
 			RuntimePodName: testWorkspaceName,
 			Conditions: []metav1.Condition{{
-				Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionTrue, Reason: "WorkspaceReady",
+				Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionTrue, Reason: testWorkspaceReadyReason,
 			}},
 		},
 	}

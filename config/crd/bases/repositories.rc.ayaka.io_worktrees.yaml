@@ -203,7 +203,7 @@ spec:
               jobName:
                 description: |-
                   jobName is the bootstrap Job that ran git worktree add. It is empty when a
-                  generated Workspace runtime initializes the cloned Repository root.
+                  Temporary Workspace runtime initializes the cloned Repository root.
                 type: string
               observedGeneration:
                 description: |-

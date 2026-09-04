@@ -212,7 +212,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return result, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reason, message)
 	}
 
-	active, hasProcesses, lastCompletion, err := r.processState(ctx, workspace)
+	active, hasProcesses, lastCompletion, err := workspaceProcessState(ctx, r.Client, workspace)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -221,14 +221,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		desiredState = workspacesv1alpha1.WorkspaceDesiredStateRunning
 	}
 	readyCondition := meta.FindStatusCondition(workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady)
-	if workspace.Spec.Generated && hasProcesses && !active && lastCompletion != nil && desiredState == workspacesv1alpha1.WorkspaceDesiredStateRunning && readyCondition != nil && readyCondition.Status == metav1.ConditionTrue && (workspace.Status.LastAutoSuspendTime == nil || lastCompletion.After(workspace.Status.LastAutoSuspendTime.Time)) {
-		workspace.Spec.DesiredState = workspacesv1alpha1.WorkspaceDesiredStateSuspended
-		if err := r.Update(ctx, workspace); err != nil {
-			return ctrl.Result{}, fmt.Errorf("auto-suspend generated Workspace: %w", err)
-		}
-		return ctrl.Result{Requeue: true}, nil
-	}
-	if !workspace.Spec.Generated && workspace.Spec.IdleTimeout != nil && workspace.Spec.IdleTimeout.Duration > 0 && hasProcesses && !active && desiredState == workspacesv1alpha1.WorkspaceDesiredStateRunning && readyCondition != nil && readyCondition.Status == metav1.ConditionTrue {
+	if workspace.Spec.IdleTimeout != nil && workspace.Spec.IdleTimeout.Duration > 0 && hasProcesses && !active && desiredState == workspacesv1alpha1.WorkspaceDesiredStateRunning && readyCondition != nil && readyCondition.Status == metav1.ConditionTrue {
 		lastActivity := readyCondition.LastTransitionTime.Time
 		if lastCompletion != nil && lastCompletion.After(lastActivity) {
 			lastActivity = lastCompletion.Time
@@ -246,13 +239,6 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if desiredState == workspacesv1alpha1.WorkspaceDesiredStateSuspended {
 		if active {
 			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "ActiveProcesses", "Workspace cannot suspend while Agent Processes are active")
-		}
-		if workspace.Spec.Generated && lastCompletion != nil && (workspace.Status.LastAutoSuspendTime == nil || lastCompletion.After(workspace.Status.LastAutoSuspendTime.Time)) {
-			workspace.Status.LastAutoSuspendTime = lastCompletion.DeepCopy()
-			if err := r.Status().Update(ctx, workspace); err != nil {
-				return ctrl.Result{}, fmt.Errorf("record generated Workspace auto-suspension: %w", err)
-			}
-			return ctrl.Result{Requeue: true}, nil
 		}
 		pod := new(corev1.Pod)
 		if err := r.Get(ctx, req.NamespacedName, pod); err == nil {
@@ -879,9 +865,9 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func (r *WorkspaceReconciler) processState(ctx context.Context, workspace *workspacesv1alpha1.Workspace) (bool, bool, *metav1.Time, error) {
+func workspaceProcessState(ctx context.Context, kubeClient client.Client, workspace *workspacesv1alpha1.Workspace) (bool, bool, *metav1.Time, error) {
 	processes := new(workspacesv1alpha1.AgentProcessList)
-	if err := r.List(ctx, processes, client.InNamespace(workspace.Namespace)); err != nil {
+	if err := kubeClient.List(ctx, processes, client.InNamespace(workspace.Namespace)); err != nil {
 		return false, false, nil, fmt.Errorf("list Workspace Agent Processes: %w", err)
 	}
 	hasProcesses := false
@@ -1075,14 +1061,14 @@ func (r *WorkspaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&corev1.Pod{}).
 		Owns(&coordinationv1.Lease{}).
-		Watches(&workspacesv1alpha1.AgentProcess{}, handler.EnqueueRequestsFromMapFunc(r.workspaceForProcess)).
+		Watches(&workspacesv1alpha1.AgentProcess{}, handler.EnqueueRequestsFromMapFunc(workspaceForProcess)).
 		Watches(&workspacesv1alpha1.WorkspaceEnvironment{}, handler.EnqueueRequestsFromMapFunc(r.workspacesForEnvironment)).
 		Watches(&repositoriesv1alpha1.Worktree{}, handler.EnqueueRequestsFromMapFunc(r.workspacesForWorktree)).
 		Named("workspaces-workspace").
 		Complete(r)
 }
 
-func (r *WorkspaceReconciler) workspaceForProcess(_ context.Context, object client.Object) []reconcile.Request {
+func workspaceForProcess(_ context.Context, object client.Object) []reconcile.Request {
 	process, ok := object.(*workspacesv1alpha1.AgentProcess)
 	if !ok || process.Spec.TargetRef.Kind != workspacesv1alpha1.AgentProcessTargetWorkspace {
 		return nil

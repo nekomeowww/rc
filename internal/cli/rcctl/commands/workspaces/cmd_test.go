@@ -37,6 +37,7 @@ import (
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
+	clioutput "github.com/nekomeowww/rc/pkg/output"
 )
 
 const (
@@ -110,19 +111,32 @@ func TestWorkspaceListItemsSortsByName(t *testing.T) {
 	assert.Equal(t, "zeta", items[1].Name, "retain the second sorted Workspace")
 }
 
+func TestWorkspaceDetailShowsRetentionPolicy(t *testing.T) {
+	t.Parallel()
+	workspace := &workspacesv1alpha1.Workspace{
+		Spec: workspacesv1alpha1.WorkspaceSpec{RetentionPolicy: workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit},
+	}
+
+	fields := workspaceDetailFields(workspace)
+
+	assert.Contains(t, fields, clioutput.Field{Name: "Retention policy", Value: string(workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit)}, "expose automatic cleanup semantics")
+}
+
 func TestWorkspaceListTableUsesHumanAgeAndWideMetadata(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)
 	table := workspaceListTable([]workspacesv1alpha1.Workspace{{
 		ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Hour))},
 		Spec: workspacesv1alpha1.WorkspaceSpec{
-			DesiredState: workspacesv1alpha1.WorkspaceDesiredStateRunning, Generated: true,
+			DesiredState:    workspacesv1alpha1.WorkspaceDesiredStateRunning,
+			RetentionPolicy: workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit,
 		},
 	}}, now)
 
 	require.Len(t, table.Rows, 1, "create one row per Workspace")
 	assert.Equal(t, "120m", table.Rows[0][7], "use a compact Kubernetes-style age")
-	assert.True(t, table.Columns[3].Wide, "keep generated metadata in wide output")
+	assert.Equal(t, workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit, table.Rows[0][3], "show effective retention")
+	assert.True(t, table.Columns[3].Wide, "keep retention metadata in wide output")
 }
 
 func TestWorkspaceListAndGetCommandsExposeOutputFormats(t *testing.T) {

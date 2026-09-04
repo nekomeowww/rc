@@ -288,8 +288,8 @@ func mountRepository(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, sele
 		worktreeName := boundedName(workspace.Name + "-" + mountName)
 		worktree := &repositoriesv1alpha1.Worktree{
 			ObjectMeta: metav1.ObjectMeta{Name: worktreeName, Namespace: namespace, Labels: map[string]string{
-				workspaceservice.GeneratedWorkspaceLabel: workspace.Name,
-				worktreebootstrap.EagerLabel:             "true",
+				workspaceservice.CreatedForWorkspaceLabel: workspace.Name,
+				worktreebootstrap.EagerLabel:              "true",
 			}},
 			Spec: repositoriesv1alpha1.WorktreeSpec{
 				RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: repository.Name}, Branch: "rc/" + workspace.Name + "/" + mountName,
@@ -718,7 +718,7 @@ func newDeleteCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			}
 			createdWorktrees := new(repositoriesv1alpha1.WorktreeList)
 			if cascade {
-				if err := clusterClient.Kube.List(cmd.Context(), createdWorktrees, client.InNamespace(namespace), client.MatchingLabels{workspaceservice.GeneratedWorkspaceLabel: workspace.Name}); err != nil {
+				if err := clusterClient.Kube.List(cmd.Context(), createdWorktrees, client.InNamespace(namespace), client.MatchingLabels{workspaceservice.CreatedForWorkspaceLabel: workspace.Name}); err != nil {
 					return topologyChangeFailure(cmd, stopped, err)
 				}
 				for _, worktree := range createdWorktrees.Items {
@@ -893,14 +893,14 @@ func workspaceListTable(workspaces []workspacesv1alpha1.Workspace, now time.Time
 			age = duration.HumanDuration(now.Sub(workspace.CreationTimestamp.Time))
 		}
 		rows = append(rows, []any{
-			workspace.Name, clioutput.ValueOrDash(string(workspace.Spec.DesiredState)), ready, workspace.Spec.Generated,
+			workspace.Name, clioutput.ValueOrDash(string(workspace.Spec.DesiredState)), ready, workspace.Spec.EffectiveRetentionPolicy(),
 			environment, clioutput.ValueOrDash(workspace.Status.RuntimeImage), clioutput.ValueOrDash(workspace.Status.RuntimePodName), age,
 		})
 	}
 
 	return clioutput.Table{
 		Columns: []clioutput.Column{
-			{Name: "NAME", MaxWidth: 32}, {Name: "STATE"}, {Name: "READY"}, {Name: "GENERATED", Wide: true},
+			{Name: "NAME", MaxWidth: 32}, {Name: "STATE"}, {Name: "READY"}, {Name: "RETENTION", Wide: true},
 			{Name: "ENVIRONMENT", MaxWidth: 32, Wide: true}, {Name: "IMAGE", MaxWidth: 40, Flexible: true, Wide: true},
 			{Name: "RUNTIME POD", MaxWidth: 40, Flexible: true}, {Name: "AGE"},
 		},
@@ -940,7 +940,7 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 		{Name: "Created", Value: clioutput.Timestamp(workspace.CreationTimestamp)},
 		{Name: "Desired state", Value: clioutput.ValueOrDash(string(workspace.Spec.DesiredState))},
 		{Name: "Ready", Value: meta.IsStatusConditionTrue(workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady)},
-		{Name: "Generated", Value: workspace.Spec.Generated},
+		{Name: "Retention policy", Value: string(workspace.Spec.EffectiveRetentionPolicy())},
 		{Name: "Environment", Value: environment},
 		{Name: "Source environment revision", Value: workspace.Status.SourceEnvironmentRevision},
 		{Name: "Configured image", Value: clioutput.ValueOrDash(workspace.Spec.Image)},
@@ -959,7 +959,6 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 		{Name: "ConfigMaps", Value: workspaceReferenceNames(workspace.Spec.ConfigMapRefs)},
 		{Name: "Secrets", Value: workspaceReferenceNames(workspace.Spec.SecretRefs)},
 		{Name: "Lifecycle", Value: lifecycle},
-		{Name: "Last auto-suspend", Value: clioutput.OptionalTimestamp(workspace.Status.LastAutoSuspendTime)},
 		{Name: "Conditions", Value: clioutput.Conditions(workspace.Status.Conditions)},
 	}
 }

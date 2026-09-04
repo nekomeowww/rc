@@ -26,11 +26,17 @@ import (
 // +kubebuilder:validation:Enum=Running;Suspended
 type WorkspaceDesiredState string
 
+// WorkspaceRetentionPolicy controls retention after process execution.
+// +kubebuilder:validation:Enum=Retain;DeleteAfterProcessesExit
+type WorkspaceRetentionPolicy string
+
 const (
-	WorkspaceDesiredStateRunning   WorkspaceDesiredState = "Running"
-	WorkspaceDesiredStateSuspended WorkspaceDesiredState = "Suspended"
-	WorkspaceConditionReady                              = ConditionReady
-	WorkspaceConditionOutdated                           = ConditionOutdated
+	WorkspaceDesiredStateRunning                     WorkspaceDesiredState    = "Running"
+	WorkspaceDesiredStateSuspended                   WorkspaceDesiredState    = "Suspended"
+	WorkspaceRetentionPolicyRetain                   WorkspaceRetentionPolicy = "Retain"
+	WorkspaceRetentionPolicyDeleteAfterProcessesExit WorkspaceRetentionPolicy = "DeleteAfterProcessesExit"
+	WorkspaceConditionReady                                                   = ConditionReady
+	WorkspaceConditionOutdated                                                = ConditionOutdated
 )
 
 // WorkspaceMount associates a stable path with a Worktree or Repository PVC.
@@ -190,9 +196,25 @@ type WorkspaceSpec struct {
 	// +optional
 	IdleTimeout *metav1.Duration `json:"idleTimeout,omitempty"`
 
-	// generated marks a Workspace created by rcctl for one invocation.
+	// retentionPolicy controls whether the Workspace is retained after all of its
+	// Agent Processes exit. It defaults to Retain.
+	// +kubebuilder:default=Retain
 	// +optional
-	Generated bool `json:"generated,omitempty"`
+	RetentionPolicy WorkspaceRetentionPolicy `json:"retentionPolicy,omitempty"`
+}
+
+// EffectiveRetentionPolicy returns the API default for an omitted policy.
+func (spec WorkspaceSpec) EffectiveRetentionPolicy() WorkspaceRetentionPolicy {
+	if spec.RetentionPolicy == "" {
+		return WorkspaceRetentionPolicyRetain
+	}
+
+	return spec.RetentionPolicy
+}
+
+// IsTemporary reports whether the Workspace has an invocation-scoped lifetime.
+func (spec WorkspaceSpec) IsTemporary() bool {
+	return spec.EffectiveRetentionPolicy() == WorkspaceRetentionPolicyDeleteAfterProcessesExit
 }
 
 // WorkspaceStatus defines the observed state of Workspace.
@@ -216,11 +238,6 @@ type WorkspaceStatus struct {
 	// runtimePodName is the active runtime Pod when desiredState is Running.
 	// +optional
 	RuntimePodName string `json:"runtimePodName,omitempty"`
-
-	// lastAutoSuspendTime records the newest process completion consumed by
-	// generated-Workspace auto-suspension.
-	// +optional
-	LastAutoSuspendTime *metav1.Time `json:"lastAutoSuspendTime,omitempty"`
 
 	// conditions represent the current state of the Workspace resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.

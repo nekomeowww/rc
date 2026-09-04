@@ -88,15 +88,15 @@ credential material.
 ### Workspace Runtime
 
 **Workspace Environment**:
-A reusable development environment from which Workspaces receive their runner
-image, user home, toolchains, and installed user-level tools.
+A reusable source from which Workspaces receive their Runner Image and initial
+writable user home state. A Workspace resolves at most one explicit Workspace
+Environment.
 _Avoid_: Workspace Template
 
 **Runner Image**:
 The execution image containing `rc-kube`, `rcctl`, Git, a shell, certificates,
-and common system tools. The default Runner Image is shared by Repository and
-Worktree Jobs and blank Workspace runtimes; Environment images retain the same
-runtime contract while adding development toolchains.
+system libraries, and common system tools. Workspace Environment images retain
+the same runtime contract while selecting a different system foundation.
 _Avoid_: Repository worker image, Workspace base image
 
 **Environment Draft**:
@@ -112,10 +112,20 @@ _Avoid_: Publish environment
 A committed state of a Workspace Environment. Existing Workspaces retain the
 revision from which they were created when a later revision is committed.
 
+**Workspace Setup**:
+A reusable, versioned capability bundle that a Workspace attaches in addition
+to its environment foundation. It provides tools and their process environment
+without becoming part of the Workspace's writable user home.
+_Avoid_: Toolchain resource, Environment layer, setup script
+
+**Setup Revision**:
+An immutable state of a Workspace Setup selected by a Workspace. Existing
+Workspaces retain their resolved Setup Revisions until explicitly upgraded.
+
 **Workspace**:
-A named, persistent development machine that combines an optional reusable
-environment or blank home with code mounts, configuration, credentials, and
-compute capacity for concurrent Agent Processes.
+A named, persistent development machine with independent writable user state.
+It combines one resolved environment foundation, zero or more Workspace Setups,
+code mounts, credentials, and compute capacity for concurrent Agent Processes.
 _Avoid_: Agent Pod, workspace template
 
 **Temporary Workspace**:

@@ -144,10 +144,14 @@ cleanup-test-e2e: cleanup-kind ## Tear down the Kind cluster used for e2e tests.
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
+	# Keep formatters out of the goanalysis runner: goimports currently fails
+	# there with Go 1.26, while golangci-lint's dedicated fmt command is stable.
+	"$(GOLANGCI_LINT)" fmt --enable gofmt,goimports --diff
 	"$(GOLANGCI_LINT)" run
 
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
+	"$(GOLANGCI_LINT)" fmt --enable gofmt,goimports
 	"$(GOLANGCI_LINT)" run --fix
 
 .PHONY: lint-config

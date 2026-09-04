@@ -14,6 +14,9 @@ linters:
     - govet
     - ineffassign
     - lll
+    # logcheck v0.10.1 panics on packages built with Go 1.26 because it assumes
+    # every function expression has non-nil package type information.
+    - loggercheck
     - modernize
     - misspell
     - nakedret
@@ -23,12 +26,7 @@ linters:
     - unconvert
     - unparam
     - unused
-    - logcheck
   settings:
-    custom:
-      logcheck:
-        type: "module"
-        description: Checks Go logging calls for Kubernetes logging conventions.
     depguard:
       rules:
         forbid-sort-pkg:
@@ -58,9 +56,6 @@ linters:
       - builtin$
       - examples$
 formatters:
-  enable:
-    - gofmt
-    - goimports
   exclusions:
     generated: lax
     paths:

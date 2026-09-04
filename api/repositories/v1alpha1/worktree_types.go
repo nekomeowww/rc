@@ -151,6 +151,7 @@ type WorktreeStatus struct {
 // +kubebuilder:printcolumn:name="Repository",type=string,JSONPath=".spec.repositoryRef.name"
 // +kubebuilder:printcolumn:name="Volume",type=string,JSONPath=".status.volumeClaimName"
 // +kubebuilder:printcolumn:name="Path",type=string,JSONPath=".status.worktreePath"
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=".metadata.creationTimestamp"
 type Worktree struct {
 	metav1.TypeMeta `json:",inline"`
 

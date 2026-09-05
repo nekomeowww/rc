@@ -233,6 +233,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the Kind development loop, tests, gen
 
 Design decisions and the detailed runtime model live under [`docs/`](docs/).
 
+Experimental platform guides:
+
+- [Attach a native Windows 11 Kubernetes worker](docs/guides/experimental-windows-11-worker.md)
+
 ## License
 
 Licensed under the

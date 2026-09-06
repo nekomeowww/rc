@@ -2,11 +2,65 @@ name: Tests
 
 on:
   push:
+    branches:
+      - main
   pull_request:
 
 permissions: {}
 
 jobs:
+  test-windows:
+    permissions:
+      contents: read
+    name: Run on Windows
+    runs-on: windows-2025
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: |
+          New-Item -ItemType Directory -Force bin/windows-amd64 | Out-Null
+          go build -trimpath -o bin/windows-amd64/rc-kube.exe ./cmd/rc-kube
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -trimpath -o bin/windows-amd64/rcctl.exe ./cmd/rcctl
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test
+        run: |
+          go test -timeout 120s `
+            ./internal/agentprocess `
+            ./internal/cli/rcctl/commands/credentials/importcredential `
+            ./internal/lifecycle `
+            ./internal/osprocess `
+            ./internal/rckube `
+            ./internal/rcnative `
+            ./internal/rcplatform
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Prepare Windows runner assets
+        run: ./images/runner-windows/prepare-ci-assets.ps1 -RCBinaryDirectory bin/windows-amd64
+
+      - name: Start Windows Docker
+        run: |
+          if ((Get-Service docker).Status -ne 'Running') {
+            Start-Service docker
+          }
+          docker info
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build Windows runner image
+        run: |
+          docker build --target runner --tag rc-runner-windows:test images/runner-windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   test:
     permissions:
       contents: read
@@ -14,12 +68,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@v6
         with:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 

@@ -27,13 +27,15 @@ import (
 var environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 var excludedCallerEnvironment = map[string]struct{}{
-	"PATH": {}, "HOME": {}, "PWD": {}, "OLDPWD": {}, "USER": {}, "LOGNAME": {}, "SHELL": {},
+	"PATH": {}, "HOME": {}, "USERPROFILE": {}, "HOMEDRIVE": {}, "HOMEPATH": {},
+	"APPDATA": {}, "LOCALAPPDATA": {}, "SYSTEMROOT": {}, "WINDIR": {}, "COMSPEC": {},
+	"PROGRAMFILES": {}, "PROGRAMFILES(X86)": {}, "PROGRAMDATA": {}, "PATHEXT": {}, "PWD": {}, "OLDPWD": {}, "USER": {}, "LOGNAME": {}, "SHELL": {},
 	"SHLVL": {}, "_": {}, "KUBECONFIG": {}, "XDG_RUNTIME_DIR": {}, "SSH_AUTH_SOCK": {},
 	"TERM": {}, "COLORTERM": {}, "LINES": {}, "COLUMNS": {}, "CODEX_HOME": {},
 	"TMP": {}, "TEMP": {}, "TMPDIR": {}, "COMMAND_MODE": {}, "GIT_ASKPASS": {},
 	"NODE_OPTIONS": {}, "PYTHONSTARTUP": {}, "PYTHON_BASIC_REPL": {}, "TERMINFO": {},
-	"TERMINFO_DIRS": {}, "USER_ZDOTDIR": {}, "ZDOTDIR": {}, "MallocNanoZone": {},
-	"OSLogRateLimit": {},
+	"TERMINFO_DIRS": {}, "USER_ZDOTDIR": {}, "ZDOTDIR": {}, "MALLOCNANOZONE": {},
+	"OSLOGRATELIMIT": {},
 	"CDPATH":         {}, "CLASSPATH": {}, "FPATH": {}, "GOPATH": {}, "GOROOT": {},
 	"INFOPATH": {}, "MANPATH": {}, "PERL5LIB": {}, "PYTHONHOME": {}, "PYTHONPATH": {},
 	"RUBYLIB": {}, "BUN_INSTALL": {}, "CURL_CA_BUNDLE": {}, "REQUESTS_CA_BUNDLE": {},
@@ -117,6 +119,7 @@ func parseEnvironment(entries []string) map[string]string {
 }
 
 func callerEnvironmentExcluded(name string) bool {
+	name = strings.ToUpper(name)
 	if _, excluded := excludedCallerEnvironment[name]; excluded {
 		return true
 	}

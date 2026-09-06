@@ -33,15 +33,15 @@ experiment, not a compatibility promise.
 
 ## rc support boundary
 
-Joining the node does not make current rc Workspaces Windows-compatible. The
-published rc runner and Workspace bootstrap currently rely on Linux paths and
-programs such as `/bin/sh` and `/workspace`.
+rc now has an explicit Windows runtime path. Use `spec.os: windows`, a Windows
+runner image, and Windows-compatible storage; see [Windows Workspaces](windows-workspaces.md).
+The Linux runner image is still the default for Linux Workspaces and repository
+jobs. Existing Repository/Worktree Git mounts remain Linux-specific.
 
-Keep the Windows node tainted until rc has a Windows runner image and Windows
-implementations for Workspace bootstrap, filesystem layout, process control,
-terminal handling, and lifecycle commands. The node is still useful for
-developing and testing that support and for running explicitly Windows-aware
-Kubernetes workloads.
+Keep the Windows taint and add an explicit toleration to intended workloads.
+The native runtime covers process trees, named-pipe IPC, ConPTY, PowerShell
+lifecycle actions, retained transcripts, and generic Electron renderer capture.
+Joining a node alone does not supply a compatible image or storage driver.
 
 ## Network model
 
@@ -513,4 +513,5 @@ the join.
   compatibility.
 - A successful service restart is not a substitute for a controlled reboot
   test before relying on the node for unattended development.
-- Current rc Workspace runtime images and bootstrap behavior are Linux-only.
+- Windows Workspaces require a dedicated Windows image and compatible storage;
+  existing Repository/Worktree mounts remain Linux-specific.

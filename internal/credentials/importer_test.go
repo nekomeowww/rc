@@ -14,7 +14,10 @@ import (
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
 )
 
-const githubTestSecretName = "github-com-auth"
+const (
+	githubTestSecretName           = "github-com-auth"
+	testProcessCredentialMountPath = "/home/agent/.tool/credentials.json"
+)
 
 func TestImportAgentCreatesAndUpdatesCredentialObjects(t *testing.T) {
 	t.Parallel()
@@ -85,7 +88,7 @@ func TestImportProcessPreservesRawBytesAndIndependentProjections(t *testing.T) {
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	importer := NewImporter(kubeClient, scheme)
 	result, err := importer.ImportProcess(context.Background(), ImportProcessRequest{
-		Namespace: namespace, Name: credentialName, Data: raw, MountPath: "/home/agent/.tool/credentials.json",
+		Namespace: namespace, Name: credentialName, Data: raw, MountPath: testProcessCredentialMountPath,
 		Envs: []configsv1alpha1.CredentialEnv{{Name: "TOOL_HOME", Value: "/home/agent/.tool"}},
 	})
 	require.NoError(t, err, "import raw file credential")
@@ -101,7 +104,7 @@ func TestImportProcessPreservesRawBytesAndIndependentProjections(t *testing.T) {
 	require.NotNil(t, credential.Spec.Process, "process Credential has projection configuration")
 	assert.Equal(t, []configsv1alpha1.CredentialFile{{
 		DataRef:   configsv1alpha1.SecretKeyReference{Name: credentialName + "-file", Key: fileCredentialSecretKey},
-		MountPath: "/home/agent/.tool/credentials.json",
+		MountPath: testProcessCredentialMountPath,
 	}}, credential.Spec.Process.Files)
 	assert.Equal(t, []configsv1alpha1.CredentialEnv{{Name: "TOOL_HOME", Value: "/home/agent/.tool"}}, credential.Spec.Process.Envs)
 

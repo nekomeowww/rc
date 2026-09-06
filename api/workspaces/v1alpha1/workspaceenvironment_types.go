@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -31,6 +32,19 @@ const (
 
 // WorkspaceEnvironmentSpec defines the reusable image and home volume state.
 type WorkspaceEnvironmentSpec struct {
+	// os selects the image and persistent home's operating system.
+	// +kubebuilder:validation:Enum=linux;windows
+	// +kubebuilder:default=linux
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Environment OS is immutable"
+	// +optional
+	OS corev1.OSName `json:"os,omitempty"`
+
+	// nodeSelector and tolerations place editor Pods on compatible storage nodes.
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
 	// image is the runner image string copied into each new Workspace.
 	// +kubebuilder:validation:MinLength=1
 	// +required

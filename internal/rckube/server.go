@@ -23,15 +23,13 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
-	"path/filepath"
 
 	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
 )
 
 const protocolCodeBadRequest = "bad_request"
 
-// Server exposes one Supervisor over a local Unix socket.
+// Server exposes one Supervisor over an OS-local endpoint.
 type Server struct {
 	supervisor *Supervisor
 }
@@ -43,23 +41,12 @@ func NewServer(supervisor *Supervisor) *Server {
 
 // Serve accepts local protocol requests until ctx is cancelled.
 func (server *Server) Serve(ctx context.Context, socketPath string) error {
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
-		return fmt.Errorf("create rc-kube socket directory: %w", err)
-	}
-	if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove stale rc-kube socket: %w", err)
-	}
-	listener, err := net.Listen("unix", socketPath)
+	defer server.supervisor.Shutdown()
+	listener, err := listenLocal(socketPath)
 	if err != nil {
-		return fmt.Errorf("listen on rc-kube Unix socket: %w", err)
+		return fmt.Errorf("listen on rc-kube local endpoint: %w", err)
 	}
-	defer func() {
-		_ = listener.Close()
-		_ = os.Remove(socketPath)
-	}()
-	if err := os.Chmod(socketPath, 0o600); err != nil {
-		return fmt.Errorf("restrict rc-kube Unix socket: %w", err)
-	}
+	defer func() { _ = listener.Close() }()
 	go func() {
 		<-ctx.Done()
 		_ = listener.Close()
@@ -95,6 +82,8 @@ func (server *Server) handle(serverContext context.Context, connection net.Conn)
 	}
 
 	switch request.Action {
+	case "ping":
+		server.writeState(connection, processruntime.State{}, nil)
 	case "start":
 		if request.Start == nil {
 			_ = writeProtocolResponse(connection, protocolResponse{Error: "start request is required", Code: protocolCodeBadRequest})

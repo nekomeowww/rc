@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/rcplatform"
 )
 
 const environmentManagedByLabel = "workspaces.rc.ayaka.io/environment"
@@ -58,6 +59,14 @@ func (r *WorkspaceEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl
 	environment := new(workspacesv1alpha1.WorkspaceEnvironment)
 	if err := r.Get(ctx, req.NamespacedName, environment); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if _, err := rcplatform.Resolve(rcplatform.Target{OS: environment.Spec.OS, Placement: rcplatform.Placement{
+		NodeSelector: environment.Spec.NodeSelector, Tolerations: environment.Spec.Tolerations,
+	}}); err != nil {
+		reason, message := runtimePlatformCondition(err)
+		return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName,
+			environment.Status.CurrentRevision, environment.Status.CurrentImage, environment.Status.CurrentVolumeClaimName,
+			metav1.ConditionFalse, reason, message)
 	}
 	commitHandled, err := r.reconcileEnvironmentCommit(ctx, environment)
 	if err != nil {
@@ -144,6 +153,19 @@ func (r *WorkspaceEnvironmentReconciler) reconcileEditorLifecycle(ctx context.Co
 		}
 		return ctrl.Result{}, true, nil
 	}
+	if environment.Status.ObservedGeneration < environment.Generation {
+		active, err := r.environmentHasActiveProcess(ctx, environment)
+		if err != nil {
+			return ctrl.Result{}, true, err
+		}
+		if active {
+			return ctrl.Result{}, true, r.setEnvironmentDraftCondition(ctx, client.ObjectKeyFromObject(environment), "RuntimeChangeBlocked", "Environment editor runtime changed while Agent Processes are active")
+		}
+		if err := r.Delete(ctx, editor); err != nil {
+			return ctrl.Result{}, true, fmt.Errorf("replace Environment editor Pod: %w", err)
+		}
+		return ctrl.Result{}, true, r.setEnvironmentDraftCondition(ctx, client.ObjectKeyFromObject(environment), "ReplacingEditor", "Environment editor Pod is restarting with updated runtime settings")
+	}
 	if environment.Spec.EditorIdleTimeout == nil || environment.Spec.EditorIdleTimeout.Duration == 0 {
 		return ctrl.Result{}, false, nil
 	}
@@ -176,6 +198,20 @@ func (r *WorkspaceEnvironmentReconciler) reconcileEditorLifecycle(ctx context.Co
 	}
 
 	return ctrl.Result{}, true, nil
+}
+
+func (r *WorkspaceEnvironmentReconciler) environmentHasActiveProcess(ctx context.Context, environment *workspacesv1alpha1.WorkspaceEnvironment) (bool, error) {
+	processes := new(workspacesv1alpha1.AgentProcessList)
+	if err := r.List(ctx, processes, client.InNamespace(environment.Namespace)); err != nil {
+		return false, fmt.Errorf("list Environment editor processes: %w", err)
+	}
+	for index := range processes.Items {
+		process := &processes.Items[index]
+		if process.Spec.TargetRef.Kind == workspacesv1alpha1.AgentProcessTargetWorkspaceEnvironment && process.Spec.TargetRef.Name == environment.Name && !agentProcessTerminal(process.Status.Phase) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (r *WorkspaceEnvironmentReconciler) reconcileEnvironmentCommit(ctx context.Context, environment *workspacesv1alpha1.WorkspaceEnvironment) (bool, error) {

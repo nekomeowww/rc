@@ -58,6 +58,7 @@ import (
 )
 
 type createOptions struct {
+	placement        command.PlacementOptions
 	environment      string
 	image            string
 	storageClass     string
@@ -108,6 +109,10 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use: "create NAME", Short: "Create a persistent Workspace", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			osName, tolerations, err := options.placement.Resolve()
+			if err != nil {
+				return err
+			}
 			resources, err := options.gpu.ResourceRequirements(cmd.Flags().Changed("gpu"), cmd.Flags().Changed("gpu-vram"))
 			if err != nil {
 				return err
@@ -124,7 +129,8 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 				ObjectMeta: metav1.ObjectMeta{Name: args[0], Namespace: namespace},
 				Spec: workspacesv1alpha1.WorkspaceSpec{
 					DesiredState: workspacesv1alpha1.WorkspaceDesiredStateRunning,
-					Image:        options.image, DefaultWorkingDirectory: options.defaultCwd,
+					OS:           osName, NodeSelector: options.placement.NodeSelector, Tolerations: tolerations,
+					Image: options.image, DefaultWorkingDirectory: options.defaultCwd,
 					ServiceAccountName: options.serviceAccount,
 					Resources:          resources,
 				},
@@ -138,6 +144,15 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 					return fmt.Errorf("workspace environment %q is not Ready", options.environment)
 				}
 				workspace.Spec.EnvironmentRef = &workspacesv1alpha1.LocalReference{Name: options.environment}
+				if workspace.Spec.OS == "" {
+					workspace.Spec.OS = environment.Spec.OS
+				}
+				if len(workspace.Spec.NodeSelector) == 0 {
+					workspace.Spec.NodeSelector = environment.Spec.NodeSelector
+				}
+				if len(workspace.Spec.Tolerations) == 0 {
+					workspace.Spec.Tolerations = environment.Spec.Tolerations
+				}
 			} else {
 				size, err := resource.ParseQuantity(options.size)
 				if err != nil || size.Sign() <= 0 {
@@ -172,6 +187,7 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&options.environment, "environment", "", "WorkspaceEnvironment to clone")
+	options.placement.AddFlags(cmd.Flags())
 	cmd.Flags().StringVar(&options.image, "image", "", "Runner image for a blank Workspace")
 	cmd.Flags().StringVar(&options.storageClass, "storage-class", "", "StorageClass for a blank Workspace")
 	cmd.Flags().StringVar(&options.size, "size", "20Gi", "Home volume size for a blank Workspace")

@@ -305,15 +305,15 @@ func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 	requirements.NotNil(pod.Spec.Containers[0].SecurityContext, "runtime container has a SecurityContext")
 	requirements.NotNil(pod.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation, "runtime container declares privilege escalation policy")
 	assertions.Equal(environment.Status.CurrentImage, pod.Spec.Containers[0].Image, "use captured Environment image")
-	assertions.Equal([]string{runtimeContainerName, runtimeServeArgument}, pod.Spec.Containers[0].Command, "run the supervisor")
+	assertions.Equal([]string{runtimeContainerName, "serve"}, pod.Spec.Containers[0].Command, "run the supervisor")
 	assertions.Equal("rc-workspace", pod.Spec.ServiceAccountName, "inject default namespaced ServiceAccount")
 	assertions.Equal(workspaceRuntimePolicyVersion, pod.Annotations[workspaceRuntimePolicyAnnotation], "record the restricted runtime policy")
 	assertions.False(*pod.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation, "prevent Agent Processes from gaining root")
 	requirements.NotNil(pod.Spec.Containers[0].SecurityContext.Capabilities, "runtime container declares capabilities")
-	assertions.Equal([]corev1.Capability{allLinuxCapabilities}, pod.Spec.Containers[0].SecurityContext.Capabilities.Drop, "drop every runtime capability")
+	assertions.Equal([]corev1.Capability{"ALL"}, pod.Spec.Containers[0].SecurityContext.Capabilities.Drop, "drop every runtime capability")
 	assertions.Empty(pod.Spec.InitContainers, "normal Workspace does not inject sudoers")
 	for _, volume := range pod.Spec.Volumes {
-		assertions.NotEqual(environmentSudoersVolumeName, volume.Name, "normal Workspace has no sudoers volume")
+		assertions.NotEqual("sudoers", volume.Name, "normal Workspace has no sudoers volume")
 	}
 	assertions.Equal("/home/agent", pod.Spec.Containers[0].VolumeMounts[0].MountPath, "mount persistent home")
 	assertions.Equal("/workspace/rc", pod.Spec.Containers[0].VolumeMounts[1].MountPath, "mount selected Worktree")

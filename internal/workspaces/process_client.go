@@ -38,6 +38,7 @@ import (
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
+	"github.com/nekomeowww/rc/internal/rcplatform"
 )
 
 const WorkspaceHomePath = "/home/agent"
@@ -268,7 +269,18 @@ func (processes *ProcessClient) Attach(ctx context.Context, process *workspacesv
 	if process.Status.RuntimePodName == "" {
 		return fmt.Errorf("agent process %s has no runtime Pod", process.Name)
 	}
-	target := processruntime.Target{Namespace: process.Namespace, Pod: process.Status.RuntimePodName, Container: "rc-kube"}
+	pod := new(corev1.Pod)
+	if err := processes.Kube.Get(ctx, client.ObjectKey{Namespace: process.Namespace, Name: process.Status.RuntimePodName}, pod); err != nil {
+		return fmt.Errorf("get attach runtime Pod: %w", err)
+	}
+	if string(pod.UID) != process.Status.RuntimePodUID {
+		return fmt.Errorf("original runtime Pod was replaced")
+	}
+	platform, err := rcplatform.FromPod(pod)
+	if err != nil {
+		return fmt.Errorf("resolve attach runtime platform: %w", err)
+	}
+	target := platform.ProcessTarget(process.Namespace, pod.Name, "rc-kube")
 	clientID := GenerateSortableName("terminal")
 	rows, columns, cleanup, err := processes.prepareLocalTerminal(ctx, target, process, clientID, input)
 	if err != nil {
@@ -342,14 +354,18 @@ func (processes *ProcessClient) Logs(ctx context.Context, process *workspacesv1a
 		pod := new(corev1.Pod)
 		key := types.NamespacedName{Name: process.Status.RuntimePodName, Namespace: process.Namespace}
 		if err := processes.Kube.Get(ctx, key, pod); err == nil && string(pod.UID) == process.Status.RuntimePodUID {
-			target := processruntime.Target{Namespace: process.Namespace, Pod: pod.Name, Container: "rc-kube"}
+			platform, platformErr := rcplatform.FromPod(pod)
+			if platformErr != nil {
+				return fmt.Errorf("resolve log runtime platform: %w", platformErr)
+			}
+			target := platform.ProcessTarget(process.Namespace, pod.Name, "rc-kube")
 			if err := processes.Runtime.Logs(ctx, target, process.Name, output); err == nil {
 				return nil
 			}
 		}
 	}
 
-	claimName, image, err := processes.logVolume(ctx, process)
+	volume, err := processes.logVolume(ctx, process)
 	if err != nil {
 		return err
 	}
@@ -357,17 +373,12 @@ func (processes *ProcessClient) Logs(ctx context.Context, process *workspacesv1a
 		return fmt.Errorf("kubernetes REST config is required for suspended transcript reads")
 	}
 	helperName := boundedDNSName(process.Name + "-logs")
-	automount := false
-	helper := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: helperName, Namespace: process.Namespace},
-		Spec: corev1.PodSpec{
-			AutomountServiceAccountToken: &automount, RestartPolicy: corev1.RestartPolicyNever,
-			Containers: []corev1.Container{{
-				Name: "reader", Image: image, Command: []string{"sh", "-c", "cat \"$1\"", "rc-log-reader", "/home/agent/" + process.Status.TranscriptPath},
-				VolumeMounts: []corev1.VolumeMount{{Name: "home", MountPath: WorkspaceHomePath, ReadOnly: true}},
-			}},
-			Volumes: []corev1.Volume{{Name: "home", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claimName, ReadOnly: true}}}},
-		},
+	helper, err := volume.runtime.TranscriptReaderPod(rcplatform.TranscriptPodIntent{
+		Metadata: metav1.ObjectMeta{Name: helperName, Namespace: process.Namespace},
+		Image:    volume.image, HomeClaim: volume.claim, ProcessID: process.Name,
+	})
+	if err != nil {
+		return fmt.Errorf("build AgentProcess log helper Pod: %w", err)
 	}
 	if err := controllerutil.SetControllerReference(process, helper, processes.Kube.Scheme()); err != nil {
 		return fmt.Errorf("set AgentProcess owner on log helper Pod: %w", err)
@@ -399,28 +410,46 @@ func (processes *ProcessClient) Logs(ctx context.Context, process *workspacesv1a
 	return err
 }
 
-func (processes *ProcessClient) logVolume(ctx context.Context, process *workspacesv1alpha1.AgentProcess) (string, string, error) {
+type transcriptVolume struct {
+	claim, image string
+	runtime      rcplatform.Runtime
+}
+
+func (processes *ProcessClient) logVolume(ctx context.Context, process *workspacesv1alpha1.AgentProcess) (transcriptVolume, error) {
 	switch process.Spec.TargetRef.Kind {
 	case workspacesv1alpha1.AgentProcessTargetWorkspace:
 		workspace := new(workspacesv1alpha1.Workspace)
 		key := types.NamespacedName{Name: process.Spec.TargetRef.Name, Namespace: process.Namespace}
 		if err := processes.Kube.Get(ctx, key, workspace); err != nil {
-			return "", "", fmt.Errorf("get AgentProcess Workspace for logs: %w", err)
+			return transcriptVolume{}, fmt.Errorf("get AgentProcess Workspace for logs: %w", err)
 		}
-		return workspace.Status.HomeVolumeClaimName, workspace.Status.RuntimeImage, nil
+		platform, err := rcplatform.Resolve(rcplatform.Target{OS: workspace.Spec.OS, Placement: rcplatform.Placement{
+			NodeSelector: workspace.Spec.NodeSelector, Tolerations: workspace.Spec.Tolerations,
+			Affinity: workspace.Spec.Affinity, RuntimeClassName: workspace.Spec.RuntimeClassName,
+		}})
+		if err != nil {
+			return transcriptVolume{}, fmt.Errorf("resolve AgentProcess Workspace log platform: %w", err)
+		}
+		return transcriptVolume{claim: workspace.Status.HomeVolumeClaimName, image: workspace.Status.RuntimeImage, runtime: platform}, nil
 	case workspacesv1alpha1.AgentProcessTargetWorkspaceEnvironment:
 		environment := new(workspacesv1alpha1.WorkspaceEnvironment)
 		key := types.NamespacedName{Name: process.Spec.TargetRef.Name, Namespace: process.Namespace}
 		if err := processes.Kube.Get(ctx, key, environment); err != nil {
-			return "", "", fmt.Errorf("get AgentProcess WorkspaceEnvironment for logs: %w", err)
+			return transcriptVolume{}, fmt.Errorf("get AgentProcess WorkspaceEnvironment for logs: %w", err)
 		}
 		claimName := environment.Status.DraftVolumeClaimName
 		if claimName == "" {
 			claimName = environment.Status.CurrentVolumeClaimName
 		}
-		return claimName, environment.Spec.Image, nil
+		platform, err := rcplatform.Resolve(rcplatform.Target{OS: environment.Spec.OS, Placement: rcplatform.Placement{
+			NodeSelector: environment.Spec.NodeSelector, Tolerations: environment.Spec.Tolerations,
+		}})
+		if err != nil {
+			return transcriptVolume{}, fmt.Errorf("resolve AgentProcess WorkspaceEnvironment log platform: %w", err)
+		}
+		return transcriptVolume{claim: claimName, image: environment.Spec.Image, runtime: platform}, nil
 	default:
-		return "", "", fmt.Errorf("agent process %s has unsupported target kind %s", process.Name, process.Spec.TargetRef.Kind)
+		return transcriptVolume{}, fmt.Errorf("agent process %s has unsupported target kind %s", process.Name, process.Spec.TargetRef.Kind)
 	}
 }
 
@@ -435,10 +464,11 @@ func processPhaseTerminal(phase workspacesv1alpha1.AgentProcessPhase) bool {
 }
 
 func AgentTypeForCommand(command string) string {
-	name := strings.ToLower(strings.TrimSpace(command))
+	name := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(command), `\`, "/"))
 	if slash := strings.LastIndex(name, "/"); slash >= 0 {
 		name = name[slash+1:]
 	}
+	name = strings.TrimSuffix(strings.TrimSuffix(name, ".exe"), ".cmd")
 	switch name {
 	case "codex", "claude", "opencode", "gemini", "orca":
 		return name

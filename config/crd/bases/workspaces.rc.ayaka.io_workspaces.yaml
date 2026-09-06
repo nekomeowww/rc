@@ -1328,6 +1328,18 @@ spec:
                   type: string
                 description: nodeSelector constrains runtime placement.
                 type: object
+              os:
+                default: linux
+                description: |-
+                  os selects the container operating system. It must match the image and
+                  any source Environment; changing it would invalidate persistent home state.
+                enum:
+                - linux
+                - windows
+                type: string
+                x-kubernetes-validations:
+                - message: Workspace OS is immutable
+                  rule: self == oldSelf
               resources:
                 description: resources are shared by all processes in the runtime
                   Pod.

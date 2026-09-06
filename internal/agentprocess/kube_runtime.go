@@ -55,21 +55,21 @@ func (runtime *KubeRuntime) Start(ctx context.Context, target Target, request St
 		return State{}, fmt.Errorf("encode Agent Process start request: %w", err)
 	}
 
-	return runtime.stateCommand(ctx, target, []string{runtimeBridgeCommand, runtimeProcessGroup, "start", runtimeSocketFlag, DefaultSocketPath}, bytes.NewReader(data))
+	return runtime.stateCommand(ctx, target, bridgeCommand(target, "start"), bytes.NewReader(data))
 }
 
 func (runtime *KubeRuntime) Inspect(ctx context.Context, target Target, id string) (State, error) {
-	return runtime.stateCommand(ctx, target, []string{runtimeBridgeCommand, runtimeProcessGroup, "inspect", id, runtimeSocketFlag, DefaultSocketPath}, nil)
+	return runtime.stateCommand(ctx, target, bridgeCommand(target, "inspect", id), nil)
 }
 
 func (runtime *KubeRuntime) Stop(ctx context.Context, target Target, id string) (State, error) {
-	return runtime.stateCommand(ctx, target, []string{runtimeBridgeCommand, runtimeProcessGroup, "stop", id, runtimeSocketFlag, DefaultSocketPath}, nil)
+	return runtime.stateCommand(ctx, target, bridgeCommand(target, "stop", id), nil)
 }
 
 func (runtime *KubeRuntime) Attach(ctx context.Context, target Target, id string, clientID string, input io.Reader, output io.Writer, _ bool, rows uint16, columns uint16) error {
 	// The child owns the PTY. The Kubernetes exec bridge stays a transparent
 	// byte stream so it does not introduce a second terminal line discipline.
-	command := []string{runtimeBridgeCommand, runtimeProcessGroup, "attach", id, runtimeSocketFlag, DefaultSocketPath, runtimeClientIDFlag, clientID}
+	command := append(bridgeCommand(target, "attach", id), runtimeClientIDFlag, clientID)
 	if rows > 0 && columns > 0 {
 		command = append(command, "--rows", fmt.Sprint(rows), "--columns", fmt.Sprint(columns))
 	}
@@ -77,12 +77,26 @@ func (runtime *KubeRuntime) Attach(ctx context.Context, target Target, id string
 }
 
 func (runtime *KubeRuntime) Logs(ctx context.Context, target Target, id string, output io.Writer) error {
-	return runtime.executor.Exec(ctx, target, []string{runtimeBridgeCommand, runtimeProcessGroup, "logs", id, runtimeSocketFlag, DefaultSocketPath}, nil, output, output, false)
+	return runtime.executor.Exec(ctx, target, bridgeCommand(target, "logs", id), nil, output, output, false)
 }
 
 func (runtime *KubeRuntime) Resize(ctx context.Context, target Target, id string, clientID string, rows uint16, columns uint16) error {
-	command := []string{runtimeBridgeCommand, runtimeProcessGroup, "resize", id, runtimeSocketFlag, DefaultSocketPath, runtimeClientIDFlag, clientID, "--rows", fmt.Sprint(rows), "--columns", fmt.Sprint(columns)}
+	command := append(bridgeCommand(target, "resize", id), runtimeClientIDFlag, clientID, "--rows", fmt.Sprint(rows), "--columns", fmt.Sprint(columns))
 	return runtime.executor.Exec(ctx, target, command, nil, io.Discard, io.Discard, false)
+}
+
+func bridgeCommand(target Target, arguments ...string) []string {
+	executable := target.Executable
+	if executable == "" {
+		executable = runtimeBridgeCommand
+	}
+	endpoint := target.Endpoint
+	if endpoint == "" {
+		endpoint = DefaultSocketPath
+	}
+	command := []string{executable, runtimeProcessGroup}
+	command = append(command, arguments...)
+	return append(command, runtimeSocketFlag, endpoint)
 }
 
 func (runtime *KubeRuntime) stateCommand(ctx context.Context, target Target, command []string, input io.Reader) (State, error) {

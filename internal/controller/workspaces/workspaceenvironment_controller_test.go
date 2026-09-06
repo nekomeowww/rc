@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -93,17 +94,18 @@ func TestEnvironmentEditorPodSupportsPasswordlessSudo(t *testing.T) {
 		},
 	}
 
-	pod := environmentEditorPod(environment, "sudo-draft-1")
+	pod, err := environmentEditorPod(environment, "sudo-draft-1")
+	requirements.NoError(err)
 	requirements.NotNil(pod.Spec.SecurityContext, "editor Pod has a security context")
 	requirements.NotNil(pod.Spec.SecurityContext.FSGroupChangePolicy, "editor skips recursive ownership changes when the volume root already matches")
 	assertions.Equal(corev1.FSGroupChangeOnRootMismatch, *pod.Spec.SecurityContext.FSGroupChangePolicy)
 	requirements.Len(pod.Spec.InitContainers, 1, "editor Pod has one sudoers setup container")
 	setup := pod.Spec.InitContainers[0]
-	assertions.Equal(environmentSudoersContainerName, setup.Name, "use a dedicated sudoers setup container")
+	assertions.Equal("configure-sudo", setup.Name, "use a dedicated sudoers setup container")
 	assertions.Equal(environment.Spec.Image, setup.Image, "configure sudoers with the Environment image")
 	assertions.Equal([]string{"/bin/sh", "-ec"}, setup.Command, "run the fixed sudoers setup script")
 	requirements.Len(setup.Args, 1, "sudoers setup has one fixed script")
-	assertions.Contains(setup.Args[0], environmentSudoersRule, "install the agent passwordless sudo rule")
+	assertions.Contains(setup.Args[0], "agent ALL=(ALL:ALL) NOPASSWD:ALL", "install the agent passwordless sudo rule")
 	requirements.NotNil(setup.SecurityContext, "sudoers setup has a SecurityContext")
 	requirements.NotNil(setup.SecurityContext.RunAsUser, "sudoers setup declares its user")
 	requirements.NotNil(setup.SecurityContext.RunAsNonRoot, "sudoers setup overrides the Pod non-root policy")
@@ -112,9 +114,9 @@ func TestEnvironmentEditorPodSupportsPasswordlessSudo(t *testing.T) {
 	assertions.False(*setup.SecurityContext.RunAsNonRoot, "allow the bounded setup container to run as root")
 	assertions.False(*setup.SecurityContext.AllowPrivilegeEscalation, "setup does not need to gain more privileges")
 	requirements.NotNil(setup.SecurityContext.Capabilities, "sudoers setup declares capabilities")
-	assertions.Equal([]corev1.Capability{allLinuxCapabilities}, setup.SecurityContext.Capabilities.Drop, "drop all setup capabilities")
+	assertions.Equal([]corev1.Capability{"ALL"}, setup.SecurityContext.Capabilities.Drop, "drop all setup capabilities")
 	requirements.Len(setup.VolumeMounts, 1, "sudoers setup mounts only its output volume")
-	assertions.Equal(environmentSudoersVolumeName, setup.VolumeMounts[0].Name, "write into the editor-only sudoers volume")
+	assertions.Equal("sudoers", setup.VolumeMounts[0].Name, "write into the editor-only sudoers volume")
 
 	requirements.Len(pod.Spec.Containers, 1, "editor Pod has one supervisor container")
 	requirements.NotNil(pod.Spec.Containers[0].SecurityContext, "editor container has a SecurityContext")
@@ -122,11 +124,45 @@ func TestEnvironmentEditorPodSupportsPasswordlessSudo(t *testing.T) {
 	assertions.True(*pod.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation, "allow passwordless sudo to execute its setuid helper")
 	assertions.Nil(pod.Spec.Containers[0].SecurityContext.Capabilities, "retain the runtime default capability set for useful container root")
 	requirements.Len(pod.Spec.Containers[0].VolumeMounts, 3, "editor mounts home, runtime state, and sudoers")
-	assertions.Equal(environmentSudoersVolumeName, pod.Spec.Containers[0].VolumeMounts[2].Name, "inject sudoers only into the editor")
+	assertions.Equal("sudoers", pod.Spec.Containers[0].VolumeMounts[2].Name, "inject sudoers only into the editor")
 	assertions.True(pod.Spec.Containers[0].VolumeMounts[2].ReadOnly, "keep injected sudoers immutable in the editor")
 	requirements.Len(pod.Spec.Volumes, 3, "editor Pod has an isolated sudoers volume")
-	assertions.Equal(environmentSudoersVolumeName, pod.Spec.Volumes[2].Name, "name the editor-only sudoers volume")
+	assertions.Equal("sudoers", pod.Spec.Volumes[2].Name, "name the editor-only sudoers volume")
 	requirements.NotNil(pod.Spec.Volumes[2].EmptyDir, "discard injected sudoers with the editor Pod")
+}
+
+func TestWorkspaceEnvironmentReplacesEditorAfterSpecChange(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
+	environment := &workspacesv1alpha1.WorkspaceEnvironment{
+		ObjectMeta: metav1.ObjectMeta{Name: "editor-update", Namespace: testNamespace, UID: types.UID("environment-uid"), Generation: 2},
+		Spec:       workspacesv1alpha1.WorkspaceEnvironmentSpec{Image: "workspace:v2"},
+		Status: workspacesv1alpha1.WorkspaceEnvironmentStatus{
+			ObservedGeneration: 1, EditorPodName: "editor-update-editor",
+		},
+	}
+	editor, err := environmentEditorPod(environment, "editor-update-draft-1")
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(environment, editor, scheme))
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(environment, editor).
+		WithObjects(environment, editor).
+		Build()
+	reconciler := &WorkspaceEnvironmentReconciler{Client: kubeClient, Scheme: scheme}
+	key := types.NamespacedName{Name: environment.Name, Namespace: environment.Namespace}
+
+	_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+	require.NoError(t, err)
+	assert.Error(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(editor), new(corev1.Pod)), "remove the editor rendered for the previous generation")
+	persisted := new(workspacesv1alpha1.WorkspaceEnvironment)
+	require.NoError(t, kubeClient.Get(ctx, key, persisted))
+	draftReady := meta.FindStatusCondition(persisted.Status.Conditions, workspacesv1alpha1.WorkspaceEnvironmentConditionDraftReady)
+	require.NotNil(t, draftReady)
+	assert.Equal(t, metav1.ConditionFalse, draftReady.Status)
+	assert.Equal(t, "ReplacingEditor", draftReady.Reason)
 }
 
 func TestWorkspaceEnvironmentReconcileCommitsIdleDraft(t *testing.T) {
@@ -152,7 +188,8 @@ func TestWorkspaceEnvironmentReconcileCommitsIdleDraft(t *testing.T) {
 	}
 	current := environmentVolumeClaim(environment, "python-current-1", "")
 	draft := environmentVolumeClaim(environment, "python-draft-2", current.Name)
-	editor := environmentEditorPod(environment, draft.Name)
+	editor, err := environmentEditorPod(environment, draft.Name)
+	requirements.NoError(err)
 	requirements.NoError(controllerutil.SetControllerReference(environment, current, scheme), "own current PVC")
 	requirements.NoError(controllerutil.SetControllerReference(environment, draft, scheme), "own draft PVC")
 	requirements.NoError(controllerutil.SetControllerReference(environment, editor, scheme), "own editor Pod")
@@ -165,7 +202,7 @@ func TestWorkspaceEnvironmentReconcileCommitsIdleDraft(t *testing.T) {
 	reconciler := &WorkspaceEnvironmentReconciler{Client: kubeClient, Scheme: scheme}
 	key := types.NamespacedName{Name: environment.Name, Namespace: environment.Namespace}
 
-	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+	_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 	requirements.NoError(err, "stop editor before commit")
 	deletedEditor := new(corev1.Pod)
 	assertions.Error(kubeClient.Get(ctx, types.NamespacedName{Name: editor.Name, Namespace: editor.Namespace}, deletedEditor), "editor Pod is removed before promotion")

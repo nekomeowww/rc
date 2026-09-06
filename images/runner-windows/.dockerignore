@@ -1,0 +1,6 @@
+**
+!Dockerfile
+!entrypoint.ps1
+!register-fonts.ps1
+!assets/
+!assets/**

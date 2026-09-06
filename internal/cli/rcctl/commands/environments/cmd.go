@@ -39,6 +39,7 @@ import (
 )
 
 type createOptions struct {
+	placement    command.PlacementOptions
 	image        string
 	storageClass string
 	size         string
@@ -72,6 +73,10 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use: "create NAME", Short: "Create a reusable Environment current volume", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			osName, tolerations, err := options.placement.Resolve()
+			if err != nil {
+				return err
+			}
 			config, namespace, err := kubeconfigFlags.Resolve()
 			if err != nil {
 				return err
@@ -87,6 +92,7 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			environment := &workspacesv1alpha1.WorkspaceEnvironment{
 				ObjectMeta: metav1.ObjectMeta{Name: args[0], Namespace: namespace},
 				Spec: workspacesv1alpha1.WorkspaceEnvironmentSpec{
+					OS: osName, NodeSelector: options.placement.NodeSelector, Tolerations: tolerations,
 					Image:   options.image,
 					Storage: workspacesv1alpha1.PersistentStorageSpec{StorageClassName: options.storageClass, Size: size},
 				},
@@ -109,6 +115,7 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			return waitEnvironmentReady(cmd.Context(), clusterClient.Kube, environment)
 		},
 	}
+	options.placement.AddFlags(cmd.Flags())
 	cmd.Flags().StringVar(&options.image, "image", "", "Workspace runner image")
 	cmd.Flags().StringVar(&options.storageClass, "storage-class", "", "Clone-capable StorageClass")
 	cmd.Flags().StringVar(&options.size, "size", "20Gi", "Environment home volume size")

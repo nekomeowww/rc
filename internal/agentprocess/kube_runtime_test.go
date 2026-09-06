@@ -81,3 +81,20 @@ func TestKubeRuntimeAttachesWithInitialTerminalSize(t *testing.T) {
 		"send the initial terminal size with the attach request",
 	)
 }
+
+func TestKubeRuntimeUsesWindowsTargetFromAnyHost(t *testing.T) {
+	t.Parallel()
+	executor := &recordingPodExecutor{output: State{ID: testProcessID, Phase: "Running"}}
+	runtime := NewKubeRuntime(executor)
+	target := Target{Namespace: "windows-test", Pod: "windows", Container: runtimeBridgeCommand, Executable: "rc-kube.exe", Endpoint: `\\.\pipe\rc-kube`}
+	_, err := runtime.Start(context.Background(), target, StartRequest{ID: testProcessID, Command: []string{"electron.exe", "main.cjs"}})
+	require.NoError(t, err)
+	require.Len(t, executor.command, 5)
+	assert.Equal(t, "rc-kube.exe", executor.command[0])
+	assert.Equal(t, `\\.\pipe\rc-kube`, executor.command[4])
+	err = runtime.Attach(context.Background(), target, testProcessID, "terminal-01", nil, io.Discard, true, 24, 80)
+	require.NoError(t, err)
+	require.Len(t, executor.command, 12)
+	assert.Equal(t, "rc-kube.exe", executor.command[0])
+	assert.Equal(t, `\\.\pipe\rc-kube`, executor.command[5])
+}

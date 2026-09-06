@@ -17,8 +17,12 @@ limitations under the License.
 package rckube
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -26,6 +30,7 @@ import (
 	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
 	"github.com/nekomeowww/rc/internal/lifecycle"
 	runtime "github.com/nekomeowww/rc/internal/rckube"
+	"github.com/nekomeowww/rc/internal/rcnative"
 )
 
 // NewCommand creates the in-Pod runtime and bridge command tree.
@@ -36,7 +41,7 @@ func NewCommand() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
-	root.AddCommand(newServeCommand(), newProcessCommand(), newLifecycleCommand())
+	root.AddCommand(newServeCommand(), newProcessCommand(), newLifecycleCommand(), newHealthCommand(), newTranscriptCommand())
 
 	return root
 }
@@ -67,18 +72,36 @@ func newServeCommand() *cobra.Command {
 	var stateDirectory string
 	var stopGrace time.Duration
 	var maxTranscriptBytes int64
+	var initializeActions string
 	command := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the Workspace process supervisor",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			supervisor := runtime.NewSupervisor(stateDirectory, stopGrace, runtime.WithMaxTranscriptBytes(maxTranscriptBytes))
+			if err := os.MkdirAll(rcnative.Current().Workspace, 0o755); err != nil {
+				return err
+			}
+			if initializeActions != "" {
+				actions, err := lifecycle.Decode(initializeActions)
+				if err != nil {
+					return err
+				}
+				if err := lifecycle.Run(command.Context(), actions, nil, command.OutOrStdout(), command.ErrOrStderr()); err != nil {
+					return err
+				}
+			}
+			native := rcnative.Current()
+			supervisor := runtime.NewSupervisor(stateDirectory, stopGrace,
+				runtime.WithRoots(native.Home, native.Workspace, native.Run),
+				runtime.WithMaxTranscriptBytes(maxTranscriptBytes),
+			)
 			return runtime.NewServer(supervisor).Serve(command.Context(), socketPath)
 		},
 	}
-	command.Flags().StringVar(&socketPath, "socket", processruntime.DefaultSocketPath, "Unix socket path")
-	command.Flags().StringVar(&stateDirectory, "state-dir", "/home/agent/.rc/processes", "Persistent process state directory")
-	command.Flags().DurationVar(&stopGrace, "stop-grace", 10*time.Second, "SIGTERM grace period before SIGKILL")
+	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
+	command.Flags().StringVar(&stateDirectory, "state-dir", rcnative.Current().StateDirectory(), "Persistent process state directory")
+	command.Flags().StringVar(&initializeActions, "initialize-actions", "", "Lifecycle actions run in the runtime container before readiness")
+	command.Flags().DurationVar(&stopGrace, "stop-grace", 10*time.Second, "Process stop grace period before forced tree termination")
 	command.Flags().Int64Var(&maxTranscriptBytes, "max-transcript-bytes", 64<<20, "Maximum durable bytes retained per process; zero disables")
 
 	return command
@@ -110,7 +133,7 @@ func newStartCommand() *cobra.Command {
 			return json.NewEncoder(command.OutOrStdout()).Encode(state)
 		},
 	}
-	command.Flags().StringVar(&socketPath, "socket", processruntime.DefaultSocketPath, "Unix socket path")
+	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
 
 	return command
 }
@@ -137,7 +160,7 @@ func newStateCommand(action string) *cobra.Command {
 			return json.NewEncoder(command.OutOrStdout()).Encode(state)
 		},
 	}
-	command.Flags().StringVar(&socketPath, "socket", processruntime.DefaultSocketPath, "Unix socket path")
+	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
 
 	return command
 }
@@ -155,7 +178,7 @@ func newAttachCommand() *cobra.Command {
 			return runtime.NewClient(socketPath).Attach(command.Context(), arguments[0], clientID, command.InOrStdin(), command.OutOrStdout(), rows, columns)
 		},
 	}
-	command.Flags().StringVar(&socketPath, "socket", processruntime.DefaultSocketPath, "Unix socket path")
+	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
 	command.Flags().StringVar(&clientID, "client-id", "", "Stable identity for foreground terminal arbitration")
 	command.Flags().Uint16Var(&rows, "rows", 0, "Initial terminal rows")
 	command.Flags().Uint16Var(&columns, "columns", 0, "Initial terminal columns")
@@ -173,7 +196,7 @@ func newLogsCommand() *cobra.Command {
 			return runtime.NewClient(socketPath).Logs(command.Context(), arguments[0], command.OutOrStdout())
 		},
 	}
-	command.Flags().StringVar(&socketPath, "socket", processruntime.DefaultSocketPath, "Unix socket path")
+	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
 
 	return command
 }
@@ -191,7 +214,7 @@ func newResizeCommand() *cobra.Command {
 			return runtime.NewClient(socketPath).Resize(command.Context(), arguments[0], clientID, rows, columns)
 		},
 	}
-	command.Flags().StringVar(&socketPath, "socket", processruntime.DefaultSocketPath, "Unix socket path")
+	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
 	command.Flags().Uint16Var(&rows, "rows", 0, "Terminal rows")
 	command.Flags().Uint16Var(&columns, "columns", 0, "Terminal columns")
 	command.Flags().StringVar(&clientID, "client-id", "", "Attach client controlling the shared viewport")
@@ -199,4 +222,39 @@ func newResizeCommand() *cobra.Command {
 	_ = command.MarkFlagRequired("columns")
 
 	return command
+}
+
+func newHealthCommand() *cobra.Command {
+	var address string
+	command := &cobra.Command{Use: "health", Short: "Check local supervisor readiness", Args: cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			ctx, cancel := context.WithTimeout(command.Context(), 2*time.Second)
+			defer cancel()
+			return runtime.NewClient(address).Ping(ctx)
+		}}
+	command.Flags().StringVar(&address, "socket", rcnative.Current().Endpoint, "Local supervisor endpoint")
+	return command
+}
+
+// Read a transcript without exposing a general home-directory file reader.
+func newTranscriptCommand() *cobra.Command {
+	return &cobra.Command{Use: "transcript PROCESS-ID", Short: "Read a retained process transcript", Args: cobra.ExactArgs(1),
+		RunE: func(command *cobra.Command, arguments []string) error {
+			processID := arguments[0]
+			if filepath.Base(processID) != processID || processID == "." || processID == ".." {
+				return fmt.Errorf("process ID must be one safe path segment")
+			}
+			root, err := os.OpenRoot(rcnative.Current().StateDirectory())
+			if err != nil {
+				return err
+			}
+			defer func() { _ = root.Close() }()
+			file, err := root.Open(filepath.Join(processID, "transcript.log"))
+			if err != nil {
+				return err
+			}
+			defer func() { _ = file.Close() }()
+			_, err = io.Copy(command.OutOrStdout(), file)
+			return err
+		}}
 }

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -85,8 +84,8 @@ func (options options) validate() error {
 		if options.mountPath == "" {
 			return errors.New("flag --mount-path is required")
 		}
-		if !filepath.IsAbs(options.mountPath) || filepath.Clean(options.mountPath) != options.mountPath || options.mountPath == string(filepath.Separator) {
-			return fmt.Errorf("credential mount path %q must be a clean absolute file path", options.mountPath)
+		if err := credentialservice.ValidateMountPath(options.mountPath); err != nil {
+			return err
 		}
 		_, err := parseCredentialEnvironment(options.environment)
 		return err

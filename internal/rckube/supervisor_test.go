@@ -1,3 +1,5 @@
+//go:build !windows
+
 /*
 Copyright 2026.
 
@@ -31,10 +33,11 @@ import (
 )
 
 const (
-	testProcessUID          = "uid"
-	testTrueCommand         = "true"
-	testCredentialsVariable = "RC_CREDENTIALS_DIR"
-	testCredentialDataPath  = "credentials/custom/data"
+	testProcessUID           = "uid"
+	testTrueCommand          = "true"
+	testCredentialsVariable  = "RC_CREDENTIALS_DIR"
+	testCredentialDataPath   = "credentials/custom/data"
+	testGitHubCredentialPath = "credentials/github/token"
 )
 
 func TestSupervisorRunsCommandOnceAndPersistsTranscript(t *testing.T) {
@@ -95,6 +98,14 @@ func TestSupervisorRejectsProcessIDThatEscapesStateDirectory(t *testing.T) {
 	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
 	_, err := supervisor.Start(processruntime.StartRequest{ID: "../escape", UID: testProcessUID, Command: []string{testTrueCommand}})
 	require.EqualError(t, err, "process ID must be one safe path segment")
+}
+
+func TestWriteCredentialFilesRejectsParentTraversal(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	err := writeCredentialFiles(root, map[string][]byte{"../outside": []byte("secret")})
+	require.Error(t, err)
+	assert.NoFileExists(t, filepath.Join(filepath.Dir(root), "outside"))
 }
 
 func TestSupervisorDoesNotConsumeIdentityWhenRequestFailsBeforeLaunch(t *testing.T) {
@@ -164,7 +175,7 @@ func TestSupervisorKeepsCredentialsOutOfPersistentState(t *testing.T) {
 	request := processruntime.StartRequest{
 		ID: "credential-scope", UID: testProcessUID, Command: []string{"sh", "-c", "cat \"$RC_CREDENTIALS_DIR/github/token\""},
 		Environment: map[string]string{testCredentialsVariable: credentialsRoot}, RuntimeDirectory: runtimeDirectory,
-		CredentialsRoot: credentialsRoot, CredentialFiles: map[string][]byte{"credentials/github/token": []byte("secret")},
+		CredentialsRoot: credentialsRoot, CredentialFiles: map[string][]byte{testGitHubCredentialPath: []byte("secret")},
 	}
 	_, err := supervisor.Start(request)
 	requirements.NoError(err, "start credential consumer")
@@ -340,7 +351,7 @@ func TestSharedCredentialProjectionSurvivesAnotherProcessExit(t *testing.T) {
 	runtimeRoot := t.TempDir()
 	credentialsRoot := filepath.Join(runtimeRoot, "credentials")
 	supervisor := NewSupervisor(stateDirectory, 100*time.Millisecond)
-	credentialFiles := map[string][]byte{"credentials/github/token": []byte("secret")}
+	credentialFiles := map[string][]byte{testGitHubCredentialPath: []byte("secret")}
 	first := processruntime.StartRequest{
 		ID: "first", UID: "first-uid", Command: []string{"sh", "-c", "sleep 0.4; cat \"$RC_CREDENTIALS_DIR/github/token\""},
 		Environment: map[string]string{testCredentialsVariable: credentialsRoot}, RuntimeDirectory: filepath.Join(runtimeRoot, "first"),
@@ -405,9 +416,43 @@ func TestProcessOutputDisconnectsSlowClientInsteadOfDroppingBytes(t *testing.T) 
 	requirements.False(open, "close lagging client stream explicitly")
 }
 
+func TestSupervisorDerivesPathsFromLogicalRequest(t *testing.T) {
+	t.Parallel()
+	requirements := require.New(t)
+	home := t.TempDir()
+	workspace := t.TempDir()
+	runtimeRoot := t.TempDir()
+	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond, WithRoots(home, workspace, runtimeRoot))
+	t.Cleanup(supervisor.Shutdown)
+	request := processruntime.StartRequest{
+		ID: "logical", UID: testProcessUID,
+		Command:           []string{"sh", "-c", `printf '%s\n%s\n%s\n' "$PWD" "$CODEX_HOME" "$RC_CREDENTIALS_DIR"; cat "$CODEX_HOME/auth.json"; cat "$RC_CREDENTIALS_DIR/github/token"`},
+		DefaultDirectory:  processruntime.DefaultDirectoryHome,
+		Agent:             &processruntime.AgentRef{Type: "codex", Credential: "default"},
+		ExposeCredentials: true,
+		CredentialFiles: map[string][]byte{
+			"agent/auth.json":        []byte("agent-secret\n"),
+			testGitHubCredentialPath: []byte("generic-secret\n"),
+		},
+	}
+	_, err := supervisor.Start(request)
+	requirements.NoError(err)
+	requirements.Eventually(func() bool {
+		state, inspectErr := supervisor.Inspect(request.ID)
+		return inspectErr == nil && state.Phase == phaseExited
+	}, 3*time.Second, 10*time.Millisecond)
+	var transcript bytes.Buffer
+	requirements.NoError(supervisor.Logs(request.ID, &transcript))
+	assert.Contains(t, transcript.String(), home+"\n")
+	assert.Contains(t, transcript.String(), filepath.Join(home, ".rc", "agents", "codex", "default")+"\n")
+	assert.Contains(t, transcript.String(), filepath.Join(runtimeRoot, "credentials")+"\n")
+	assert.Contains(t, transcript.String(), "agent-secret\n")
+	assert.Contains(t, transcript.String(), "generic-secret\n")
+}
+
 func TestRecentInputControlsSharedTerminalViewport(t *testing.T) {
 	t.Parallel()
-	process := &supervisedProcess{terminal: os.Stdin, foregroundClient: "first"}
+	process := &supervisedProcess{terminal: recordingTerminal{}, foregroundClient: "first"}
 	supervisor := &Supervisor{processes: map[string]*supervisedProcess{"process": process}}
 	require.NoError(t, supervisor.Resize("process", "second", 24, 80), "remember background client viewport")
 	require.Equal(t, "first", process.foregroundClient, "background resize does not steal foreground")
@@ -419,6 +464,10 @@ func TestRecentInputControlsSharedTerminalViewport(t *testing.T) {
 	require.NoError(t, supervisor.Resize("process", "first", 24, 80), "remember previous client viewport without stealing foreground")
 	require.Equal(t, "second", process.foregroundClient, "resize alone does not change foreground")
 }
+
+type recordingTerminal struct{}
+
+func (recordingTerminal) Resize(int, int) error { return nil }
 
 func TestTerminalAttachStreamsRawPTYBytes(t *testing.T) {
 	t.Parallel()

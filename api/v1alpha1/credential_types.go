@@ -142,7 +142,7 @@ type CredentialFile struct {
 	DataRef SecretKeyReference `json:"dataRef"`
 
 	// mountPath is the absolute file path exposed while the process is alive.
-	// +kubebuilder:validation:Pattern="^/.*"
+	// +kubebuilder:validation:Pattern="^(/|[A-Za-z]:[/\\\\]).*"
 	// +required
 	MountPath string `json:"mountPath"`
 }

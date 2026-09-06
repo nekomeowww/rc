@@ -38,10 +38,15 @@ kubectl apply -f https://github.com/nekomeowww/rc/releases/latest/download/insta
 kubectl rollout status deployment/rc-controller-manager -n rc-system
 ```
 
-The released manifest uses matching versions of the public controller and runner images:
+Each release publishes matching versions of these public images:
 
 - `ghcr.io/nekomeowww/rc/controller`
 - `ghcr.io/nekomeowww/rc/runner`
+- `ghcr.io/nekomeowww/rc/runner-windows`
+
+The install manifest configures the controller and Linux runner. Select the
+experimental Windows runner explicitly on a Windows Workspace or through the
+manager's `--windows-runner-image` flag.
 
 Your production StorageClass must support CSI PVC cloning. The local Kind setup described below is intentionally disposable and must not be used for production data.
 
@@ -236,6 +241,7 @@ Design decisions and the detailed runtime model live under [`docs/`](docs/).
 Experimental platform guides:
 
 - [Attach a native Windows 11 Kubernetes worker](docs/guides/experimental-windows-11-worker.md)
+- [Run Windows Workspaces](docs/guides/windows-workspaces.md)
 
 ## License
 

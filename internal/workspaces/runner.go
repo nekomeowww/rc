@@ -48,6 +48,9 @@ type MountRequest struct {
 }
 
 type RunRequest struct {
+	OS                           corev1.OSName
+	NodeSelector                 map[string]string
+	Tolerations                  []corev1.Toleration
 	Namespace                    string
 	Workspace                    string
 	DefaultWorkspace             string
@@ -113,6 +116,10 @@ func (runner *Runner) Prepare(ctx context.Context, request RunRequest) (RunTarge
 }
 
 func (runner *Runner) validateExistingTarget(ctx context.Context, workspace *workspacesv1alpha1.Workspace, request RunRequest) error {
+	if request.OS != "" && request.OS != workspace.Spec.OS && (request.OS != corev1.Linux || workspace.Spec.OS != "") {
+		return fmt.Errorf("workspace %q has a different runtime OS", workspace.Name)
+	}
+
 	if request.Environment != "" {
 		if workspace.Spec.EnvironmentRef == nil || workspace.Spec.EnvironmentRef.Name != request.Environment {
 			return fmt.Errorf("workspace %q does not use WorkspaceEnvironment %q", workspace.Name, request.Environment)
@@ -213,6 +220,15 @@ func (runner *Runner) createTemporaryTarget(ctx context.Context, request RunRequ
 		if !meta.IsStatusConditionTrue(environment.Status.Conditions, workspacesv1alpha1.WorkspaceEnvironmentConditionReady) {
 			return RunTarget{}, fmt.Errorf("workspace environment %q is not Ready", environmentName)
 		}
+		if request.OS == "" {
+			request.OS = environment.Spec.OS
+		}
+		if len(request.NodeSelector) == 0 {
+			request.NodeSelector = environment.Spec.NodeSelector
+		}
+		if len(request.Tolerations) == 0 {
+			request.Tolerations = environment.Spec.Tolerations
+		}
 	}
 
 	mounts := make([]workspacesv1alpha1.WorkspaceMount, 0, len(request.Repositories)+len(request.Worktrees))
@@ -281,10 +297,17 @@ func (runner *Runner) createTemporaryTarget(ctx context.Context, request RunRequ
 	workspace := &workspacesv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{Name: workspaceName, Namespace: request.Namespace},
 		Spec: workspacesv1alpha1.WorkspaceSpec{
-			DesiredState: workspacesv1alpha1.WorkspaceDesiredStateRunning,
-			Image:        request.Image, Storage: request.Storage, Mounts: mounts, Resources: request.Resources,
-			ServiceAccountName: request.ServiceAccountName, AutomountServiceAccountToken: request.AutomountServiceAccountToken,
-			RetentionPolicy: workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit,
+			DesiredState:                 workspacesv1alpha1.WorkspaceDesiredStateRunning,
+			OS:                           request.OS,
+			NodeSelector:                 request.NodeSelector,
+			Tolerations:                  request.Tolerations,
+			Image:                        request.Image,
+			Storage:                      request.Storage,
+			Mounts:                       mounts,
+			Resources:                    request.Resources,
+			ServiceAccountName:           request.ServiceAccountName,
+			AutomountServiceAccountToken: request.AutomountServiceAccountToken,
+			RetentionPolicy:              workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit,
 		},
 	}
 	if environmentName != "" {

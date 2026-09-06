@@ -28,7 +28,7 @@ import (
 	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
 )
 
-// Client talks to one rc-kube Unix socket.
+// Client talks to one rc-kube local endpoint.
 type Client struct {
 	socketPath string
 }
@@ -107,8 +107,7 @@ func (client *Client) stateRequest(ctx context.Context, request protocolRequest)
 }
 
 func (client *Client) open(ctx context.Context, request protocolRequest) (net.Conn, *bufio.Reader, protocolResponse, error) {
-	dialer := new(net.Dialer)
-	connection, err := dialer.DialContext(ctx, "unix", client.socketPath)
+	connection, err := dialLocal(ctx, client.socketPath)
 	if err != nil {
 		return nil, nil, protocolResponse{}, fmt.Errorf("connect to rc-kube: %w", err)
 	}
@@ -153,4 +152,10 @@ func responseError(response protocolResponse) error {
 	default:
 		return errors.New(response.Error)
 	}
+}
+
+// Ping verifies that initialization finished and the supervisor accepts requests.
+func (client *Client) Ping(ctx context.Context) error {
+	_, err := client.stateRequest(ctx, protocolRequest{Action: "ping"})
+	return err
 }

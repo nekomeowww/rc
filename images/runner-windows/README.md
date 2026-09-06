@@ -21,6 +21,9 @@ binaries, then copy `bin/windows-amd64` to the Windows build machine.
 Stage assets on a Windows machine into the ignored `assets/` directory using
 `prepare-assets.ps1`. Supply only the dedicated tool installation directories;
 application source and user profiles do not belong in the build context.
+`prepare-ci-assets.ps1` downloads the public Node and Visual C++ inputs and
+uses the Git and font files installed on a GitHub-hosted Windows runner. It is
+used by pull-request image validation and tagged releases.
 
 The tested inputs are:
 

@@ -2,6 +2,8 @@ name: Tests
 
 on:
   push:
+    branches:
+      - main
   pull_request:
 
 permissions: {}
@@ -25,9 +27,10 @@ jobs:
 
       - name: Build
         run: |
-          go build -o rc-kube.exe ./cmd/rc-kube
+          New-Item -ItemType Directory -Force bin/windows-amd64 | Out-Null
+          go build -trimpath -o bin/windows-amd64/rc-kube.exe ./cmd/rc-kube
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          go build -o rcctl.exe ./cmd/rcctl
+          go build -trimpath -o bin/windows-amd64/rcctl.exe ./cmd/rcctl
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Test
@@ -40,6 +43,22 @@ jobs:
             ./internal/rckube `
             ./internal/rcnative `
             ./internal/rcplatform
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Prepare Windows runner assets
+        run: ./images/runner-windows/prepare-ci-assets.ps1 -RCBinaryDirectory bin/windows-amd64
+
+      - name: Start Windows Docker
+        run: |
+          if ((Get-Service docker).Status -ne 'Running') {
+            Start-Service docker
+          }
+          docker info
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build Windows runner image
+        run: |
+          docker build --target runner --tag rc-runner-windows:test images/runner-windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   test:

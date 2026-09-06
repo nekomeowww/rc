@@ -166,6 +166,12 @@ build: manifests generate fmt vet ## Build manager, rcctl, and rc-kube binaries.
 	go build -o bin/rcctl cmd/rcctl/main.go
 	go build -o bin/rc-kube cmd/rc-kube/main.go
 
+.PHONY: build-windows
+build-windows: ## Cross-compile the Windows amd64 runtime binaries for image staging.
+	mkdir -p bin/windows-amd64
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -o bin/windows-amd64/rcctl.exe ./cmd/rcctl
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -o bin/windows-amd64/rc-kube.exe ./cmd/rc-kube
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go

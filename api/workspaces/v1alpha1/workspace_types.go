@@ -105,6 +105,14 @@ type WorkspaceLifecycle struct {
 
 // WorkspaceSpec defines one persistent development machine.
 type WorkspaceSpec struct {
+	// os selects the container operating system. It must match the image and
+	// any source Environment; changing it would invalidate persistent home state.
+	// +kubebuilder:validation:Enum=linux;windows
+	// +kubebuilder:default=linux
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Workspace OS is immutable"
+	// +optional
+	OS corev1.OSName `json:"os,omitempty"`
+
 	// desiredState controls runtime compute while retaining persistent state.
 	// +kubebuilder:default=Running
 	// +optional

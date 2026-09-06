@@ -46,6 +46,7 @@ import (
 )
 
 type runOptions struct {
+	placement        command.PlacementOptions
 	workspace        string
 	temporary        bool
 	detach           bool
@@ -113,6 +114,7 @@ func newRunCommand(kubeconfigFlags *kubeconfig.Flags, tty bool) *cobra.Command {
 }
 
 func addRunFlags(cmd *cobra.Command, options *runOptions) {
+	options.placement.AddFlags(cmd.Flags())
 	cmd.Flags().StringVar(&options.workspace, "workspace", "", "Existing Workspace name")
 	cmd.Flags().BoolVar(&options.temporary, "temporary", false, "Create an isolated Workspace and delete it after the AgentProcess terminates")
 	cmd.MarkFlagsMutuallyExclusive("workspace", "temporary")
@@ -137,6 +139,10 @@ func addRunFlags(cmd *cobra.Command, options *runOptions) {
 
 //nolint:gocyclo // This command coordinates target, credential, environment, and terminal setup.
 func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []string, tty bool, options runOptions) (returnedErr error) {
+	osName, tolerations, placementErr := options.placement.Resolve()
+	if placementErr != nil {
+		return placementErr
+	}
 	if !options.temporary {
 		for _, name := range []string{"image", "storage-class", "size", "service-account", "no-service-account"} {
 			if cmd.Flags().Changed(name) {
@@ -170,6 +176,7 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 		return err
 	}
 	runRequest := workspaceservice.RunRequest{
+		OS: osName, NodeSelector: options.placement.NodeSelector, Tolerations: tolerations,
 		Namespace: namespace, Workspace: options.workspace, DefaultWorkspace: defaults.Workspace, Temporary: options.temporary,
 		Environment: options.environment, DefaultEnvironment: defaults.Environment,
 		Repositories: repositories, Worktrees: worktrees,

@@ -236,6 +236,7 @@ Design decisions and the detailed runtime model live under [`docs/`](docs/).
 Experimental platform guides:
 
 - [Attach a native Windows 11 Kubernetes worker](docs/guides/experimental-windows-11-worker.md)
+- [Run Windows Workspaces](docs/guides/windows-workspaces.md)
 
 ## License
 

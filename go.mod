@@ -3,7 +3,9 @@ module github.com/nekomeowww/rc
 go 1.26.0
 
 require (
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/briandowns/spinner v1.23.2
+	github.com/charmbracelet/x/conpty v0.2.0
 	github.com/creack/pty v1.1.24
 	github.com/jedib0t/go-pretty/v6 v6.8.3
 	github.com/onsi/ginkgo/v2 v2.27.4
@@ -12,6 +14,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.9
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/sys v0.40.0
 	golang.org/x/term v0.39.0
 	k8s.io/api v0.36.0
 	k8s.io/apimachinery v0.36.0
@@ -86,7 +89,6 @@ require (
 	golang.org/x/net v0.49.0 // indirect
 	golang.org/x/oauth2 v0.34.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.40.0 // indirect
 	golang.org/x/text v0.33.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	golang.org/x/tools v0.41.0 // indirect

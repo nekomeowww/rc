@@ -1,5 +1,8 @@
 # Running GUI Applications in rc
 
+For native Windows Electron workloads, use [Windows Workspaces](windows-workspaces.md).
+This guide covers the Linux Wayland runtime.
+
 This guide explains how to run GUI applications such as Electron in an rc
 Workspace and capture their output with AUV.
 

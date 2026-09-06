@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -47,7 +48,7 @@ import (
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/lifecycle"
-	"github.com/nekomeowww/rc/internal/runtimepolicy"
+	"github.com/nekomeowww/rc/internal/rcplatform"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
 )
@@ -56,9 +57,6 @@ const (
 	defaultWorkspaceServiceAccount   = "rc-workspace"
 	workspaceTopologyAnnotation      = "workspaces.rc.ayaka.io/topology"
 	workspaceManagedByLabel          = "workspaces.rc.ayaka.io/workspace"
-	workspaceHomeVolumeName          = "home"
-	workspaceRuntimeVolumeName       = "rc-runtime"
-	workspaceHomeMountPath           = "/home/agent"
 	workspaceRootMountPath           = "/workspace"
 	workspaceDependencyRequeue       = 2 * time.Second
 	workspaceFinalizer               = "workspaces.rc.ayaka.io/terminate-processes"
@@ -66,11 +64,9 @@ const (
 	workspaceRevisionAnnotation      = "workspaces.rc.ayaka.io/source-revision"
 	workspaceWriteClaimsAnnotation   = "workspaces.rc.ayaka.io/write-claims"
 	workspaceRuntimePolicyAnnotation = "workspaces.rc.ayaka.io/runtime-policy"
-	workspaceRuntimePolicyVersion    = "restricted-v1"
+	workspaceRuntimePolicyVersion    = "platform-v2"
 	repositoryRootMountPath          = "/repository"
 	runtimeContainerName             = "rc-kube"
-	runtimeServeArgument             = "serve"
-	allLinuxCapabilities             = corev1.Capability("ALL")
 	persistentVolumeClaimKind        = "PersistentVolumeClaim"
 	reasonTargetNotReady             = "TargetNotReady"
 	agentTypeCodex                   = "codex"
@@ -85,6 +81,7 @@ const (
 )
 
 type resolvedWorkspace struct {
+	runtime          rcplatform.Runtime
 	image            string
 	revision         int64
 	storage          workspacesv1alpha1.PersistentStorageSpec
@@ -113,8 +110,9 @@ type workspaceWriteClaim struct {
 // WorkspaceReconciler reconciles persistent Workspace storage and runtime Pods.
 type WorkspaceReconciler struct {
 	client.Client
-	Scheme      *runtime.Scheme
-	RunnerImage string
+	Scheme             *runtime.Scheme
+	RunnerImage        string
+	WindowsRunnerImage string
 }
 
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces,verbs=get;list;watch;create;update;patch;delete
@@ -472,6 +470,18 @@ func (r *WorkspaceReconciler) releaseWriteClaims(ctx context.Context, workspace 
 
 func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspace *workspacesv1alpha1.Workspace) (*resolvedWorkspace, string, string, error) {
 	resolved := &resolvedWorkspace{image: workspace.Status.RuntimeImage}
+	platform, err := rcplatform.Resolve(rcplatform.Target{OS: workspace.Spec.OS, Placement: rcplatform.Placement{
+		NodeSelector: workspace.Spec.NodeSelector, Tolerations: workspace.Spec.Tolerations,
+		Affinity: workspace.Spec.Affinity, RuntimeClassName: workspace.Spec.RuntimeClassName,
+	}})
+	if err != nil {
+		reason, message := runtimePlatformCondition(err)
+		return resolved, reason, message, nil
+	}
+	resolved.runtime = platform
+	if platform.OS() == corev1.Windows && len(workspace.Spec.Mounts) > 0 {
+		return resolved, "UnsupportedWindowsMount", "Repository and Worktree mounts use a Linux Git layout; use lifecycle initialization to create a Windows checkout", nil
+	}
 	if workspace.Spec.EnvironmentRef != nil {
 		environment := new(workspacesv1alpha1.WorkspaceEnvironment)
 		key := types.NamespacedName{Name: workspace.Spec.EnvironmentRef.Name, Namespace: workspace.Namespace}
@@ -480,6 +490,13 @@ func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspac
 				return resolved, "EnvironmentNotFound", "Referenced WorkspaceEnvironment does not exist", nil
 			}
 			return nil, "", "", fmt.Errorf("get WorkspaceEnvironment: %w", err)
+		}
+		environmentRuntime, platformErr := rcplatform.Resolve(rcplatform.Target{OS: environment.Spec.OS})
+		if platformErr != nil {
+			return resolved, "UnsupportedOS", platformErr.Error(), nil
+		}
+		if platform.OS() != environmentRuntime.OS() {
+			return resolved, "EnvironmentOSMismatch", "Workspace OS must match the source Environment", nil
 		}
 		ready := meta.FindStatusCondition(environment.Status.Conditions, workspacesv1alpha1.WorkspaceEnvironmentConditionReady)
 		if ready == nil || ready.Status != metav1.ConditionTrue || environment.Status.CurrentVolumeClaimName == "" {
@@ -503,6 +520,9 @@ func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspac
 			resolved.image = workspace.Spec.Image
 			if resolved.image == "" {
 				resolved.image = r.RunnerImage
+				if platform.OS() == corev1.Windows {
+					resolved.image = r.WindowsRunnerImage
+				}
 			}
 		}
 	}
@@ -562,7 +582,7 @@ func (r *WorkspaceReconciler) resolveWorkspaceDependencies(ctx context.Context, 
 		}
 		volumeName := fmt.Sprintf("config-%d", index)
 		resolved.volumes = append(resolved.volumes, corev1.Volume{Name: volumeName, VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: reference.Name}}}})
-		resolved.volumeMounts = append(resolved.volumeMounts, corev1.VolumeMount{Name: volumeName, MountPath: filepath.Join("/run/rc/configmaps", reference.Name), ReadOnly: true})
+		resolved.volumeMounts = append(resolved.volumeMounts, corev1.VolumeMount{Name: volumeName, MountPath: resolved.runtime.ConfigMapMountPath(reference.Name), ReadOnly: true})
 	}
 	for index, reference := range workspace.Spec.SecretRefs {
 		secret := new(corev1.Secret)
@@ -574,7 +594,7 @@ func (r *WorkspaceReconciler) resolveWorkspaceDependencies(ctx context.Context, 
 		}
 		volumeName := fmt.Sprintf("secret-%d", index)
 		resolved.volumes = append(resolved.volumes, corev1.Volume{Name: volumeName, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: reference.Name}}})
-		resolved.volumeMounts = append(resolved.volumeMounts, corev1.VolumeMount{Name: volumeName, MountPath: filepath.Join("/run/rc/secrets", reference.Name), ReadOnly: true})
+		resolved.volumeMounts = append(resolved.volumeMounts, corev1.VolumeMount{Name: volumeName, MountPath: resolved.runtime.SecretMountPath(reference.Name), ReadOnly: true})
 	}
 	if workspace.Spec.Lifecycle != nil {
 		for index, action := range workspace.Spec.Lifecycle.Initialize {
@@ -715,6 +735,17 @@ func workspaceHomeVolumeClaim(workspace *workspacesv1alpha1.Workspace, resolved 
 }
 
 func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *resolvedWorkspace) (*corev1.Pod, error) {
+	platform := resolved.runtime
+	if platform.OS() == "" {
+		var err error
+		platform, err = rcplatform.Resolve(rcplatform.Target{OS: workspace.Spec.OS, Placement: rcplatform.Placement{
+			NodeSelector: workspace.Spec.NodeSelector, Tolerations: workspace.Spec.Tolerations,
+			Affinity: workspace.Spec.Affinity, RuntimeClassName: workspace.Spec.RuntimeClassName,
+		}})
+		if err != nil {
+			return nil, err
+		}
+	}
 	topology, err := workspaceTopologyHash(workspace, resolved)
 	if err != nil {
 		return nil, err
@@ -727,55 +758,12 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 	if err != nil {
 		return nil, fmt.Errorf("marshal Workspace write claims: %w", err)
 	}
-	allowPrivilegeEscalation := false
-	readOnlyRootFilesystem := false
-	automount := resolved.automountSAToken
-	volumes := make([]corev1.Volume, 0, 1+len(resolved.volumes)+1)
-	volumes = append(volumes, corev1.Volume{
-		Name: workspaceHomeVolumeName,
-		VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-			ClaimName: workspace.Name,
-		}},
-	})
-	volumes = append(volumes, resolved.volumes...)
-	volumes = append(volumes, corev1.Volume{Name: workspaceRuntimeVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
-	volumeMounts := make([]corev1.VolumeMount, 0, 1+len(resolved.volumeMounts)+1)
-	volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: workspaceHomeVolumeName, MountPath: workspaceHomeMountPath})
-	volumeMounts = append(volumeMounts, resolved.volumeMounts...)
-	volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: workspaceRuntimeVolumeName, MountPath: "/run/rc"})
-	initContainers := make([]corev1.Container, 0, len(resolved.initializers))
+	initializers := make([]rcplatform.Initializer, 0, len(resolved.initializers))
 	for _, initializer := range resolved.initializers {
-		if initializer.image == "" {
-			return nil, fmt.Errorf("workspace initializer %s has no runtime image", initializer.name)
-		}
-		encoded, err := lifecycle.Encode([]lifecycle.Action{initializer.action})
-		if err != nil {
-			return nil, fmt.Errorf("encode Workspace initializer %s: %w", initializer.name, err)
-		}
-		initContainers = append(initContainers, corev1.Container{
-			Name: initializer.name, Image: initializer.image,
-			Command:      []string{runtimeContainerName, "lifecycle", "--actions", encoded},
-			VolumeMounts: volumeMounts,
-			SecurityContext: &corev1.SecurityContext{
-				AllowPrivilegeEscalation: &allowPrivilegeEscalation,
-				ReadOnlyRootFilesystem:   &readOnlyRootFilesystem,
-				Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{allLinuxCapabilities}},
-			},
-		})
+		initializers = append(initializers, rcplatform.Initializer{Name: initializer.name, Image: initializer.image, Action: initializer.action})
 	}
-	var containerLifecycle *corev1.Lifecycle
-	if len(resolved.beforeStop) > 0 {
-		encoded, err := lifecycle.Encode(resolved.beforeStop)
-		if err != nil {
-			return nil, fmt.Errorf("encode Workspace beforeStop actions: %w", err)
-		}
-		containerLifecycle = &corev1.Lifecycle{PreStop: &corev1.LifecycleHandler{Exec: &corev1.ExecAction{
-			Command: []string{runtimeContainerName, "lifecycle", "--actions", encoded},
-		}}}
-	}
-
-	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
+	return platform.WorkspacePod(rcplatform.WorkspacePodIntent{
+		Metadata: metav1.ObjectMeta{
 			Name:      workspace.Name,
 			Namespace: workspace.Namespace,
 			Labels:    map[string]string{workspaceManagedByLabel: workspace.Name},
@@ -784,34 +772,11 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 				workspaceWriteClaimsAnnotation:   string(writeClaims),
 				workspaceRuntimePolicyAnnotation: workspaceRuntimePolicyVersion,
 			},
-		},
-		Spec: corev1.PodSpec{
-			ServiceAccountName:           resolved.serviceAccount,
-			AutomountServiceAccountToken: &automount,
-			RestartPolicy:                corev1.RestartPolicyAlways,
-			SecurityContext:              runtimepolicy.AgentPodSecurityContext(),
-			NodeSelector:                 workspace.Spec.NodeSelector,
-			Tolerations:                  workspace.Spec.Tolerations,
-			Affinity:                     workspace.Spec.Affinity,
-			RuntimeClassName:             workspace.Spec.RuntimeClassName,
-			InitContainers:               initContainers,
-			Containers: []corev1.Container{{
-				Name:         runtimeContainerName,
-				Image:        resolved.image,
-				Command:      []string{runtimeContainerName, runtimeServeArgument},
-				Args:         []string{"--socket", "/run/rc/rc-kube.sock", "--state-dir", "/home/agent/.rc/processes"},
-				Resources:    workspace.Spec.Resources,
-				VolumeMounts: volumeMounts,
-				Lifecycle:    containerLifecycle,
-				SecurityContext: &corev1.SecurityContext{
-					AllowPrivilegeEscalation: &allowPrivilegeEscalation,
-					ReadOnlyRootFilesystem:   &readOnlyRootFilesystem,
-					Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{allLinuxCapabilities}},
-				},
-			}},
-			Volumes: volumes,
-		},
-	}, nil
+		}, Image: resolved.image, HomeClaim: workspace.Name,
+		ServiceAccount: resolved.serviceAccount, AutomountToken: resolved.automountSAToken,
+		Resources: workspace.Spec.Resources, AdditionalVolumes: resolved.volumes, AdditionalMounts: resolved.volumeMounts,
+		Initializers: initializers, BeforeStop: resolved.beforeStop,
+	})
 }
 
 func workspacePodWriteClaims(pod *corev1.Pod) ([]workspaceWriteClaim, error) {
@@ -833,6 +798,7 @@ func workspacePodWriteClaims(pod *corev1.Pod) ([]workspaceWriteClaim, error) {
 func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *resolvedWorkspace) (string, error) {
 	topology := struct {
 		RuntimePolicy    string
+		OS               corev1.OSName
 		Image            string
 		Mounts           []workspacesv1alpha1.WorkspaceMount
 		ConfigMapRefs    []workspacesv1alpha1.LocalReference
@@ -848,8 +814,8 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 		RuntimeClassName *string
 		Lifecycle        *workspacesv1alpha1.WorkspaceLifecycle
 	}{
-		RuntimePolicy: workspaceRuntimePolicyVersion,
-		Image:         resolved.image, Mounts: workspace.Spec.Mounts, ConfigMapRefs: workspace.Spec.ConfigMapRefs,
+		RuntimePolicy: workspaceRuntimePolicyVersion, OS: resolved.runtime.OS(),
+		Image: resolved.image, Mounts: workspace.Spec.Mounts, ConfigMapRefs: workspace.Spec.ConfigMapRefs,
 		SecretRefs: workspace.Spec.SecretRefs, AgentCredentials: workspace.Spec.AgentCredentialRefs,
 		Credentials: workspace.Spec.CredentialRefs, ServiceAccount: resolved.serviceAccount,
 		AutomountSAToken: resolved.automountSAToken, Resources: workspace.Spec.Resources,
@@ -863,6 +829,17 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 	sum := sha256.Sum256(data)
 
 	return hex.EncodeToString(sum[:]), nil
+}
+
+func runtimePlatformCondition(err error) (string, string) {
+	switch {
+	case stderrors.Is(err, rcplatform.ErrUnsupportedOS):
+		return "UnsupportedOS", "Workspace OS must be linux or windows"
+	case stderrors.Is(err, rcplatform.ErrPlacementConflict):
+		return "OSPlacementConflict", "Node selector operating system conflicts with the runtime OS"
+	default:
+		return "InvalidRuntimePlatform", err.Error()
+	}
 }
 
 func workspaceProcessState(ctx context.Context, kubeClient client.Client, workspace *workspacesv1alpha1.Workspace) (bool, bool, *metav1.Time, error) {

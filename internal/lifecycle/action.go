@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+
+	"github.com/nekomeowww/rc/internal/rcnative"
 )
 
 const DefaultWorkingDirectory = "/workspace"
@@ -90,11 +92,12 @@ func actionCommand(ctx context.Context, action Action) (*exec.Cmd, error) {
 		}
 		command = exec.CommandContext(ctx, action.Command[0], action.Command[1:]...)
 	} else {
-		command = exec.CommandContext(ctx, "/bin/sh", "-ceu", action.Script, "rc-lifecycle")
+		arguments := rcnative.Current().ScriptCommand(action.Script)
+		command = exec.CommandContext(ctx, arguments[0], arguments[1:]...)
 	}
 	command.Dir = action.WorkingDirectory
 	if command.Dir == "" {
-		command.Dir = DefaultWorkingDirectory
+		command.Dir = rcnative.Current().Workspace
 	}
 
 	return command, nil

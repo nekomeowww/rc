@@ -1,17 +1,23 @@
+# syntax=docker/dockerfile:1
+
 # Build rcctl and rc-kube for Workspace runtime Pods and Repository/Worktree Jobs.
 FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+
 ARG TARGETOS
 ARG TARGETARCH
 
 WORKDIR /workspace
-COPY go.mod go.mod
-COPY go.sum go.sum
+COPY go.mod go.sum ./
 RUN go mod download
+
 COPY . .
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o /out/rcctl cmd/rcctl/main.go
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o /out/rc-kube cmd/rc-kube/main.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+        go build -trimpath -o /out/rcctl ./cmd/rcctl \
+    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+        go build -trimpath -o /out/rc-kube ./cmd/rc-kube
 
 FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS tool-downloader
+
 ARG TARGETARCH
 ARG MISE_VERSION=2026.8.11
 ARG MISE_SHA256_AMD64=8e0c3d18e71956a0fb15f55069966bbf1d6139aa8f809f1b88897ea7ef6cf196
@@ -23,6 +29,7 @@ ARG PROTO_SHA256_ARM64=df8037aa9ada8e54a1c6ee719fc11187f9800f09d46737beced490cd7
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
     && rm -rf /var/lib/apt/lists/*
+
 RUN set -eux; \
     case "${TARGETARCH}" in \
         amd64) \
@@ -56,11 +63,14 @@ RUN set -eux; \
     install -Dm755 /tmp/proto/proto /out/proto; \
     install -Dm755 /tmp/proto/proto-shim /out/proto-shim
 
-FROM node:26-bookworm-slim
+FROM node:26-bookworm-slim AS runner
+
 ARG COREPACK_VERSION=0.35.0
-ARG LOBEHUB_CLI_VERSION=0.0.48
+ARG LOBEHUB_CLI_VERSION=0.0.52
+
 LABEL org.opencontainers.image.source="https://github.com/nekomeowww/rc" \
-      org.opencontainers.image.title="rc runner"
+    org.opencontainers.image.title="rc runner"
+
 # Preinstall Playwright Chromium dependencies because Workspace Agent Processes
 # cannot elevate privileges to install system packages at runtime.
 RUN apt-get update \
@@ -131,12 +141,16 @@ RUN apt-get update \
     && groupadd --gid 65532 rc \
     && useradd --uid 65532 --gid 65532 --create-home --shell /bin/bash rc \
     && git config --system --add safe.directory '*'
+
 COPY --from=builder /out/rcctl /usr/local/bin/rcctl
 COPY --from=builder /out/rc-kube /usr/local/bin/rc-kube
 COPY --from=tool-downloader /out/mise /usr/local/bin/mise
 COPY --from=tool-downloader /out/proto /usr/local/bin/proto
 COPY --from=tool-downloader /out/proto-shim /usr/local/bin/proto-shim
-ENV SHELL=/bin/bash
+
+ENV SHELL="/bin/bash"
+
 USER 1000:1000
 WORKDIR /workspace
+
 ENTRYPOINT ["rc-kube"]

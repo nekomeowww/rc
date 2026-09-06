@@ -1,0 +1,26 @@
+apiVersion: workspaces.rc.ayaka.io/v1alpha1
+kind: Workspace
+metadata:
+  name: windows
+spec:
+  os: windows
+  # Replace with your built Windows runner or Codex image.
+  image: example.invalid/rc/runner-windows:dev
+  storage:
+    # Use a Windows-compatible provisioner or a pre-bound Windows volume.
+    storageClassName: windows
+    size: 10Gi
+  automountServiceAccountToken: false
+  tolerations:
+    - key: os
+      operator: Equal
+      value: windows
+      effect: NoSchedule
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: '2'
+      memory: 3Gi
+  defaultWorkingDirectory: 'C:\workspace'

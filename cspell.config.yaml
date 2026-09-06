@@ -23,12 +23,14 @@ words:
   - nekomeowww
   - onsi
   - persistentvolumeclaims
+  - pflag
   - rcctl
   - repositoriesv1alpha1
   - repositoryexec
   - repositoryexecs
   - repositoryservice
   - Seccomp
+  - Tolerations
   - utilrand
   - Worktree
   - worktrees

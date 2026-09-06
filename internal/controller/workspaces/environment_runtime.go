@@ -19,7 +19,7 @@ package workspaces
 import (
 	"context"
 	"fmt"
-	"path/filepath"
+	"path"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -29,16 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
-	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
-	"github.com/nekomeowww/rc/internal/runtimepolicy"
-)
-
-const (
-	environmentSudoersContainerName = "configure-sudo"
-	environmentSudoersVolumeName    = "sudoers"
-	environmentSudoersMountPath     = "/etc/sudoers.d"
-	environmentSudoersFilePath      = environmentSudoersMountPath + "/agent"
-	environmentSudoersRule          = "agent ALL=(ALL:ALL) NOPASSWD:ALL"
+	"github.com/nekomeowww/rc/internal/rcplatform"
 )
 
 func (r *AgentProcessReconciler) resolveEnvironmentProcessTarget(ctx context.Context, process *workspacesv1alpha1.AgentProcess) (*resolvedProcessTarget, string, string, error) {
@@ -50,10 +41,18 @@ func (r *AgentProcessReconciler) resolveEnvironmentProcessTarget(ctx context.Con
 		}
 		return nil, "", "", fmt.Errorf("get target WorkspaceEnvironment: %w", err)
 	}
-	if !meta.IsStatusConditionTrue(environment.Status.Conditions, workspacesv1alpha1.WorkspaceEnvironmentConditionReady) || environment.Status.CurrentVolumeClaimName == "" {
+	ready := meta.FindStatusCondition(environment.Status.Conditions, workspacesv1alpha1.WorkspaceEnvironmentConditionReady)
+	if environment.Status.ObservedGeneration < environment.Generation || ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration < environment.Generation || environment.Status.CurrentVolumeClaimName == "" {
 		return nil, reasonTargetNotReady, "Target WorkspaceEnvironment current revision is not ready", nil
 	}
 
+	platform, platformErr := rcplatform.Resolve(rcplatform.Target{OS: environment.Spec.OS, Placement: rcplatform.Placement{
+		NodeSelector: environment.Spec.NodeSelector, Tolerations: environment.Spec.Tolerations,
+	}})
+	if platformErr != nil {
+		reason, message := runtimePlatformCondition(platformErr)
+		return nil, reason, message, nil
+	}
 	draftName := environment.Status.DraftVolumeClaimName
 	if draftName == "" {
 		draftName = fmt.Sprintf("%s-draft-%d", environment.Name, environment.Status.CurrentRevision+1)
@@ -93,43 +92,16 @@ func (r *AgentProcessReconciler) resolveEnvironmentProcessTarget(ctx context.Con
 	if err := (&WorkspaceReconciler{Client: r.Client}).ensureWorkspaceAccess(ctx, environment.Namespace); err != nil {
 		return nil, "", "", err
 	}
-	editorName := environment.Name + "-editor"
-	editor := new(corev1.Pod)
-	editorKey := types.NamespacedName{Name: editorName, Namespace: environment.Namespace}
-	err = r.Get(ctx, editorKey, editor)
-	if apierrors.IsNotFound(err) {
-		editor = environmentEditorPod(environment, draft.Name)
-		if err := controllerutil.SetControllerReference(environment, editor, r.Scheme); err != nil {
-			return nil, "", "", fmt.Errorf("set WorkspaceEnvironment owner on editor Pod: %w", err)
-		}
-		if err := r.Create(ctx, editor); err != nil {
-			return nil, "", "", fmt.Errorf("create WorkspaceEnvironment editor Pod: %w", err)
-		}
-		if err := r.setEnvironmentDraftStatus(ctx, key, draft.Name, editor.Name, metav1.ConditionFalse, "Starting", "Environment editor Pod is starting"); err != nil {
-			return nil, "", "", err
-		}
-
-		return nil, reasonTargetNotReady, "Target WorkspaceEnvironment editor is starting", nil
-	}
-	if err != nil {
-		return nil, "", "", fmt.Errorf("get WorkspaceEnvironment editor Pod: %w", err)
-	}
-	if !podReady(editor) {
-		return nil, reasonTargetNotReady, "Target WorkspaceEnvironment editor is starting", nil
-	}
-	if err := r.setEnvironmentDraftStatus(ctx, key, draft.Name, editor.Name, metav1.ConditionTrue, "DraftReady", "Environment draft editor is ready"); err != nil {
-		return nil, "", "", err
+	editor, reason, message, err := r.ensureEnvironmentEditor(ctx, environment, draft, platform)
+	if err != nil || reason != "" {
+		return nil, reason, message, err
 	}
 
-	workingDirectory := process.Spec.WorkingDirectory
-	if workingDirectory == "" {
-		workingDirectory = workspaceHomeMountPath
-	}
 	environmentVariables, err := r.resolveProcessOnlyEnvironment(ctx, process)
 	if err != nil {
 		return nil, "", "", err
 	}
-	agentHome, credentialFiles, err := r.resolveEnvironmentProcessCredentials(ctx, environment, process)
+	agentProfile, credentialFiles, err := r.resolveEnvironmentProcessCredentials(ctx, environment, process)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -139,67 +111,62 @@ func (r *AgentProcessReconciler) resolveEnvironmentProcessTarget(ctx context.Con
 	}
 
 	return &resolvedProcessTarget{
-		runtime: processruntime.Target{Namespace: environment.Namespace, Pod: editor.Name, Container: runtimeContainerName},
-		podUID:  string(editor.UID), workingDir: workingDirectory, environment: environmentVariables,
-		agentHome: agentHome, credentials: credentialFiles, mounts: credentialProjection.mounts, credentialEnvironment: credentialProjection.environment,
+		platform: platform, runtime: platform.ProcessTarget(environment.Namespace, editor.Name, runtimeContainerName),
+		podUID: string(editor.UID), workingDir: process.Spec.WorkingDirectory, defaultDirectory: rcplatform.HomeDirectory, environment: environmentVariables,
+		agentProfile: agentProfile, credentials: credentialFiles, mounts: credentialProjection.mounts, credentialEnvironment: credentialProjection.environment,
 		sshConfigFragments: credentialProjection.sshConfigFragments,
 	}, "", "", nil
 }
 
-func environmentEditorPod(environment *workspacesv1alpha1.WorkspaceEnvironment, draftClaimName string) *corev1.Pod {
-	runAsRoot := int64(0)
-	runAsRootGroup := int64(0)
-	automount := true
-	allowPrivilegeEscalation := true
-	disallowPrivilegeEscalation := false
-	runAsNonRoot := false
-
-	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      environment.Name + "-editor",
-			Namespace: environment.Namespace,
-			Labels:    map[string]string{environmentManagedByLabel: environment.Name},
-		},
-		Spec: corev1.PodSpec{
-			ServiceAccountName:           defaultWorkspaceServiceAccount,
-			AutomountServiceAccountToken: &automount,
-			RestartPolicy:                corev1.RestartPolicyAlways,
-			SecurityContext:              runtimepolicy.AgentPodSecurityContext(),
-			InitContainers: []corev1.Container{{
-				Name: environmentSudoersContainerName, Image: environment.Spec.Image,
-				Command: []string{"/bin/sh", "-ec"},
-				Args: []string{fmt.Sprintf(
-					"chgrp 0 %[1]s && chmod 0755 %[1]s && printf '%%s\\n' %[2]q > %[3]s && chgrp 0 %[3]s && chmod 0440 %[3]s",
-					environmentSudoersMountPath, environmentSudoersRule, environmentSudoersFilePath,
-				)},
-				SecurityContext: &corev1.SecurityContext{
-					RunAsNonRoot:             &runAsNonRoot,
-					RunAsUser:                &runAsRoot,
-					RunAsGroup:               &runAsRootGroup,
-					AllowPrivilegeEscalation: &disallowPrivilegeEscalation,
-					Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{allLinuxCapabilities}},
-				},
-				VolumeMounts: []corev1.VolumeMount{{Name: environmentSudoersVolumeName, MountPath: environmentSudoersMountPath}},
-			}},
-			Containers: []corev1.Container{{
-				Name: runtimeContainerName, Image: environment.Spec.Image, Command: []string{runtimeContainerName, runtimeServeArgument},
-				Args: []string{"--socket", "/run/rc/rc-kube.sock", "--state-dir", "/home/agent/.rc/processes"},
-				SecurityContext: &corev1.SecurityContext{
-					AllowPrivilegeEscalation: &allowPrivilegeEscalation,
-				},
-				VolumeMounts: []corev1.VolumeMount{
-					{Name: workspaceHomeVolumeName, MountPath: workspaceHomeMountPath},
-					{Name: workspaceRuntimeVolumeName, MountPath: "/run/rc"},
-					{Name: environmentSudoersVolumeName, MountPath: environmentSudoersMountPath, ReadOnly: true},
-				},
-			}},
-			Volumes: []corev1.Volume{
-				{Name: workspaceHomeVolumeName, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: draftClaimName}}},
-				{Name: workspaceRuntimeVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-				{Name: environmentSudoersVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-			},
-		},
+func (r *AgentProcessReconciler) ensureEnvironmentEditor(ctx context.Context, environment *workspacesv1alpha1.WorkspaceEnvironment, draft *corev1.PersistentVolumeClaim, platform rcplatform.Runtime) (*corev1.Pod, string, string, error) {
+	editorName := environment.Name + "-editor"
+	editor := new(corev1.Pod)
+	key := types.NamespacedName{Name: editorName, Namespace: environment.Namespace}
+	err := r.Get(ctx, key, editor)
+	if apierrors.IsNotFound(err) {
+		editor, err = platform.EnvironmentEditorPod(rcplatform.EditorPodIntent{
+			Metadata: metav1.ObjectMeta{Name: editorName, Namespace: environment.Namespace, Labels: map[string]string{environmentManagedByLabel: environment.Name}},
+			Image:    environment.Spec.Image, HomeClaim: draft.Name, ServiceAccount: defaultWorkspaceServiceAccount,
+		})
+		if err != nil {
+			return nil, "", "", fmt.Errorf("build WorkspaceEnvironment editor Pod: %w", err)
+		}
+		if err := controllerutil.SetControllerReference(environment, editor, r.Scheme); err != nil {
+			return nil, "", "", fmt.Errorf("set WorkspaceEnvironment owner on editor Pod: %w", err)
+		}
+		if err := r.Create(ctx, editor); err != nil {
+			return nil, "", "", fmt.Errorf("create WorkspaceEnvironment editor Pod: %w", err)
+		}
+		environmentKey := types.NamespacedName{Name: environment.Name, Namespace: environment.Namespace}
+		if err := r.setEnvironmentDraftStatus(ctx, environmentKey, draft.Name, editor.Name, metav1.ConditionFalse, "Starting", "Environment editor Pod is starting"); err != nil {
+			return nil, "", "", err
+		}
+		return nil, reasonTargetNotReady, "Target WorkspaceEnvironment editor is starting", nil
 	}
+	if err != nil {
+		return nil, "", "", fmt.Errorf("get WorkspaceEnvironment editor Pod: %w", err)
+	}
+	if !podReady(editor) {
+		return nil, reasonTargetNotReady, "Target WorkspaceEnvironment editor is starting", nil
+	}
+	environmentKey := types.NamespacedName{Name: environment.Name, Namespace: environment.Namespace}
+	if err := r.setEnvironmentDraftStatus(ctx, environmentKey, draft.Name, editor.Name, metav1.ConditionTrue, "DraftReady", "Environment draft editor is ready"); err != nil {
+		return nil, "", "", err
+	}
+	return editor, "", "", nil
+}
+
+func environmentEditorPod(environment *workspacesv1alpha1.WorkspaceEnvironment, draftClaimName string) (*corev1.Pod, error) {
+	platform, err := rcplatform.Resolve(rcplatform.Target{OS: environment.Spec.OS, Placement: rcplatform.Placement{
+		NodeSelector: environment.Spec.NodeSelector, Tolerations: environment.Spec.Tolerations,
+	}})
+	if err != nil {
+		return nil, err
+	}
+	return platform.EnvironmentEditorPod(rcplatform.EditorPodIntent{
+		Metadata: metav1.ObjectMeta{Name: environment.Name + "-editor", Namespace: environment.Namespace, Labels: map[string]string{environmentManagedByLabel: environment.Name}},
+		Image:    environment.Spec.Image, HomeClaim: draftClaimName, ServiceAccount: defaultWorkspaceServiceAccount,
+	})
 }
 
 func (r *AgentProcessReconciler) setEnvironmentDraftStatus(ctx context.Context, key types.NamespacedName, draftName string, editorName string, status metav1.ConditionStatus, reason string, message string) error {
@@ -245,36 +212,36 @@ func (r *AgentProcessReconciler) resolveProcessOnlyEnvironment(ctx context.Conte
 	return values, nil
 }
 
-func (r *AgentProcessReconciler) resolveEnvironmentProcessCredentials(ctx context.Context, environment *workspacesv1alpha1.WorkspaceEnvironment, process *workspacesv1alpha1.AgentProcess) (string, map[string][]byte, error) {
+func (r *AgentProcessReconciler) resolveEnvironmentProcessCredentials(ctx context.Context, environment *workspacesv1alpha1.WorkspaceEnvironment, process *workspacesv1alpha1.AgentProcess) (*rcplatform.AgentProfile, map[string][]byte, error) {
 	files := make(map[string][]byte)
-	agentHome := ""
+	var agentProfile *rcplatform.AgentProfile
 	if process.Spec.AgentType != "" {
 		credentialName := defaultCredentialName
 		if process.Spec.AgentCredentialRef != nil {
 			credentialName = process.Spec.AgentCredentialRef.Name
 		}
-		agentHome = filepath.Join(workspaceHomeMountPath, ".rc", "agents", process.Spec.AgentType, credentialName)
+		agentProfile = &rcplatform.AgentProfile{Type: process.Spec.AgentType, Credential: credentialName}
 	}
 	if process.Spec.AgentCredentialRef != nil {
 		workspace := &workspacesv1alpha1.Workspace{
 			ObjectMeta: metav1.ObjectMeta{Name: environment.Name, Namespace: environment.Namespace},
 			Spec: workspacesv1alpha1.WorkspaceSpec{
-				AgentCredentialRefs: []workspacesv1alpha1.LocalReference{*process.Spec.AgentCredentialRef},
-				CredentialRefs:      append([]workspacesv1alpha1.LocalReference(nil), process.Spec.CredentialRefs...),
+				OS: environment.Spec.OS, AgentCredentialRefs: []workspacesv1alpha1.LocalReference{*process.Spec.AgentCredentialRef},
+				CredentialRefs: append([]workspacesv1alpha1.LocalReference(nil), process.Spec.CredentialRefs...),
 			},
 		}
 		_, files, err := r.resolveProcessCredentials(ctx, workspace, process)
-		return agentHome, files, err
+		return agentProfile, files, err
 	}
 	for _, reference := range process.Spec.CredentialRefs {
 		credentialFiles, err := r.resolveGenericCredential(ctx, environment.Namespace, reference.Name)
 		if err != nil {
-			return "", nil, err
+			return nil, nil, err
 		}
 		for name, data := range credentialFiles {
-			files[filepath.Join("credentials", reference.Name, name)] = data
+			files[path.Join("credentials", reference.Name, name)] = data
 		}
 	}
 
-	return agentHome, files, nil
+	return agentProfile, files, nil
 }

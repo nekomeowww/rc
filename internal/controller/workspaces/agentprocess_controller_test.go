@@ -34,6 +34,7 @@ import (
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
+	"github.com/nekomeowww/rc/internal/rcplatform"
 )
 
 const (
@@ -192,6 +193,7 @@ func TestProcessCredentialProjectsFilesAndEnvsIndependently(t *testing.T) {
 	assert.Empty(t, projection.sshConfigFragments)
 
 	request, err := reconciler.processStartRequest(ctx, process, &resolvedProcessTarget{
+		platform:              testRCPlatform(t),
 		credentials:           files,
 		mounts:                projection.mounts,
 		credentialEnvironment: projection.environment,
@@ -252,11 +254,19 @@ func TestSSHCredentialProjectsNativeConfiguration(t *testing.T) {
 	assert.Equal(t, credential.Spec.SSHPrivateKey.Config, projection.sshConfigFragments[credentialName])
 
 	request, err := reconciler.processStartRequest(ctx, process, &resolvedProcessTarget{
+		platform:    testRCPlatform(t),
 		credentials: files, sshConfigFragments: projection.sshConfigFragments,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, workspaceSSHConfigPath, request.SSHConfigPath)
+	assert.Empty(t, request.SSHConfigPath, "let rc-kube derive the native SSH config path")
 	assert.Equal(t, projection.sshConfigFragments, request.SSHConfigFragments)
+}
+
+func testRCPlatform(t *testing.T) rcplatform.Runtime {
+	t.Helper()
+	platform, err := rcplatform.Resolve(rcplatform.Target{})
+	require.NoError(t, err)
+	return platform
 }
 
 func TestRunningAgentProcessBecomesLostWhenOriginalPodDisappears(t *testing.T) {

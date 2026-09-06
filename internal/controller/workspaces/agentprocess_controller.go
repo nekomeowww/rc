@@ -21,7 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"path/filepath"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -42,20 +42,22 @@ import (
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
+	"github.com/nekomeowww/rc/internal/rcplatform"
 )
 
 const (
 	processTargetRequeueDelay = 2 * time.Second
 	agentProcessFinalizer     = "workspaces.rc.ayaka.io/agent-process"
-	workspaceSSHConfigPath    = workspaceHomeMountPath + "/.ssh/config"
 )
 
 type resolvedProcessTarget struct {
+	platform              rcplatform.Runtime
 	runtime               processruntime.Target
 	podUID                string
 	workingDir            string
+	defaultDirectory      rcplatform.DefaultDirectory
 	environment           map[string]string
-	agentHome             string
+	agentProfile          *rcplatform.AgentProfile
 	credentials           map[string][]byte
 	mounts                []processruntime.CredentialMount
 	credentialEnvironment map[string]string
@@ -253,10 +255,13 @@ func (r *AgentProcessReconciler) originalProcessTarget(ctx context.Context, proc
 	if string(pod.UID) != process.Status.RuntimePodUID {
 		return nil, true, nil
 	}
+	platform, err := rcplatform.FromPod(pod)
+	if err != nil {
+		return nil, false, fmt.Errorf("resolve original Agent Process runtime platform: %w", err)
+	}
 
 	return &resolvedProcessTarget{
-		runtime: processruntime.Target{Namespace: process.Namespace, Pod: pod.Name, Container: runtimeContainerName},
-		podUID:  string(pod.UID),
+		platform: platform, runtime: platform.ProcessTarget(process.Namespace, pod.Name, runtimeContainerName), podUID: string(pod.UID),
 	}, false, nil
 }
 
@@ -286,14 +291,11 @@ func (r *AgentProcessReconciler) resolveProcessTarget(ctx context.Context, proce
 		if workingDirectory == "" {
 			workingDirectory = workspace.Spec.DefaultWorkingDirectory
 		}
-		if workingDirectory == "" {
-			workingDirectory = workspaceRootMountPath
-		}
 		environment, err := r.resolveWorkspaceEnvironmentVariables(ctx, workspace, process)
 		if err != nil {
 			return nil, "", "", err
 		}
-		agentHome, credentialFiles, err := r.resolveProcessCredentials(ctx, workspace, process)
+		agentProfile, credentialFiles, err := r.resolveProcessCredentials(ctx, workspace, process)
 		if err != nil {
 			return nil, "", "", err
 		}
@@ -302,10 +304,14 @@ func (r *AgentProcessReconciler) resolveProcessTarget(ctx context.Context, proce
 			return nil, "", "", err
 		}
 
+		platform, err := rcplatform.FromPod(pod)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("resolve Workspace runtime platform: %w", err)
+		}
 		return &resolvedProcessTarget{
-			runtime: processruntime.Target{Namespace: process.Namespace, Pod: pod.Name, Container: runtimeContainerName},
-			podUID:  string(pod.UID), workingDir: workingDirectory, environment: environment,
-			agentHome: agentHome, credentials: credentialFiles, mounts: credentialProjection.mounts, credentialEnvironment: credentialProjection.environment,
+			platform: platform, runtime: platform.ProcessTarget(process.Namespace, pod.Name, runtimeContainerName),
+			podUID: string(pod.UID), workingDir: workingDirectory, defaultDirectory: rcplatform.WorkspaceDirectory, environment: environment,
+			agentProfile: agentProfile, credentials: credentialFiles, mounts: credentialProjection.mounts, credentialEnvironment: credentialProjection.environment,
 			sshConfigFragments: credentialProjection.sshConfigFragments,
 		}, "", "", nil
 	case workspacesv1alpha1.AgentProcessTargetWorkspaceEnvironment:
@@ -380,7 +386,7 @@ func (r *AgentProcessReconciler) resolveEnvVar(ctx context.Context, namespace st
 	return "", errors.New("fieldRef and resourceFieldRef are not supported for Agent Process environment")
 }
 
-func (r *AgentProcessReconciler) resolveProcessCredentials(ctx context.Context, workspace *workspacesv1alpha1.Workspace, process *workspacesv1alpha1.AgentProcess) (string, map[string][]byte, error) {
+func (r *AgentProcessReconciler) resolveProcessCredentials(ctx context.Context, workspace *workspacesv1alpha1.Workspace, process *workspacesv1alpha1.AgentProcess) (*rcplatform.AgentProfile, map[string][]byte, error) {
 	credentialFiles := make(map[string][]byte)
 	agentCredentialRef := process.Spec.AgentCredentialRef
 	if agentCredentialRef == nil && process.Spec.AgentType != "" && len(workspace.Spec.AgentCredentialRefs) > 0 {
@@ -389,7 +395,7 @@ func (r *AgentProcessReconciler) resolveProcessCredentials(ctx context.Context, 
 			credential := new(configsv1alpha1.AgentCredential)
 			key := types.NamespacedName{Name: reference.Name, Namespace: workspace.Namespace}
 			if err := r.Get(ctx, key, credential); err != nil {
-				return "", nil, fmt.Errorf("get AgentCredential: %w", err)
+				return nil, nil, fmt.Errorf("get AgentCredential: %w", err)
 			}
 			if string(credential.Spec.Agent) == process.Spec.AgentType {
 				agentCredentialRef = reference
@@ -397,51 +403,51 @@ func (r *AgentProcessReconciler) resolveProcessCredentials(ctx context.Context, 
 			}
 		}
 	}
-	agentHome := ""
+	var agentProfile *rcplatform.AgentProfile
 	if process.Spec.AgentType != "" {
 		credentialName := defaultCredentialName
 		if agentCredentialRef != nil {
 			credentialName = agentCredentialRef.Name
 		}
-		agentHome = filepath.Join(workspaceHomeMountPath, ".rc", "agents", process.Spec.AgentType, credentialName)
+		agentProfile = &rcplatform.AgentProfile{Type: process.Spec.AgentType, Credential: credentialName}
 	}
 	if agentCredentialRef != nil {
 		if !containsReference(workspace.Spec.AgentCredentialRefs, agentCredentialRef.Name) {
-			return "", nil, fmt.Errorf("agent credential %s is not referenced by Workspace %s", agentCredentialRef.Name, workspace.Name)
+			return nil, nil, fmt.Errorf("agent credential %s is not referenced by Workspace %s", agentCredentialRef.Name, workspace.Name)
 		}
 		agentCredential := new(configsv1alpha1.AgentCredential)
 		key := types.NamespacedName{Name: agentCredentialRef.Name, Namespace: workspace.Namespace}
 		if err := r.Get(ctx, key, agentCredential); err != nil {
-			return "", nil, fmt.Errorf("get AgentCredential: %w", err)
+			return nil, nil, fmt.Errorf("get AgentCredential: %w", err)
 		}
 		if process.Spec.AgentType != "" && string(agentCredential.Spec.Agent) != process.Spec.AgentType {
-			return "", nil, fmt.Errorf("agent credential %s has agent type %s, not %s", agentCredential.Name, agentCredential.Spec.Agent, process.Spec.AgentType)
+			return nil, nil, fmt.Errorf("agent credential %s has agent type %s, not %s", agentCredential.Name, agentCredential.Spec.Agent, process.Spec.AgentType)
 		}
 		secret := new(corev1.Secret)
 		secretKey := types.NamespacedName{Name: agentCredential.Spec.SecretKeyRef.Name, Namespace: workspace.Namespace}
 		if err := r.Get(ctx, secretKey, secret); err != nil {
-			return "", nil, fmt.Errorf("get AgentCredential Secret: %w", err)
+			return nil, nil, fmt.Errorf("get AgentCredential Secret: %w", err)
 		}
 		data, ok := secret.Data[agentCredential.Spec.SecretKeyRef.Key]
 		if !ok {
-			return "", nil, fmt.Errorf("agent credential Secret %s has no key %s", secret.Name, agentCredential.Spec.SecretKeyRef.Key)
+			return nil, nil, fmt.Errorf("agent credential Secret %s has no key %s", secret.Name, agentCredential.Spec.SecretKeyRef.Key)
 		}
 		credentialFiles["agent/auth.json"] = append([]byte(nil), data...)
 	}
 	for _, reference := range process.Spec.CredentialRefs {
 		if !containsReference(workspace.Spec.CredentialRefs, reference.Name) {
-			return "", nil, fmt.Errorf("credential %s is not referenced by Workspace %s", reference.Name, workspace.Name)
+			return nil, nil, fmt.Errorf("credential %s is not referenced by Workspace %s", reference.Name, workspace.Name)
 		}
 		files, err := r.resolveGenericCredential(ctx, workspace.Namespace, reference.Name)
 		if err != nil {
-			return "", nil, err
+			return nil, nil, err
 		}
 		for name, data := range files {
-			credentialFiles[filepath.Join("credentials", reference.Name, name)] = data
+			credentialFiles[path.Join("credentials", reference.Name, name)] = data
 		}
 	}
 
-	return agentHome, credentialFiles, nil
+	return agentProfile, credentialFiles, nil
 }
 
 func containsReference(references []workspacesv1alpha1.LocalReference, name string) bool {
@@ -496,7 +502,7 @@ func (r *AgentProcessReconciler) resolveGenericCredential(ctx context.Context, n
 			return nil, fmt.Errorf("process Credential %s has no process configuration", credential.Name)
 		}
 		for index, file := range credential.Spec.Process.Files {
-			files[filepath.Join("files", strconv.Itoa(index))], err = read(file.DataRef)
+			files[path.Join("files", strconv.Itoa(index))], err = read(file.DataRef)
 			if err != nil {
 				break
 			}
@@ -537,7 +543,7 @@ func (r *AgentProcessReconciler) resolveCredentialProjections(ctx context.Contex
 			}
 			targets[mountPath] = reference.Name
 			projection.mounts = append(projection.mounts, processruntime.CredentialMount{
-				Source: filepath.Join("credentials", reference.Name, "files", strconv.Itoa(index)), Target: mountPath,
+				Source: path.Join("credentials", reference.Name, "files", strconv.Itoa(index)), Target: mountPath,
 			})
 		}
 		for _, variable := range credential.Spec.Process.Envs {
@@ -554,22 +560,15 @@ func (r *AgentProcessReconciler) processStartRequest(ctx context.Context, proces
 	environment := make(map[string]string, len(target.environment)+3)
 	maps.Copy(environment, target.credentialEnvironment)
 	maps.Copy(environment, target.environment)
-	if target.agentHome != "" {
-		if _, exists := environment["RC_AGENT_HOME"]; !exists {
-			environment["RC_AGENT_HOME"] = target.agentHome
-		} else {
+	if target.agentProfile != nil {
+		if _, exists := environment["RC_AGENT_HOME"]; exists {
 			logf.FromContext(ctx).Info("AgentProcess environment overrides automatic Agent home", "name", process.Name, "variable", "RC_AGENT_HOME")
 		}
 		if process.Spec.AgentType == agentTypeCodex {
-			if _, exists := environment["CODEX_HOME"]; !exists {
-				environment["CODEX_HOME"] = target.agentHome
-			} else {
+			if _, exists := environment["CODEX_HOME"]; exists {
 				logf.FromContext(ctx).Info("AgentProcess environment overrides automatic Agent home", "name", process.Name, "variable", "CODEX_HOME")
 			}
 		}
-	}
-	if len(process.Spec.CredentialRefs) > 0 {
-		environment["RC_CREDENTIALS_DIR"] = "/run/rc/credentials"
 	}
 	select {
 	case <-ctx.Done():
@@ -577,21 +576,13 @@ func (r *AgentProcessReconciler) processStartRequest(ctx context.Context, proces
 	default:
 	}
 
-	return processruntime.StartRequest{
-		ID: process.Name, UID: string(process.UID), Command: append([]string(nil), process.Spec.Command...),
-		WorkingDirectory: target.workingDir, TTY: process.Spec.TTY, Environment: environment,
-		AgentHome: target.agentHome, CredentialFiles: target.credentials, CredentialMounts: append([]processruntime.CredentialMount(nil), target.mounts...),
-		RuntimeDirectory: filepath.Join("/run/rc/processes", process.Name), CredentialsRoot: "/run/rc/credentials",
-		TranscriptPath: filepath.Join(workspaceHomeMountPath, ".rc", "processes", process.Name, "transcript.log"),
-		SSHConfigPath:  sshConfigPath(target.sshConfigFragments), SSHConfigFragments: maps.Clone(target.sshConfigFragments),
-	}, nil
-}
-
-func sshConfigPath(fragments map[string]string) string {
-	if len(fragments) == 0 {
-		return ""
-	}
-	return workspaceSSHConfigPath
+	return target.platform.Process(rcplatform.ProcessIntent{
+		ID: process.Name, UID: string(process.UID), Command: process.Spec.Command,
+		WorkingDirectory: target.workingDir, DefaultDirectory: target.defaultDirectory,
+		TTY: process.Spec.TTY, Environment: environment, AgentProfile: target.agentProfile,
+		CredentialFiles: target.credentials, CredentialMounts: target.mounts,
+		ExposeCredentials: len(process.Spec.CredentialRefs) > 0, SSHConfigFragments: target.sshConfigFragments,
+	}), nil
 }
 
 func (r *AgentProcessReconciler) claimProcessRuntime(ctx context.Context, key types.NamespacedName, target *resolvedProcessTarget) error {
@@ -632,7 +623,7 @@ func (r *AgentProcessReconciler) applyRuntimeState(ctx context.Context, key type
 		current.Status.StartedAt = &now
 	}
 	current.Status.AttachedClients = state.AttachedClients
-	current.Status.TranscriptPath = filepath.Join(".rc", "processes", current.Name, "transcript.log")
+	current.Status.TranscriptPath = path.Join(".rc", "processes", current.Name, "transcript.log")
 	meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 		Type: workspacesv1alpha1.AgentProcessConditionReady, Status: metav1.ConditionTrue,
 		ObservedGeneration: current.Generation, Reason: "ProcessRunning", Message: "rc-kube owns the running process",

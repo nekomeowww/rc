@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -61,8 +60,8 @@ func (importer *Importer) ImportProcess(ctx context.Context, request ImportProce
 	if len(request.Data) > corev1.MaxSecretSize {
 		return ProcessImportResult{}, fmt.Errorf("credential file exceeds the Kubernetes Secret limit of %d bytes", corev1.MaxSecretSize)
 	}
-	if !filepath.IsAbs(request.MountPath) || filepath.Clean(request.MountPath) != request.MountPath || request.MountPath == string(filepath.Separator) {
-		return ProcessImportResult{}, fmt.Errorf("credential mount path %q must be a clean absolute file path", request.MountPath)
+	if err := ValidateMountPath(request.MountPath); err != nil {
+		return ProcessImportResult{}, err
 	}
 	secretName := request.Name + "-file"
 	if len(secretName) > 253 {

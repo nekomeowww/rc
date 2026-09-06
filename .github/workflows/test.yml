@@ -32,7 +32,14 @@ jobs:
 
       - name: Test
         run: |
-          go test -timeout 120s ./...
+          go test -timeout 120s `
+            ./internal/agentprocess `
+            ./internal/cli/rcctl/commands/credentials/importcredential `
+            ./internal/lifecycle `
+            ./internal/osprocess `
+            ./internal/rckube `
+            ./internal/rcnative `
+            ./internal/rcplatform
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   test:

@@ -50,14 +50,23 @@ func TestImportCommandAcceptsGitHubFlags(t *testing.T) {
 	require.NoError(t, command.Args(command, command.Flags().Args()))
 }
 
-func TestValidateAcceptsProcessCredentialImport(t *testing.T) {
+func TestValidateAcceptsProcessCredentialMountPaths(t *testing.T) {
 	t.Parallel()
 
-	require.NoError(t, (options{
-		credentialType: credentialTypeProcess,
-		name:           "tool-auth",
-		file:           "/tmp/credentials.json",
-		mountPath:      "/home/agent/.tool/credentials.json",
-		environment:    []string{"TOOL_HOME=/home/agent/.tool"},
-	}).validate())
+	for name, mountPath := range map[string]string{
+		"POSIX":   "/home/agent/.tool/credentials.json",
+		"Windows": `C:\home\agent\.tool\credentials.json`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			require.NoError(t, (options{
+				credentialType: credentialTypeProcess,
+				name:           "tool-auth",
+				file:           "/tmp/credentials.json",
+				mountPath:      mountPath,
+				environment:    []string{"TOOL_HOME=/home/agent/.tool"},
+			}).validate())
+		})
+	}
 }

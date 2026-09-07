@@ -424,9 +424,6 @@ With the tested plugins, `ipMasq=false` alone still creates NAT through
 `ipMasqNetwork`. Keep the separate loopback destination policy. Existing
 endpoints need an explicit policy update or recreation after preserving data.
 
-The infrastructure repository contains the
-[complete investigation, hypotheses, failed experiments, and packet evidence](https://github.com/nekomeowww/infra-iac/blob/main/kubernetes/clusters/k8s.ihome.cat/docs/windows-pod-egress-investigation-2026-09-08.md)
-and the [applied configuration, validation, and rollback procedure](https://github.com/nekomeowww/infra-iac/blob/main/kubernetes/clusters/k8s.ihome.cat/docs/windows-pod-routed-egress.md).
 The existing Electron pod and a fresh CNI-created pod passed direct HTTPS,
 DNS, cross-node pod access, and ordinary ClusterIP access; 40 consecutive
 public/Service requests passed. The final configuration was not reboot-tested.

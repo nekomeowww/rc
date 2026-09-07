@@ -138,7 +138,9 @@ k8sServicePort: 6443
 The ownership boundary is important:
 
 - Flannel creates pod interfaces, allocates addresses, owns host-gw routes, and
-  performs IPv4 masquerading.
+  performs IPv4 masquerading on Linux. On Windows it supplies the delegated
+  CNI configuration; the routed-egress workaround below bypasses general
+  Windows SNAT.
 - Cilium attaches to Linux pod interfaces, implements Linux Services and
   Linux network policy, and does not create a second overlay.
 - Native Windows kube-proxy implements Services on Windows.
@@ -224,7 +226,10 @@ Create `C:\k\flannel\net-conf.json`:
 }
 ```
 
-Create `C:\etc\cni\net.d\10-flannel.conf`:
+The following `C:\etc\cni\net.d\10-flannel.conf` is the SNAT baseline.
+On the tested Windows 11 host, public TCP egress failed with this configuration;
+see [Windows public egress and the routed workaround](#windows-public-egress-and-the-routed-workaround)
+for the validated deployment adjustment.
 
 ```json
 {
@@ -401,6 +406,34 @@ kubectl exec <windows-test-pod> -- `
 See the [`New-NetRoute` documentation](https://learn.microsoft.com/powershell/module/nettcpip/new-netroute)
 for current parameter behavior.
 
+## Windows public egress and the routed workaround
+
+During the September 2026 experiment on build `26100.9168`, the host could
+reach public HTTPS endpoints while ordinary Windows pods timed out during
+TCP connection setup. Packet captures showed correct outbound SNAT and a
+valid SYN-ACK arriving at Windows, followed by VFP encapsulation toward the
+host itself and an `Unauthorized MAC` drop. Fresh networks, an independent
+PCIe switch, rebooting, and a native container without Kubernetes reproduced
+the failure. A same-LAN server reproduced it without the upstream proxy path.
+This identifies a failing NAT return path, not a confirmed OS defect or patch.
+
+The cluster now uses a routed-egress workaround: a persistent gateway return
+route for the Windows pod CIDR, Flannel `--ip-masq=false`, and a general NAT
+exception list containing both `0.0.0.0/0` and the exact cluster pod CIDR.
+With the tested plugins, `ipMasq=false` alone still creates NAT through
+`ipMasqNetwork`. Keep the separate loopback destination policy. Existing
+endpoints need an explicit policy update or recreation after preserving data.
+
+The infrastructure repository contains the
+[complete investigation, hypotheses, failed experiments, and packet evidence](https://github.com/nekomeowww/infra-iac/blob/main/kubernetes/clusters/k8s.ihome.cat/docs/windows-pod-egress-investigation-2026-09-08.md)
+and the [applied configuration, validation, and rollback procedure](https://github.com/nekomeowww/infra-iac/blob/main/kubernetes/clusters/k8s.ihome.cat/docs/windows-pod-routed-egress.md).
+The existing Electron pod and a fresh CNI-created pod passed direct HTTPS,
+DNS, cross-node pod access, and ordinary ClusterIP access; 40 consecutive
+public/Service requests passed. The final configuration was not reboot-tested.
+Pod-to-own-Service hairpin still fails, and the gateway next hop must remain
+stable. Existing Electron proxy settings were retained, so this does not
+validate a proxy-free authenticated application workflow.
+
 ## Verify the node
 
 Check registration and exclusion:
@@ -445,6 +478,10 @@ admitting development workloads:
 5. NodePort through every Linux and Windows underlay address.
 6. Linux network-policy allow and deny behavior.
 7. Restarts of Flannel, kube-proxy, and kubelet without recreating workloads.
+8. Public HTTP and HTTPS with `curl.exe --noproxy '*'`, normal certificate
+   checks, and connection timeouts; compare with a host request to the same URL.
+9. A pod accessing a Service that selects itself, separately from ordinary
+   ClusterIP access to another pod.
 
 Delete the test namespace after recording the result.
 
@@ -509,6 +546,9 @@ the join.
 - Cilium features that require ownership of the primary CNI or an encapsulation
   device may be unavailable in chained native-routing mode.
 - Windows host-gw depends on stable underlay addressing and symmetric routes.
+- The tested Windows 11 NAT return-path failure was bypassed with the
+  [routed-egress workaround](#windows-public-egress-and-the-routed-workaround);
+  its separate Pod-to-own-Service hairpin failure remains unresolved.
 - Windows container host/image compatibility is stricter than Linux container
   compatibility.
 - A successful service restart is not a substitute for a controlled reboot

@@ -78,10 +78,6 @@ func (client *Client) Attach(ctx context.Context, id string, clientID string, in
 	if err := responseError(response); err != nil {
 		return err
 	}
-	go func() {
-		<-ctx.Done()
-		_ = connection.Close()
-	}()
 	if input != nil {
 		go func() { _, _ = io.Copy(connection, input) }()
 	}
@@ -111,6 +107,7 @@ func (client *Client) open(ctx context.Context, request protocolRequest) (net.Co
 	if err != nil {
 		return nil, nil, protocolResponse{}, fmt.Errorf("connect to rc-kube: %w", err)
 	}
+	connection = bindConnectionContext(ctx, connection)
 	request.Version = protocolVersion
 	data, err := json.Marshal(request)
 	if err != nil {

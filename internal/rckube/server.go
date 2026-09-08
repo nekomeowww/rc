@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 
 	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
 )
@@ -41,15 +42,20 @@ func NewServer(supervisor *Supervisor) *Server {
 
 // Serve accepts local protocol requests until ctx is cancelled.
 func (server *Server) Serve(ctx context.Context, socketPath string) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	defer server.supervisor.Shutdown()
 	listener, err := listenLocal(socketPath)
 	if err != nil {
 		return fmt.Errorf("listen on rc-kube local endpoint: %w", err)
 	}
-	defer func() { _ = listener.Close() }()
-	go func() {
-		<-ctx.Done()
+	var handlers sync.WaitGroup
+	stop := context.AfterFunc(ctx, func() { _ = listener.Close() })
+	defer func() {
+		cancel()
+		stop()
 		_ = listener.Close()
+		handlers.Wait()
 	}()
 	for {
 		connection, err := listener.Accept()
@@ -59,11 +65,12 @@ func (server *Server) Serve(ctx context.Context, socketPath string) error {
 			}
 			return fmt.Errorf("accept rc-kube connection: %w", err)
 		}
-		go server.handle(ctx, connection)
+		handlers.Go(func() { server.handle(ctx, connection) })
 	}
 }
 
 func (server *Server) handle(serverContext context.Context, connection net.Conn) {
+	connection = bindConnectionContext(serverContext, connection)
 	defer func() { _ = connection.Close() }()
 	reader := bufio.NewReader(connection)
 	line, err := reader.ReadBytes('\n')
@@ -89,7 +96,7 @@ func (server *Server) handle(serverContext context.Context, connection net.Conn)
 			_ = writeProtocolResponse(connection, protocolResponse{Error: "start request is required", Code: protocolCodeBadRequest})
 			return
 		}
-		state, err := server.supervisor.Start(*request.Start)
+		state, err := server.supervisor.Start(serverContext, *request.Start)
 		server.writeState(connection, state, err)
 	case "inspect":
 		state, err := server.supervisor.Inspect(request.ID)

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use Rc"
+  short_description: "Operate rc development Workspaces safely"
+  default_prompt: "Use $use-rc to run this development task in an rc Workspace."

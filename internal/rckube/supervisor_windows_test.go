@@ -26,7 +26,7 @@ func TestWindowsJobStopsDescendants(t *testing.T) {
 	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
 	t.Cleanup(supervisor.Shutdown)
 	request := processruntime.StartRequest{ID: "tree", UID: "tree-uid", Command: []string{executable, "-test.run=^TestWindowsSubprocess$"}, Environment: map[string]string{"RC_TEST_CHILD": "parent", "RC_TEST_MARKER": marker}}
-	state, err := supervisor.Start(request)
+	state, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err)
 	requirements.Equal(phaseRunning, state.Phase)
 	requirements.Eventually(func() bool { _, err := os.Stat(marker); return err == nil }, 15*time.Second, 20*time.Millisecond)
@@ -123,7 +123,7 @@ func TestWindowsAgentCredentialLifetime(t *testing.T) {
 		Command:         []string{"powershell.exe", "-NoProfile", "-Command", "Copy-Item (Join-Path $env:RC_TEST_AGENT_HOME 'auth.json') $env:RC_TEST_MARKER; Start-Sleep -Seconds 60"},
 		Environment:     map[string]string{"RC_TEST_AGENT_HOME": agentHome, "RC_TEST_MARKER": marker},
 	}
-	_, err := supervisor.Start(request)
+	_, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err)
 	requirements.Eventually(func() bool {
 		data, err := os.ReadFile(marker)

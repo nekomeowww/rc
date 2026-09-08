@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -46,6 +45,7 @@ var ErrProcessConflict = errors.New("process ID belongs to another UID")
 var ErrSlowClient = errors.New("attach client was disconnected because it could not keep up with process output")
 
 const (
+	runtimeOSWindows             = "windows"
 	phaseStarting                = "Starting"
 	phaseRunning                 = "Running"
 	phaseExited                  = "Exited"
@@ -149,9 +149,13 @@ func (supervisor *Supervisor) Shutdown() {
 }
 
 // Start launches a command once for the (ID, UID) identity.
-//
-//nolint:gocyclo // Start is an ordered ownership, filesystem, PTY, and process transaction.
-func (supervisor *Supervisor) Start(request processruntime.StartRequest) (processruntime.State, error) {
+// ctx governs preparation; launched children remain owned by the supervisor.
+// The protocol server passes its service context, so client disconnection does
+// not cancel an accepted start. Shutdown must run after pending starts finish.
+func (supervisor *Supervisor) Start(ctx context.Context, request processruntime.StartRequest) (processruntime.State, error) {
+	if err := ctx.Err(); err != nil {
+		return processruntime.State{}, err
+	}
 	if request.ID == "" || request.UID == "" {
 		return processruntime.State{}, errors.New("process ID and UID are required")
 	}
@@ -164,6 +168,9 @@ func (supervisor *Supervisor) Start(request processruntime.StartRequest) (proces
 
 	supervisor.mu.Lock()
 	defer supervisor.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return processruntime.State{}, err
+	}
 	if existing := supervisor.processes[request.ID]; existing != nil {
 		existing.mu.Lock()
 		defer existing.mu.Unlock()
@@ -190,185 +197,27 @@ func (supervisor *Supervisor) Start(request processruntime.StartRequest) (proces
 	if err := os.WriteFile(ownerPath, []byte(request.UID), 0o600); err != nil {
 		return processruntime.State{}, fmt.Errorf("record persistent process ownership: %w", err)
 	}
-	commandLaunched := false
-	defer func() {
-		if !commandLaunched {
-			_ = os.Remove(ownerPath)
-		}
-	}()
-	runtimeDirectory := request.RuntimeDirectory
-	if runtimeDirectory == "" {
-		runtimeDirectory = filepath.Join(supervisor.runtimeRoot, "processes", request.ID)
+	attempt := &processStart{
+		supervisor: supervisor, ownerPath: ownerPath,
+		process: &supervisedProcess{
+			state: processruntime.State{ID: request.ID, UID: request.UID, Phase: phaseStarting},
+			exit:  make(chan struct{}), clients: make(map[string]chan []byte), clientSizes: make(map[string]terminalSize),
+			transcriptMax: supervisor.maxLog, supervisor: supervisor, processID: request.ID,
+		},
 	}
-	if filepath.Base(runtimeDirectory) != request.ID {
-		return processruntime.State{}, errors.New("process runtime directory must end with the process ID")
-	}
-	if err := os.MkdirAll(runtimeDirectory, 0o700); err != nil {
-		return processruntime.State{}, fmt.Errorf("create temporary process runtime directory: %w", err)
-	}
-	transcriptPath := request.TranscriptPath
-	if transcriptPath == "" {
-		transcriptPath = filepath.Join(stateDirectory, "transcript.log")
-	}
-	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o700); err != nil {
-		return processruntime.State{}, fmt.Errorf("create transcript directory: %w", err)
-	}
-	transcript, err := os.OpenFile(transcriptPath, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0o600)
-	if err != nil {
-		return processruntime.State{}, fmt.Errorf("open process transcript: %w", err)
-	}
-	if err := writeCredentialFiles(runtimeDirectory, request.CredentialFiles); err != nil {
-		_ = transcript.Close()
-		return processruntime.State{}, err
-	}
-	credentialsRoot := request.CredentialsRoot
-	if credentialsRoot == "" && (request.ExposeCredentials || len(request.SSHConfigFragments) > 0) {
-		credentialsRoot = filepath.Join(supervisor.runtimeRoot, "credentials")
-	}
-	credentialLinks, err := supervisor.prepareCredentialAliases(request.ID, runtimeDirectory, credentialsRoot, request.CredentialFiles)
-	if err != nil {
-		_ = transcript.Close()
-		return processruntime.State{}, err
-	}
-	mountedCredentialLinks, err := supervisor.prepareCredentialMounts(request.ID, runtimeDirectory, request.CredentialMounts)
-	if err != nil {
-		_ = transcript.Close()
-		supervisor.releaseCredentialAliasesLocked(request.ID, credentialLinks, "")
-		_ = os.RemoveAll(runtimeDirectory)
-		return processruntime.State{}, err
-	}
-	credentialLinks = append(credentialLinks, mountedCredentialLinks...)
-	sshConfigPath := request.SSHConfigPath
-	if sshConfigPath == "" && len(request.SSHConfigFragments) > 0 && supervisor.homeDir != "" {
-		sshConfigPath = filepath.Join(supervisor.homeDir, ".ssh", "config")
-	}
-	sshConfigLinks, err := supervisor.prepareSSHConfig(request.ID, runtimeDirectory, credentialsRoot, sshConfigPath, request.SSHConfigFragments)
-	if err != nil {
-		_ = transcript.Close()
-		supervisor.releaseCredentialAliasesLocked(request.ID, credentialLinks, "")
-		_ = os.RemoveAll(runtimeDirectory)
-		return processruntime.State{}, err
-	}
-	credentialLinks = append(credentialLinks, sshConfigLinks...)
-	agentHome := request.AgentHome
-	if agentHome == "" && request.Agent != nil && request.Agent.Type != "" && supervisor.homeDir != "" {
-		credential := request.Agent.Credential
-		if credential == "" {
-			credential = "default"
-		}
-		agentHome = filepath.Join(supervisor.homeDir, ".rc", "agents", request.Agent.Type, credential)
-	}
-	agentCredentialLink, err := supervisor.prepareAgentHome(request.ID, runtimeDirectory, agentHome, request.CredentialFiles)
-	if err != nil {
-		_ = transcript.Close()
-		supervisor.releaseCredentialAliasesLocked(request.ID, credentialLinks, "")
-		_ = os.RemoveAll(runtimeDirectory)
-		return processruntime.State{}, err
-	}
-	defer func() {
-		if !commandLaunched {
-			supervisor.releaseCredentialAliasesLocked(request.ID, credentialLinks, agentCredentialLink)
-			_ = os.RemoveAll(runtimeDirectory)
-		}
-	}()
-
-	command := exec.Command(request.Command[0], request.Command[1:]...)
-	command.WaitDelay = supervisor.stopGrace
-	command.Dir = request.WorkingDirectory
-	if command.Dir == "" {
-		switch request.DefaultDirectory {
-		case processruntime.DefaultDirectoryHome:
-			command.Dir = supervisor.homeDir
-		case processruntime.DefaultDirectoryWorkspace:
-			command.Dir = supervisor.workspaceDir
-		}
-	}
-	processEnvironment := maps.Clone(request.Environment)
-	if processEnvironment == nil {
-		processEnvironment = make(map[string]string)
-	}
-	if agentHome != "" {
-		if _, exists := processEnvironment["RC_AGENT_HOME"]; !exists {
-			processEnvironment["RC_AGENT_HOME"] = agentHome
-		}
-		if request.Agent != nil && request.Agent.Type == "codex" {
-			if _, exists := processEnvironment["CODEX_HOME"]; !exists {
-				processEnvironment["CODEX_HOME"] = agentHome
-			}
-		}
-	}
-	if request.ExposeCredentials {
-		if _, exists := processEnvironment["RC_CREDENTIALS_DIR"]; !exists {
-			processEnvironment["RC_CREDENTIALS_DIR"] = credentialsRoot
-		}
-	}
-	if request.TTY {
-		if processEnvironment == nil {
-			processEnvironment = make(map[string]string)
-		}
-		if _, configured := processEnvironment["TERM"]; !configured {
-			processEnvironment["TERM"] = "xterm-256color"
-		}
-	}
-	commandEnvironment, err := mergedEnvironment(processEnvironment)
-	if err != nil {
-		_ = transcript.Close()
-		return processruntime.State{}, err
-	}
-	command.Env = commandEnvironment
-	transcriptInfo, err := transcript.Stat()
-	if err != nil {
-		_ = transcript.Close()
-		return processruntime.State{}, fmt.Errorf("stat process transcript: %w", err)
-	}
-	process := &supervisedProcess{
-		state:      processruntime.State{ID: request.ID, UID: request.UID, Phase: phaseStarting},
-		transcript: transcript, transcriptPath: transcriptPath, exit: make(chan struct{}), clients: make(map[string]chan []byte), clientSizes: make(map[string]terminalSize),
-		transcriptMax: supervisor.maxLog, transcriptLen: transcriptInfo.Size(),
-		runtimeDir: runtimeDirectory, credentialLinks: credentialLinks, agentCredentialLink: agentCredentialLink,
-		supervisor: supervisor, processID: request.ID,
-	}
-	output := processOutput{process: process}
-	native, startErr := osprocess.Start(command, osprocess.Options{TTY: request.TTY, Output: output})
-	if startErr != nil {
-		if failed, handled, failureErr := supervisor.recordCommandStartFailureLocked(process, startErr); handled {
-			commandLaunched = failureErr == nil
-			return failed, failureErr
-		}
-		_ = transcript.Close()
-		return processruntime.State{}, fmt.Errorf("start native process: %w", startErr)
-	}
-	commandLaunched = true
-	process.native = native
-	process.input = native.Input()
-	if native.Terminal() {
-		process.terminal = native
-	}
-	process.mu.Lock()
-	process.state.Phase = phaseRunning
-	process.state.PID = native.PID()
-	started := cloneState(process.state)
-	process.mu.Unlock()
-	supervisor.processes[request.ID] = process
-	go process.wait()
-
-	return started, nil
+	return attempt.runLocked(ctx, request)
 }
 
-func (supervisor *Supervisor) recordCommandStartFailureLocked(process *supervisedProcess, startErr error) (processruntime.State, bool, error) {
-	exitCode, terminal := commandStartFailureExitCode(startErr)
-	if !terminal {
-		return processruntime.State{}, false, nil
-	}
+func (supervisor *Supervisor) recordCommandStartFailureLocked(process *supervisedProcess, startErr error, exitCode int32) (processruntime.State, error) {
 	message := fmt.Appendf(nil, "rc-kube: command could not start: %v\n", startErr)
 	if _, err := (processOutput{process: process}).Write(message); err != nil {
-		return processruntime.State{}, true, fmt.Errorf("record command start failure: %w", err)
+		return processruntime.State{}, fmt.Errorf("record command start failure: %w", err)
 	}
 	if err := process.transcript.Sync(); err != nil {
-		return processruntime.State{}, true, fmt.Errorf("sync command start failure: %w", err)
+		return processruntime.State{}, fmt.Errorf("sync command start failure: %w", err)
 	}
 	if err := process.transcript.Close(); err != nil {
-		return processruntime.State{}, true, fmt.Errorf("close command start failure transcript: %w", err)
+		return processruntime.State{}, fmt.Errorf("close command start failure transcript: %w", err)
 	}
 	process.transcript = nil
 	process.state.Phase = phaseExited
@@ -376,10 +225,7 @@ func (supervisor *Supervisor) recordCommandStartFailureLocked(process *supervise
 	process.state.Reason = startErr.Error()
 	close(process.exit)
 	supervisor.processes[process.processID] = process
-	supervisor.releaseCredentialAliasesLocked(process.processID, process.credentialLinks, process.agentCredentialLink)
-	_ = os.RemoveAll(process.runtimeDir)
-
-	return cloneState(process.state), true, nil
+	return cloneState(process.state), nil
 }
 
 func commandStartFailureExitCode(err error) (int32, bool) {
@@ -747,7 +593,7 @@ func mergedEnvironment(overrides map[string]string) ([]string, error) {
 		for index := 0; index < len(entry); index++ {
 			if entry[index] == '=' {
 				name := entry[:index]
-				if runtime.GOOS == "windows" {
+				if runtime.GOOS == runtimeOSWindows {
 					name = strings.ToUpper(name)
 				}
 				values[name] = entry[index+1:]
@@ -763,7 +609,7 @@ func mergedEnvironment(overrides map[string]string) ([]string, error) {
 	seenOverrides := make(map[string]string, len(overrides))
 	for _, originalName := range overrideNames {
 		name := originalName
-		if runtime.GOOS == "windows" {
+		if runtime.GOOS == runtimeOSWindows {
 			name = strings.ToUpper(name)
 		}
 		if previous, exists := seenOverrides[name]; exists {

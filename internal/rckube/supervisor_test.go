@@ -51,7 +51,7 @@ func TestSupervisorRunsCommandOnceAndPersistsTranscript(t *testing.T) {
 		WorkingDirectory: t.TempDir(), TranscriptPath: filepath.Join(stateDirectory, "process-01", "transcript.log"),
 	}
 
-	started, err := supervisor.Start(request)
+	started, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "start command")
 	assertions.Equal(phaseRunning, started.Phase, "return after supervisor owns process")
 	assertions.Positive(started.PID, "record child PID")
@@ -70,7 +70,7 @@ func TestSupervisorRunsCommandOnceAndPersistsTranscript(t *testing.T) {
 	assertions.Nil(owned.transcript, "close transcript file after process exit")
 	owned.mu.Unlock()
 
-	duplicate, err := supervisor.Start(request)
+	duplicate, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "idempotent duplicate start")
 	assertions.Equal(finished.PID, duplicate.PID, "return original process instead of rerunning")
 	assertions.Equal(finished.ExitCode, duplicate.ExitCode, "return original terminal state")
@@ -85,18 +85,18 @@ func TestSupervisorRejectsProcessIDReusedWithAnotherUID(t *testing.T) {
 	requirements := require.New(t)
 	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
 	request := processruntime.StartRequest{ID: "same-id", UID: "first-uid", Command: []string{"sh", "-c", "exit 0"}}
-	_, err := supervisor.Start(request)
+	_, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "start original process")
 
 	request.UID = "different-uid"
-	_, err = supervisor.Start(request)
+	_, err = supervisor.Start(t.Context(), request)
 	requirements.ErrorIs(err, ErrProcessConflict, "process ID cannot identify another CR UID")
 }
 
 func TestSupervisorRejectsProcessIDThatEscapesStateDirectory(t *testing.T) {
 	t.Parallel()
 	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
-	_, err := supervisor.Start(processruntime.StartRequest{ID: "../escape", UID: testProcessUID, Command: []string{testTrueCommand}})
+	_, err := supervisor.Start(t.Context(), processruntime.StartRequest{ID: "../escape", UID: testProcessUID, Command: []string{testTrueCommand}})
 	require.EqualError(t, err, "process ID must be one safe path segment")
 }
 
@@ -116,10 +116,10 @@ func TestSupervisorDoesNotConsumeIdentityWhenRequestFailsBeforeLaunch(t *testing
 		ID: "retryable", UID: testProcessUID, Command: []string{testTrueCommand},
 		RuntimeDirectory: filepath.Join(t.TempDir(), "wrong-process-id"),
 	}
-	_, err := supervisor.Start(request)
+	_, err := supervisor.Start(t.Context(), request)
 	requirements.Error(err, "report pre-launch failure")
 	request.RuntimeDirectory = filepath.Join(t.TempDir(), request.ID)
-	_, err = supervisor.Start(request)
+	_, err = supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "retry same identity after no child was launched")
 }
 
@@ -134,14 +134,14 @@ func TestSupervisorRecordsMissingExecutableAsTerminalCommandFailure(t *testing.T
 		TranscriptPath: filepath.Join(stateDirectory, "missing-command", "transcript.log"),
 	}
 
-	failed, err := supervisor.Start(request)
+	failed, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "a missing executable is a terminal command outcome")
 	requirements.NotNil(failed.ExitCode, "publish a conventional command-not-found exit status")
 	assertions.Equal(phaseExited, failed.Phase, "retain an inspectable terminal process")
 	assertions.Equal(int32(127), *failed.ExitCode, "use the conventional command-not-found exit status")
 	assertions.Contains(failed.Reason, "no such file", "preserve the start failure reason")
 
-	duplicate, err := supervisor.Start(request)
+	duplicate, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "duplicate start returns the retained command failure")
 	assertions.Equal(failed, duplicate, "do not retry a terminal command failure")
 	var transcript bytes.Buffer
@@ -154,7 +154,7 @@ func TestSupervisorBoundsPersistentTranscript(t *testing.T) {
 	requirements := require.New(t)
 	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond, WithMaxTranscriptBytes(16))
 	request := processruntime.StartRequest{ID: "bounded", UID: testProcessUID, Command: []string{"sh", "-c", "printf 12345678901234567890"}}
-	_, err := supervisor.Start(request)
+	_, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "start output producer")
 	requirements.Eventually(func() bool {
 		state, inspectErr := supervisor.Inspect(request.ID)
@@ -177,7 +177,7 @@ func TestSupervisorKeepsCredentialsOutOfPersistentState(t *testing.T) {
 		Environment: map[string]string{testCredentialsVariable: credentialsRoot}, RuntimeDirectory: runtimeDirectory,
 		CredentialsRoot: credentialsRoot, CredentialFiles: map[string][]byte{testGitHubCredentialPath: []byte("secret")},
 	}
-	_, err := supervisor.Start(request)
+	_, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "start credential consumer")
 	requirements.Eventually(func() bool {
 		state, inspectErr := supervisor.Inspect(request.ID)
@@ -212,7 +212,7 @@ func TestSupervisorProjectsGenericCredentialsWithPrivatePermissions(t *testing.T
 		},
 	}
 
-	_, err := supervisor.Start(request)
+	_, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "start credential consumer")
 	t.Cleanup(func() { _, _ = supervisor.Stop(request.ID) })
 
@@ -267,7 +267,7 @@ func TestSupervisorProjectsSSHConfigAndPreservesUserConfiguration(t *testing.T) 
 		},
 	}
 
-	_, err := supervisor.Start(request)
+	_, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "start SSH credential consumer")
 	requirements.Eventually(func() bool {
 		state, inspectErr := supervisor.Inspect(request.ID)
@@ -307,7 +307,7 @@ func TestSupervisorProjectsWritableCredentialFileForProcessLifetime(t *testing.T
 		CredentialMounts: []processruntime.CredentialMount{{Source: testCredentialDataPath, Target: mountPath}},
 	}
 
-	_, err := supervisor.Start(request)
+	_, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "start native credential consumer")
 	requirements.Eventually(func() bool {
 		state, inspectErr := supervisor.Inspect(request.ID)
@@ -335,8 +335,10 @@ func TestSupervisorDoesNotReplaceExistingCredentialMountTarget(t *testing.T) {
 		CredentialMounts: []processruntime.CredentialMount{{Source: testCredentialDataPath, Target: mountPath}},
 	}
 
-	_, err := supervisor.Start(request)
-	requirements.Error(err, "reject a mount over an existing regular file")
+	failed, err := supervisor.Start(t.Context(), request)
+	requirements.NoError(err, "retain a rejected mount as a terminal outcome")
+	requirements.Equal(phaseExited, failed.Phase)
+	requirements.NotEmpty(failed.Reason)
 	data, err := os.ReadFile(mountPath)
 	requirements.NoError(err, "read preserved target")
 	requirements.Equal([]byte("user-data"), data, "preserve an existing user file")
@@ -351,9 +353,10 @@ func TestSharedCredentialProjectionSurvivesAnotherProcessExit(t *testing.T) {
 	runtimeRoot := t.TempDir()
 	credentialsRoot := filepath.Join(runtimeRoot, "credentials")
 	supervisor := NewSupervisor(stateDirectory, 100*time.Millisecond)
+	t.Cleanup(supervisor.Shutdown)
 	credentialFiles := map[string][]byte{testGitHubCredentialPath: []byte("secret")}
 	first := processruntime.StartRequest{
-		ID: "first", UID: "first-uid", Command: []string{"sh", "-c", "sleep 0.4; cat \"$RC_CREDENTIALS_DIR/github/token\""},
+		ID: "first", UID: "first-uid", Command: []string{"sh", "-c", "read -r proceed; cat \"$RC_CREDENTIALS_DIR/github/token\""},
 		Environment: map[string]string{testCredentialsVariable: credentialsRoot}, RuntimeDirectory: filepath.Join(runtimeRoot, "first"),
 		CredentialsRoot: credentialsRoot, CredentialFiles: credentialFiles,
 	}
@@ -362,9 +365,9 @@ func TestSharedCredentialProjectionSurvivesAnotherProcessExit(t *testing.T) {
 		Environment: map[string]string{testCredentialsVariable: credentialsRoot}, RuntimeDirectory: filepath.Join(runtimeRoot, "second"),
 		CredentialsRoot: credentialsRoot, CredentialFiles: credentialFiles,
 	}
-	_, err := supervisor.Start(first)
+	_, err := supervisor.Start(t.Context(), first)
 	requirements.NoError(err, "start first credential consumer")
-	_, err = supervisor.Start(second)
+	_, err = supervisor.Start(t.Context(), second)
 	requirements.NoError(err, "start second credential consumer")
 	requirements.Eventually(func() bool {
 		state, inspectErr := supervisor.Inspect(second.ID)
@@ -372,12 +375,10 @@ func TestSharedCredentialProjectionSurvivesAnotherProcessExit(t *testing.T) {
 	}, 3*time.Second, 10*time.Millisecond, "wait for second process")
 	_, err = os.Stat(filepath.Join(credentialsRoot, "github", "token"))
 	requirements.NoError(err, "retain shared projection while first process is active")
-	requirements.Eventually(func() bool {
-		state, inspectErr := supervisor.Inspect(first.ID)
-		return inspectErr == nil && state.Phase == phaseExited
-	}, 3*time.Second, 10*time.Millisecond, "wait for first process")
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
 	var transcript bytes.Buffer
-	requirements.NoError(supervisor.Logs(first.ID, &transcript), "read first process output")
+	requirements.NoError(supervisor.Attach(ctx, first.ID, "release", bytes.NewBufferString("continue\n"), &transcript, 0, 0), "release first process after checking shared ownership")
 	requirements.Equal("secret", transcript.String(), "first process retains credential after second exits")
 }
 
@@ -387,14 +388,14 @@ func TestSupervisorRestartNeverRerunsPersistedProcessIdentity(t *testing.T) {
 	stateDirectory := t.TempDir()
 	request := processruntime.StartRequest{ID: "restart-safe", UID: testProcessUID, Command: []string{testTrueCommand}}
 	first := NewSupervisor(stateDirectory, 100*time.Millisecond)
-	_, err := first.Start(request)
+	_, err := first.Start(t.Context(), request)
 	requirements.NoError(err, "start original process")
 	requirements.Eventually(func() bool {
 		state, inspectErr := first.Inspect(request.ID)
 		return inspectErr == nil && state.Phase == phaseExited
 	}, 3*time.Second, 10*time.Millisecond, "wait for original process")
 	second := NewSupervisor(stateDirectory, 100*time.Millisecond)
-	_, err = second.Start(request)
+	_, err = second.Start(t.Context(), request)
 	requirements.ErrorIs(err, processruntime.ErrNotFound, "persisted UID becomes lost instead of running twice")
 }
 
@@ -435,7 +436,7 @@ func TestSupervisorDerivesPathsFromLogicalRequest(t *testing.T) {
 			testGitHubCredentialPath: []byte("generic-secret\n"),
 		},
 	}
-	_, err := supervisor.Start(request)
+	_, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err)
 	requirements.Eventually(func() bool {
 		state, inspectErr := supervisor.Inspect(request.ID)
@@ -477,7 +478,7 @@ func TestTerminalAttachStreamsRawPTYBytes(t *testing.T) {
 		ID: "raw-terminal", UID: testProcessUID,
 		Command: []string{"sh", "-c", "sleep 0.1; printf '\\033[31mraw-color\\033[0m'"}, TTY: true,
 	}
-	_, err := supervisor.Start(request)
+	_, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "start terminal process")
 	var attached bytes.Buffer
 	requirements.NoError(supervisor.Attach(context.Background(), request.ID, "viewer", nil, &attached, 24, 80), "attach to live terminal stream")
@@ -492,7 +493,7 @@ func TestTerminalAttachAppliesInitialSizeBeforeForwardingInput(t *testing.T) {
 		ID: "initial-size", UID: testProcessUID,
 		Command: []string{"sh", "-c", "read line; stty size"}, TTY: true,
 	}
-	_, err := supervisor.Start(request)
+	_, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "start terminal process")
 	var attached bytes.Buffer
 	input := bytes.NewBufferString("continue\n")
@@ -508,7 +509,7 @@ func TestTerminalProcessDrainsPTYOutputBeforeExit(t *testing.T) {
 		ID: "drain-terminal", UID: testProcessUID,
 		Command: []string{"sh", "-c", "i=0; while [ $i -lt 4096 ]; do printf '0123456789abcdef'; i=$((i+1)); done; printf 'tail-marker'"}, TTY: true,
 	}
-	_, err := supervisor.Start(request)
+	_, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "start terminal process")
 	requirements.Eventually(func() bool {
 		state, inspectErr := supervisor.Inspect(request.ID)

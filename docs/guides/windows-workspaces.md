@@ -95,6 +95,27 @@ scripts require an explicit shell, such as `cmd.exe /d /s /c ...`, or a
 PowerShell lifecycle script. Do not rely on shell-less process creation to
 execute a batch shim.
 
+## Troubleshooting
+
+### Git SSH authentication fails
+
+Allow the SSH Private Key Credential on the Workspace and select it on the
+Agent Process. Use an SSH remote and check access with `git ls-remote <remote> HEAD`.
+Git for Windows' bundled SSH can resolve home and drive-qualified `Include`
+paths differently from native SSH. rc supplies a temporary configuration with
+the selected SSH fragments through `GIT_SSH_COMMAND` and removes it on exit.
+An explicit or inherited `GIT_SSH_COMMAND` or `GIT_SSH` takes precedence; check
+these overrides and any custom `Include` paths if authentication still fails.
+
+### A command fails before producing output
+
+Check that the client, controller, and runner use compatible versions, then
+inspect the Agent Process termination reason and transcript. Preparation
+failures after the transcript opens normally produce exit code 125; missing
+or unexecutable commands produce 127 or 126. Correct the configuration and
+create a new Agent Process: retrying the same identity returns its retained
+failure. Cancellation before launch rolls back preparation instead.
+
 ## Validation
 
 The tests cover Windows Job Object descendant cleanup, named-pipe requests,

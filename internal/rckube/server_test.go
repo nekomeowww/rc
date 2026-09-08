@@ -19,6 +19,7 @@ limitations under the License.
 package rckube
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -58,8 +59,11 @@ func TestUnixServerKeepsProcessAfterClientDisconnect(t *testing.T) {
 	request := processruntime.StartRequest{
 		ID: "detached", UID: "detached-uid", Command: []string{"sh", "-c", "sleep 0.1; printf done"},
 	}
-	_, err = client.Start(context.Background(), request)
+	startContext, cancelStart := context.WithCancel(t.Context())
+	defer cancelStart()
+	_, err = client.Start(startContext, request)
 	requirements.NoError(err, "start through Unix protocol")
+	cancelStart()
 
 	client = NewClient(socketPath)
 	requirements.Eventually(func() bool {
@@ -86,7 +90,7 @@ func TestSupervisorSupportsConcurrentReadOnlyAttaches(t *testing.T) {
 	requirements := require.New(t)
 	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
 	request := processruntime.StartRequest{ID: "shared", UID: "shared-uid", Command: []string{"sh", "-c", "sleep 0.1; printf shared"}}
-	_, err := supervisor.Start(request)
+	_, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "start shared process")
 
 	var first bytes.Buffer
@@ -121,4 +125,39 @@ func TestUnixServerReportsMissingLogs(t *testing.T) {
 	requirements.Eventually(func() bool {
 		return errors.Is(NewClient(socketPath).Logs(context.Background(), "missing", &bytes.Buffer{}), processruntime.ErrNotFound)
 	}, time.Second, 10*time.Millisecond, "missing transcript is a protocol error")
+}
+
+func TestClientCancellationInterruptsResponseRead(t *testing.T) {
+	t.Parallel()
+	socketFile, err := os.CreateTemp("/tmp", "rc-context-*.sock")
+	require.NoError(t, err)
+	address := socketFile.Name()
+	require.NoError(t, socketFile.Close())
+	require.NoError(t, os.Remove(address))
+	listener, err := listenLocal(address)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close(); _ = os.Remove(address) })
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			done <- acceptErr
+			return
+		}
+		defer func() { _ = connection.Close() }()
+		_, readErr := bufio.NewReader(connection).ReadBytes('\n')
+		cancel()
+		if readErr != nil {
+			done <- readErr
+			return
+		}
+		_ = connection.SetReadDeadline(time.Now().Add(time.Second))
+		_, _ = connection.Read(make([]byte, 1))
+		done <- nil
+	}()
+	err = NewClient(address).Ping(ctx)
+	require.NoError(t, <-done, "complete the peer's request handling")
+	require.ErrorIs(t, err, context.Canceled, "cancellation must interrupt reads after dialing")
 }

@@ -65,6 +65,22 @@ go install github.com/nekomeowww/rc/cmd/rcctl@latest
 rcctl --context kind-rc-dev -n development repo list
 ```
 
+### Install agent skills
+
+Install rc's agent skills with the [Skills CLI](https://www.skills.sh/docs).
+The command prompts for the target agent and scope; select only the skills that
+fit the intended workflow:
+
+```sh
+pnpm dlx skills add nekomeowww/rc --skill use-rc --skill setup-rc --skill setup-rc-locally --skill setup-lobehub-cli
+```
+
+`npx` is equivalent when pnpm is unavailable:
+
+```sh
+npx skills add nekomeowww/rc --skill use-rc --skill setup-rc --skill setup-rc-locally --skill setup-lobehub-cli
+```
+
 ## Quick start with rcctl
 
 For a disposable local cluster on macOS or Linux, install Kind and Docker, then create a single-node cluster with the clone-capable CSI hostpath driver:

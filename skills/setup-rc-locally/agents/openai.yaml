@@ -1,0 +1,4 @@
+interface:
+  display_name: "Setup Rc Locally"
+  short_description: "Create a disposable local rc Kind cluster"
+  default_prompt: "Use $setup-rc-locally to create a local rc development cluster."

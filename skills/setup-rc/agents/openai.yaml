@@ -1,0 +1,4 @@
+interface:
+  display_name: "Setup Rc"
+  short_description: "Install rc on an existing Kubernetes cluster"
+  default_prompt: "Use $setup-rc to prepare this Kubernetes cluster for rc."

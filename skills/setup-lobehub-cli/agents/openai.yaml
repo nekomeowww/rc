@@ -1,0 +1,4 @@
+interface:
+  display_name: "Setup Lobehub CLI"
+  short_description: "Log LobeHub CLI into an rc Workspace"
+  default_prompt: "Use $setup-lobehub-cli to authenticate LobeHub CLI in this rc Workspace."

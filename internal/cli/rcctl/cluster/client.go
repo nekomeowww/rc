@@ -19,6 +19,7 @@ package cluster
 import (
 	"fmt"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -38,15 +39,9 @@ type Client struct {
 }
 
 func New(config *rest.Config) (*Client, error) {
-	scheme := runtime.NewScheme()
-	for name, add := range map[string]func(*runtime.Scheme) error{
-		"core": corev1.AddToScheme, "RBAC": rbacv1.AddToScheme,
-		"configs": configsv1alpha1.AddToScheme, "repositories": repositoriesv1alpha1.AddToScheme,
-		"workspaces": workspacesv1alpha1.AddToScheme,
-	} {
-		if err := add(scheme); err != nil {
-			return nil, fmt.Errorf("register %s API types: %w", name, err)
-		}
+	scheme, err := newScheme()
+	if err != nil {
+		return nil, err
 	}
 	kubeClient, err := client.New(config, client.Options{Scheme: scheme})
 	if err != nil {
@@ -58,4 +53,19 @@ func New(config *rest.Config) (*Client, error) {
 	}
 
 	return &Client{Kube: kubeClient, Processes: processruntime.NewKubeRuntime(podExecutor), Config: rest.CopyConfig(config)}, nil
+}
+
+func newScheme() (*runtime.Scheme, error) {
+	scheme := runtime.NewScheme()
+	for name, add := range map[string]func(*runtime.Scheme) error{
+		"coordination": coordinationv1.AddToScheme, "core": corev1.AddToScheme, "RBAC": rbacv1.AddToScheme,
+		"configs": configsv1alpha1.AddToScheme, "repositories": repositoriesv1alpha1.AddToScheme,
+		"workspaces": workspacesv1alpha1.AddToScheme,
+	} {
+		if err := add(scheme); err != nil {
+			return nil, fmt.Errorf("register %s API types: %w", name, err)
+		}
+	}
+
+	return scheme, nil
 }

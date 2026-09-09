@@ -30,6 +30,7 @@ import (
 
 	"github.com/spf13/cobra"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -74,12 +75,13 @@ type createOptions struct {
 }
 
 type mountOptions struct {
-	workspace string
-	path      string
-	name      string
-	readOnly  bool
-	force     bool
-	noWait    bool
+	workspace   string
+	path        string
+	name        string
+	accessModes []string
+	readOnly    bool
+	force       bool
+	noWait      bool
 }
 
 type workspaceStopper func(context.Context, *workspacesv1alpha1.Workspace) ([]string, error)
@@ -242,6 +244,7 @@ func newMountCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 		},
 	}
 	addMountFlags(repository, repositoryOptions)
+	repository.Flags().StringSliceVar(&repositoryOptions.accessModes, "access-mode", nil, "Override generated Worktree PVC access modes (repeat or comma-separate)")
 	repository.Flags().BoolVar(&repositoryOptions.readOnly, "read-only", false, "Mount the Repository parent itself without creating a Worktree")
 	worktreeOptions := new(mountOptions)
 	worktree := &cobra.Command{
@@ -266,6 +269,14 @@ func addMountFlags(cmd *cobra.Command, options *mountOptions) {
 }
 
 func mountRepository(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, selector string, options mountOptions) error {
+	accessModes, err := command.ParseAccessModes(options.accessModes)
+	if err != nil {
+		return err
+	}
+	if options.readOnly && len(accessModes) > 0 {
+		return fmt.Errorf("--access-mode cannot be used with --read-only")
+	}
+
 	config, namespace, contextName, err := kubeconfigFlags.ResolveWithIdentity()
 	if err != nil {
 		return err
@@ -301,16 +312,7 @@ func mountRepository(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, sele
 		mount.RepositoryRef = &workspacesv1alpha1.LocalReference{Name: repository.Name}
 		mount.ReadOnly = true
 	} else {
-		worktreeName := boundedName(workspace.Name + "-" + mountName)
-		worktree := &repositoriesv1alpha1.Worktree{
-			ObjectMeta: metav1.ObjectMeta{Name: worktreeName, Namespace: namespace, Labels: map[string]string{
-				workspaceservice.CreatedForWorkspaceLabel: workspace.Name,
-				worktreebootstrap.EagerLabel:              "true",
-			}},
-			Spec: repositoriesv1alpha1.WorktreeSpec{
-				RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: repository.Name}, Branch: "rc/" + workspace.Name + "/" + mountName,
-			},
-		}
+		worktree := generatedWorkspaceWorktree(workspace, repository, mountName, accessModes)
 		if err := clusterClient.Kube.Create(cmd.Context(), worktree); err != nil {
 			return fmt.Errorf("create mounted Worktree: %w", err)
 		}
@@ -341,6 +343,30 @@ func mountRepository(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, sele
 	}
 
 	return finishTopologyChange(cmd, clusterClient.Kube, result, options.noWait)
+}
+
+func generatedWorkspaceWorktree(
+	workspace *workspacesv1alpha1.Workspace,
+	repository *repositoriesv1alpha1.Repository,
+	mountName string,
+	accessModes []corev1.PersistentVolumeAccessMode,
+) *repositoriesv1alpha1.Worktree {
+	worktree := &repositoriesv1alpha1.Worktree{
+		ObjectMeta: metav1.ObjectMeta{Name: boundedName(workspace.Name + "-" + mountName), Namespace: repository.Namespace, Labels: map[string]string{
+			workspaceservice.CreatedForWorkspaceLabel: workspace.Name,
+			worktreebootstrap.EagerLabel:              "true",
+		}},
+		Spec: repositoriesv1alpha1.WorktreeSpec{
+			RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: repository.Name}, Branch: "rc/" + workspace.Name + "/" + mountName,
+		},
+	}
+	if len(accessModes) > 0 {
+		worktree.Spec.Storage = &repositoriesv1alpha1.WorktreeStorageSpec{
+			AccessModes: append([]corev1.PersistentVolumeAccessMode(nil), accessModes...),
+		}
+	}
+
+	return worktree
 }
 
 func mountWorktree(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, selector string, options mountOptions) error {

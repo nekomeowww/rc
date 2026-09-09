@@ -165,6 +165,23 @@ func TestRunnerMarksTemporaryWorkspaceAndOwnsGeneratedWorktree(t *testing.T) {
 	assertions.True(*worktree.OwnerReferences[0].Controller, "use controller ownership for generated Worktree")
 }
 
+func TestRunnerWritesEnvironmentToTemporaryWorkspace(t *testing.T) {
+	t.Parallel()
+	requirements := require.New(t)
+	scheme := runtime.NewScheme()
+	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme), "register Repository API types")
+	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	runner := &Runner{Client: kubeClient, NameGenerator: func(string) string { return "temporary" }}
+	environment := []corev1.EnvVar{{Name: NPMRegistryEnvironmentName, Value: testNPMRegistryURL + "/"}, {Name: CorepackRegistryEnvironmentName, Value: testNPMRegistryURL}}
+
+	target, err := runner.Prepare(context.Background(), RunRequest{
+		Namespace: runnerTestNamespace, Temporary: true, Image: runnerTestImage, Env: environment,
+	})
+	requirements.NoError(err, "prepare temporary Workspace")
+	assert.Equal(t, environment, target.Workspace.Spec.Env, "put registry defaults on the temporary Workspace")
+}
+
 func TestRunnerUsesDefaultWorkspaceWhenNoCodeSourceIsSelected(t *testing.T) {
 	t.Parallel()
 	assertions := assert.New(t)

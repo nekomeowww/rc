@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/duration"
@@ -66,6 +67,7 @@ type runOptions struct {
 	serviceAccount   string
 	noServiceAccount bool
 	gpu              command.GPUOptions
+	npmRegistry      string
 }
 
 type listOptions struct {
@@ -134,11 +136,36 @@ func addRunFlags(cmd *cobra.Command, options *runOptions) {
 	cmd.Flags().StringVar(&options.size, "size", "20Gi", "Home volume size for a temporary blank Workspace")
 	cmd.Flags().StringVar(&options.serviceAccount, "service-account", "", "Same-namespace ServiceAccount for a temporary Workspace")
 	cmd.Flags().BoolVar(&options.noServiceAccount, "no-service-account", false, "Disable ServiceAccount token mounting for a temporary Workspace")
+	cmd.Flags().StringVar(&options.npmRegistry, "npm-registry", "", "npm registry URL for this command")
 	options.gpu.AddFlags(cmd.Flags())
 }
 
 //nolint:gocyclo // This command coordinates target, credential, environment, and terminal setup.
 func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []string, tty bool, options runOptions) (returnedErr error) {
+	registryEnvironment, err := workspaceservice.NPMRegistryEnvironment(options.npmRegistry)
+	if err != nil {
+		return err
+	}
+	var files []map[string]string
+	var values map[string]string
+	environmentPrepared := false
+	if len(registryEnvironment) > 0 {
+		files, err = workspaceservice.ReadEnvironmentFiles(options.environmentFiles)
+		if err != nil {
+			return err
+		}
+		if err := workspaceservice.ValidateNPMRegistryEnvironmentConflicts(files, options.environmentVars, registryEnvironment); err != nil {
+			return err
+		}
+		values, err = workspaceservice.BuildProcessEnvironment(workspaceservice.EnvironmentOptions{
+			Caller: os.Environ(), NoPassthrough: options.noPassthrough, Files: files, Explicit: options.environmentVars, Lookup: os.LookupEnv,
+		})
+		if err != nil {
+			return err
+		}
+		workspaceservice.AddNPMRegistryEnvironment(values, registryEnvironment)
+		environmentPrepared = true
+	}
 	osName, tolerations, placementErr := options.placement.Resolve()
 	if placementErr != nil {
 		return placementErr
@@ -218,6 +245,7 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 	runRequest.ServiceAccountName = options.serviceAccount
 	runRequest.AutomountServiceAccountToken = automount
 	runRequest.NamePrefix = agentType
+	routeNPMRegistryEnvironment(options.temporary, &runRequest, values, registryEnvironment)
 	target, err := (&workspaceservice.Runner{Client: clusterClient.Kube}).Prepare(cmd.Context(), runRequest)
 	if err != nil {
 		return err
@@ -244,15 +272,17 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 		}
 		indicator.Stop()
 	}
-	files, err := workspaceservice.ReadEnvironmentFiles(options.environmentFiles)
-	if err != nil {
-		return err
-	}
-	values, err := workspaceservice.BuildProcessEnvironment(workspaceservice.EnvironmentOptions{
-		Caller: os.Environ(), NoPassthrough: options.noPassthrough, Files: files, Explicit: options.environmentVars, Lookup: os.LookupEnv,
-	})
-	if err != nil {
-		return err
+	if !environmentPrepared {
+		files, err = workspaceservice.ReadEnvironmentFiles(options.environmentFiles)
+		if err != nil {
+			return err
+		}
+		values, err = workspaceservice.BuildProcessEnvironment(workspaceservice.EnvironmentOptions{
+			Caller: os.Environ(), NoPassthrough: options.noPassthrough, Files: files, Explicit: options.environmentVars, Lookup: os.LookupEnv,
+		})
+		if err != nil {
+			return err
+		}
 	}
 	processClient := &workspaceservice.ProcessClient{Kube: clusterClient.Kube, Runtime: clusterClient.Processes, Config: config}
 	process, err := processClient.Start(cmd.Context(), workspaceservice.ProcessStartRequest{
@@ -293,6 +323,20 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 		}
 	}
 	return workspaceservice.ResultError(finished)
+}
+
+func routeNPMRegistryEnvironment(temporary bool, request *workspaceservice.RunRequest, processEnvironment map[string]string, registry []corev1.EnvVar) {
+	if len(registry) == 0 {
+		return
+	}
+	if temporary {
+		request.Env = append([]corev1.EnvVar(nil), registry...)
+		workspaceservice.RemoveNPMRegistryEnvironment(processEnvironment)
+		return
+	}
+	for _, variable := range registry {
+		processEnvironment[variable.Name] = variable.Value
+	}
 }
 
 func loadDefaults(contextName string, namespace string) (workspaceservice.Defaults, error) {

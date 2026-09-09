@@ -72,6 +72,7 @@ type createOptions struct {
 	idleTimeout      time.Duration
 	wait             bool
 	gpu              command.GPUOptions
+	npmRegistry      string
 }
 
 type mountOptions struct {
@@ -137,6 +138,9 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 					Resources:          resources,
 				},
 			}
+			if err := applyWorkspaceNPMRegistry(workspace, options.npmRegistry); err != nil {
+				return err
+			}
 			if options.environment != "" {
 				environment := new(workspacesv1alpha1.WorkspaceEnvironment)
 				if err := clusterClient.Kube.Get(cmd.Context(), client.ObjectKey{Name: options.environment, Namespace: namespace}, environment); err != nil {
@@ -199,10 +203,21 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	cmd.Flags().StringVar(&options.serviceAccount, "service-account", "", "Same-namespace ServiceAccount")
 	cmd.Flags().BoolVar(&options.noServiceAccount, "no-service-account", false, "Disable ServiceAccount token mounting")
 	cmd.Flags().DurationVar(&options.idleTimeout, "idle-timeout", 0, "Suspend an idle named Workspace; zero disables")
+	cmd.Flags().StringVar(&options.npmRegistry, "npm-registry", "", "npm registry URL added to Workspace environment defaults")
 	cmd.Flags().BoolVar(&options.wait, "wait", true, "Wait for the Workspace runtime")
 	options.gpu.AddFlags(cmd.Flags())
 
 	return cmd
+}
+
+func applyWorkspaceNPMRegistry(workspace *workspacesv1alpha1.Workspace, value string) error {
+	environment, err := workspaceservice.NPMRegistryEnvironment(value)
+	if err != nil {
+		return err
+	}
+	workspace.Spec.Env = append(workspace.Spec.Env, environment...)
+
+	return nil
 }
 
 func setWorkspaceCredentialReferences(
@@ -1000,9 +1015,19 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 		{Name: "Credentials", Value: workspaceReferenceNames(workspace.Spec.CredentialRefs)},
 		{Name: "ConfigMaps", Value: workspaceReferenceNames(workspace.Spec.ConfigMapRefs)},
 		{Name: "Secrets", Value: workspaceReferenceNames(workspace.Spec.SecretRefs)},
+		{Name: "Environment variables", Value: workspaceEnvironmentNames(workspace.Spec.Env)},
 		{Name: "Lifecycle", Value: lifecycle},
 		{Name: "Conditions", Value: clioutput.Conditions(workspace.Status.Conditions)},
 	}
+}
+
+func workspaceEnvironmentNames(environment []corev1.EnvVar) string {
+	names := make([]string, len(environment))
+	for index, variable := range environment {
+		names[index] = variable.Name
+	}
+
+	return clioutput.ValueOrDash(strings.Join(names, ", "))
 }
 
 func workspaceStorageSummary(storage workspacesv1alpha1.PersistentStorageSpec) string {

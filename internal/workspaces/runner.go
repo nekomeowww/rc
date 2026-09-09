@@ -67,6 +67,7 @@ type RunRequest struct {
 	ServiceAccountName           string
 	AutomountServiceAccountToken *bool
 	NamePrefix                   string
+	Env                          []corev1.EnvVar
 }
 
 type RunTarget struct {
@@ -308,6 +309,7 @@ func (runner *Runner) createTemporaryTarget(ctx context.Context, request RunRequ
 			ServiceAccountName:           request.ServiceAccountName,
 			AutomountServiceAccountToken: request.AutomountServiceAccountToken,
 			RetentionPolicy:              workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit,
+			Env:                          append([]corev1.EnvVar(nil), request.Env...),
 		},
 	}
 	if environmentName != "" {

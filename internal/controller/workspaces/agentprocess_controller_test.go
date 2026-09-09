@@ -89,7 +89,10 @@ func TestAgentProcessReconcileStartsCommandAtReadyWorkspace(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testNamespace},
 		Spec: workspacesv1alpha1.WorkspaceSpec{
 			DefaultWorkingDirectory: "/workspace/rc",
-			Env:                     []corev1.EnvVar{{Name: "CI", Value: testTrueValue}},
+			Env: []corev1.EnvVar{
+				{Name: "CI", Value: "workspace-default"},
+				{Name: "WORKSPACE_ONLY", Value: testTrueValue},
+			},
 		},
 		Status: workspacesv1alpha1.WorkspaceStatus{
 			RuntimePodName: testWorkspaceName,
@@ -110,11 +113,17 @@ func TestAgentProcessReconcileStartsCommandAtReadyWorkspace(t *testing.T) {
 			TTY:          true,
 			DesiredState: workspacesv1alpha1.AgentProcessDesiredStateRunning,
 			AgentType:    agentTypeCodex,
+			EnvSecretRef: &workspacesv1alpha1.LocalReference{Name: "process-env"},
+			Env:          []workspacesv1alpha1.ProcessEnvironmentVariable{{Name: "CI", Key: "CI"}},
 		},
+	}
+	processEnvironment := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "process-env", Namespace: testNamespace},
+		Data:       map[string][]byte{"CI": []byte(testTrueValue)},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(workspace, pod, process).
-		WithObjects(workspace, pod, process).
+		WithObjects(workspace, pod, process, processEnvironment).
 		Build()
 	runtimeClient := &recordingProcessRuntime{startState: processruntime.State{
 		ID: process.Name, UID: string(process.UID), Phase: "Running", PID: 42,
@@ -130,7 +139,8 @@ func TestAgentProcessReconcileStartsCommandAtReadyWorkspace(t *testing.T) {
 	assertions.Equal(string(process.UID), runtimeClient.startedRequest.UID, "use UID as at-most-once key")
 	assertions.Equal(process.Spec.Command, runtimeClient.startedRequest.Command, "preserve exact argv")
 	assertions.Equal(workspace.Spec.DefaultWorkingDirectory, runtimeClient.startedRequest.WorkingDirectory, "use Workspace cwd")
-	assertions.Equal(testTrueValue, runtimeClient.startedRequest.Environment["CI"], "include Workspace environment")
+	assertions.Equal(testTrueValue, runtimeClient.startedRequest.Environment["CI"], "AgentProcess environment overrides the Workspace default")
+	assertions.Equal(testTrueValue, runtimeClient.startedRequest.Environment["WORKSPACE_ONLY"], "inherit Workspace environment without a process override")
 	assertions.Equal(workspace.Namespace, runtimeClient.startedTarget.Namespace, "target same namespace")
 	assertions.Equal(workspace.Status.RuntimePodName, runtimeClient.startedTarget.Pod, "target original runtime Pod")
 
@@ -141,6 +151,9 @@ func TestAgentProcessReconcileStartsCommandAtReadyWorkspace(t *testing.T) {
 	assertions.Equal(testWorkspaceName, persisted.Status.RuntimePodName, "publish runtime Pod name")
 	assertions.NotNil(persisted.Status.StartedAt, "record start time")
 	assertions.Equal(".rc/processes/codex-01k2example/transcript.log", persisted.Status.TranscriptPath, "publish transcript index")
+	persistedWorkspace := new(workspacesv1alpha1.Workspace)
+	requirements.NoError(kubeClient.Get(ctx, types.NamespacedName{Name: workspace.Name, Namespace: workspace.Namespace}, persistedWorkspace), "get unchanged Workspace")
+	assertions.Equal("workspace-default", persistedWorkspace.Spec.Env[0].Value, "process override does not mutate Workspace defaults")
 }
 
 func TestProcessCredentialProjectsFilesAndEnvsIndependently(t *testing.T) {

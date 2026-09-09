@@ -124,6 +124,33 @@ func TestWorkspaceDetailShowsRetentionPolicy(t *testing.T) {
 	assert.Contains(t, fields, clioutput.Field{Name: "Retention policy", Value: string(workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit)}, "expose automatic cleanup semantics")
 }
 
+func TestWorkspaceCreateNPMRegistryWritesWorkspaceEnvironment(t *testing.T) {
+	t.Parallel()
+	workspace := &workspacesv1alpha1.Workspace{}
+
+	err := applyWorkspaceNPMRegistry(workspace, "http://verdaccio.rc-system.svc.cluster.local:4873")
+	require.NoError(t, err, "apply a valid npm registry")
+	assert.Equal(t, []corev1.EnvVar{
+		{Name: "NPM_CONFIG_REGISTRY", Value: "http://verdaccio.rc-system.svc.cluster.local:4873/"},
+		{Name: "COREPACK_NPM_REGISTRY", Value: "http://verdaccio.rc-system.svc.cluster.local:4873"},
+	}, workspace.Spec.Env, "store registry defaults in Workspace spec.env")
+
+	command := newCreateCommand(kubeconfig.NewFlags())
+	require.NotNil(t, command.Flag("npm-registry"), "workspace create exposes the convenience flag")
+}
+
+func TestWorkspaceDetailShowsEnvironmentVariableNames(t *testing.T) {
+	t.Parallel()
+	workspace := &workspacesv1alpha1.Workspace{Spec: workspacesv1alpha1.WorkspaceSpec{Env: []corev1.EnvVar{
+		{Name: "NPM_CONFIG_REGISTRY", Value: "https://registry.example.com/"},
+		{Name: "FROM_SECRET", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{Key: "value"}}},
+	}}}
+
+	fields := workspaceDetailFields(workspace)
+
+	assert.Contains(t, fields, clioutput.Field{Name: "Environment variables", Value: "NPM_CONFIG_REGISTRY, FROM_SECRET"}, "show names without exposing values")
+}
+
 func TestWorkspaceListTableUsesHumanAgeAndWideMetadata(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)

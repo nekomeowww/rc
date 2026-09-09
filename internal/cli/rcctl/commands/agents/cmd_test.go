@@ -23,6 +23,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -30,12 +31,14 @@ import (
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
+	workspaceservice "github.com/nekomeowww/rc/internal/workspaces"
 )
 
 const testAgentCommand = "codex"
 const testTaskArgument = "task"
 const testWorkspaceFlag = "--workspace"
 const testDevelopmentName = "dev"
+const testEnvironmentValue = "value"
 
 func TestRunCommandStopsParsingRcctlFlagsAtCommand(t *testing.T) {
 	command := newRunCommand(kubeconfig.NewFlags(), true)
@@ -64,6 +67,61 @@ func TestExecCommandDoesNotAcceptDetachFlag(t *testing.T) {
 	command := newRunCommand(kubeconfig.NewFlags(), false)
 	err := command.ParseFlags([]string{"--detach", "--", testAgentCommand, testTaskArgument})
 	require.Error(t, err)
+}
+
+func TestRunAndExecCommandsExposeNPMRegistry(t *testing.T) {
+	t.Parallel()
+	for _, tty := range []bool{true, false} {
+		command := newRunCommand(kubeconfig.NewFlags(), tty)
+		require.NotNil(t, command.Flag("npm-registry"), "run and exec share the registry flag")
+	}
+}
+
+func TestNPMRegistryRoutingMatchesWorkspaceLifetime(t *testing.T) {
+	t.Parallel()
+	registry := []corev1.EnvVar{
+		{Name: workspaceservice.NPMRegistryEnvironmentName, Value: "https://registry.example.com/"},
+		{Name: workspaceservice.CorepackRegistryEnvironmentName, Value: "https://registry.example.com"},
+	}
+
+	t.Run("ExistingWorkspace", func(t *testing.T) {
+		request := new(workspaceservice.RunRequest)
+		processEnvironment := map[string]string{"OTHER": testEnvironmentValue}
+
+		routeNPMRegistryEnvironment(false, request, processEnvironment, registry)
+
+		assert.Empty(t, request.Env, "do not mutate an existing Workspace")
+		assert.Equal(t, "https://registry.example.com/", processEnvironment[workspaceservice.NPMRegistryEnvironmentName], "set npm for this AgentProcess")
+		assert.Equal(t, "https://registry.example.com", processEnvironment[workspaceservice.CorepackRegistryEnvironmentName], "set Corepack for this AgentProcess")
+	})
+	t.Run("TemporaryWorkspace", func(t *testing.T) {
+		request := new(workspaceservice.RunRequest)
+		processEnvironment := map[string]string{
+			workspaceservice.NPMRegistryEnvironmentName:      "caller-npm",
+			workspaceservice.CorepackRegistryEnvironmentName: "caller-corepack",
+			"npm_config_registry":                            "case-distinct",
+			"OTHER":                                          testEnvironmentValue,
+		}
+
+		routeNPMRegistryEnvironment(true, request, processEnvironment, registry)
+
+		assert.Equal(t, registry, request.Env, "put defaults on the temporary Workspace")
+		assert.NotContains(t, processEnvironment, workspaceservice.NPMRegistryEnvironmentName, "do not shadow the temporary Workspace npm default")
+		assert.NotContains(t, processEnvironment, workspaceservice.CorepackRegistryEnvironmentName, "do not shadow the temporary Workspace Corepack default")
+		assert.Equal(t, "case-distinct", processEnvironment["npm_config_registry"], "leave case-only variants for existing Windows conflict detection")
+		assert.Equal(t, testEnvironmentValue, processEnvironment["OTHER"], "preserve unrelated process environment")
+	})
+}
+
+func TestNPMRegistryRoutingWithoutFlagLeavesEnvironmentUnchanged(t *testing.T) {
+	t.Parallel()
+	request := &workspaceservice.RunRequest{Env: []corev1.EnvVar{{Name: "WORKSPACE_DEFAULT", Value: testEnvironmentValue}}}
+	processEnvironment := map[string]string{workspaceservice.NPMRegistryEnvironmentName: "caller-value"}
+
+	routeNPMRegistryEnvironment(true, request, processEnvironment, nil)
+
+	assert.Equal(t, []corev1.EnvVar{{Name: "WORKSPACE_DEFAULT", Value: testEnvironmentValue}}, request.Env, "preserve the request when the flag is absent")
+	assert.Equal(t, map[string]string{workspaceservice.NPMRegistryEnvironmentName: "caller-value"}, processEnvironment, "preserve process environment when the flag is absent")
 }
 
 func TestTemporaryFlagPromisesAutomaticWorkspaceCleanup(t *testing.T) {

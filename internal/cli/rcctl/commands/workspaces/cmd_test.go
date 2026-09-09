@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -35,6 +36,7 @@ import (
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	commandutil "github.com/nekomeowww/rc/internal/cli/rcctl/command"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
 	clioutput "github.com/nekomeowww/rc/pkg/output"
@@ -149,6 +151,69 @@ func TestWorkspaceListAndGetCommandsExposeOutputFormats(t *testing.T) {
 	require.NotNil(t, getCommand.Flag("output"), "get accepts a structured output format")
 	require.NoError(t, getCommand.Args(getCommand, []string{testWorkspaceName}), "get accepts exactly one Workspace name")
 	require.Error(t, getCommand.Args(getCommand, nil), "get requires a Workspace name")
+}
+
+func TestWorkspaceMountRepositoryAcceptsRepeatedAndCommaSeparatedAccessModes(t *testing.T) {
+	t.Parallel()
+	mountCommand := newMountCommand(kubeconfig.NewFlags())
+	repositoryCommand, _, err := mountCommand.Find([]string{"repo"})
+	require.NoError(t, err, "find the Repository mount command")
+	require.NoError(t, repositoryCommand.ParseFlags([]string{
+		"--access-mode", "ReadWriteOnce,ReadOnlyMany",
+		"--access-mode", "ReadWriteMany,ReadWriteOncePod",
+	}), "parse repeated and comma-separated access modes")
+	values, err := repositoryCommand.Flags().GetStringSlice("access-mode")
+	require.NoError(t, err, "read parsed access modes")
+
+	modes, err := commandutil.ParseAccessModes(values)
+	require.NoError(t, err, "validate every supported access mode")
+	assert.Equal(t, []corev1.PersistentVolumeAccessMode{
+		corev1.ReadWriteOnce,
+		corev1.ReadOnlyMany,
+		corev1.ReadWriteMany,
+		corev1.ReadWriteOncePod,
+	}, modes, "preserve repeated and comma-separated access mode order")
+}
+
+func TestGeneratedWorkspaceWorktreeAccessModes(t *testing.T) {
+	t.Parallel()
+	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testWorkspaceNamespace}}
+	repository := &repositoriesv1alpha1.Repository{
+		ObjectMeta: metav1.ObjectMeta{Name: "lobehub-cloud", Namespace: testWorkspaceNamespace},
+	}
+
+	t.Run("ReadWriteOnce", func(t *testing.T) {
+		worktree := generatedWorkspaceWorktree(workspace, repository, "lobehub-cloud", []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce})
+
+		require.NotNil(t, worktree.Spec.Storage, "create a storage override for an explicit access mode")
+		assert.Equal(t, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, worktree.Spec.Storage.AccessModes, "request a single-node writable child PVC")
+		assert.Empty(t, worktree.Spec.Storage.StorageClassName, "inherit the Repository StorageClass")
+		assert.Nil(t, worktree.Spec.Storage.Size, "inherit the Repository size")
+	})
+
+	t.Run("Multiple", func(t *testing.T) {
+		modes := []corev1.PersistentVolumeAccessMode{corev1.ReadOnlyMany, corev1.ReadWriteMany}
+		worktree := generatedWorkspaceWorktree(workspace, repository, "lobehub-cloud", modes)
+
+		require.NotNil(t, worktree.Spec.Storage, "create a storage override for explicit access modes")
+		assert.Equal(t, modes, worktree.Spec.Storage.AccessModes, "write every requested access mode to the generated Worktree")
+	})
+
+	t.Run("DefaultReadWriteMany", func(t *testing.T) {
+		worktree := generatedWorkspaceWorktree(workspace, repository, "lobehub-cloud", nil)
+
+		assert.Nil(t, worktree.Spec.Storage, "omit the override so the Worktree controller retains its ReadWriteMany default")
+	})
+}
+
+func TestWorkspaceMountRepositoryRejectsInvalidAccessMode(t *testing.T) {
+	t.Parallel()
+	cmd := newMountCommand(kubeconfig.NewFlags())
+
+	err := mountRepository(cmd, kubeconfig.NewFlags(), "lobehub-cloud", mountOptions{accessModes: []string{"SingleNodeWriter"}})
+
+	require.Error(t, err, "reject an unsupported access mode")
+	assert.EqualError(t, err, `unsupported --access-mode "SingleNodeWriter"`)
 }
 
 func TestApplyWorkspaceMountValidatesConflictsBeforeStoppingProcesses(t *testing.T) {

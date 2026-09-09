@@ -10,7 +10,6 @@ import (
 
 	"github.com/spf13/cobra"
 	coordinationv1 "k8s.io/api/coordination/v1"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -419,7 +418,7 @@ func runAdd(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, options addOp
 		return err
 	}
 
-	accessModes, err := parseAccessModes(options.accessModes)
+	accessModes, err := command.ParseAccessModes(options.accessModes)
 	if err != nil {
 		return err
 	}
@@ -478,23 +477,4 @@ func parseSize(value string) (*resource.Quantity, error) {
 	}
 
 	return &parsed, nil
-}
-
-func parseAccessModes(values []string) ([]corev1.PersistentVolumeAccessMode, error) {
-	if len(values) == 0 {
-		return nil, nil
-	}
-
-	accessModes := make([]corev1.PersistentVolumeAccessMode, 0, len(values))
-	for _, value := range values {
-		mode := corev1.PersistentVolumeAccessMode(value)
-		switch mode {
-		case corev1.ReadWriteOnce, corev1.ReadOnlyMany, corev1.ReadWriteMany, corev1.ReadWriteOncePod:
-			accessModes = append(accessModes, mode)
-		default:
-			return nil, fmt.Errorf("unsupported --access-mode %q", value)
-		}
-	}
-
-	return accessModes, nil
 }

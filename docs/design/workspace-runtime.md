@@ -712,7 +712,22 @@ PVC and bootstrap Jobs.
 `workspace mount repo` creates and mounts a writable Worktree by default. Its
 explicit `--read-only` form mounts the Repository parent itself. Topology
 changes follow the active-process rejection and `--force` rules above. Mount
-options include `--workspace`, `--path`, `--name`, `--force`, and `--no-wait`.
+options include `--workspace`, `--path`, `--name`, `--access-mode`, `--force`,
+and `--no-wait`.
+For a generated Worktree, `--access-mode` overrides the child PVC access modes
+and may be repeated or comma-separated. For example, an iSCSI StorageClass that
+supports a mounted filesystem on only one node can use:
+
+```sh
+rcctl -n default workspace mount repo lobehub-cloud \
+  --workspace lobehub-dev \
+  --name lobehub-cloud \
+  --path lobehub-cloud \
+  --access-mode ReadWriteOnce
+```
+
+When `--access-mode` is omitted, generated Worktrees retain the existing
+`ReadWriteMany` default.
 Mount and unmount validate the requested topology before stopping processes,
 then wait for `status.observedGeneration` and the Ready condition to observe
 the updated generation unless `--no-wait` is set. An explicitly selected

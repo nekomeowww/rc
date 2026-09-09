@@ -110,6 +110,10 @@ Run lint separately:
 make lint
 ```
 
+The toolchains are part of the immutable images. Workspace processes should
+not use sudo, Chocolatey, winget, or another runtime installer to provide these
+system dependencies.
+
 The e2e suite creates an isolated Kind cluster, installs the CSI hostpath driver,
 builds and loads the manager image, deploys rc, runs the tests, and removes the
 cluster:

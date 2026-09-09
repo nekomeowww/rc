@@ -105,7 +105,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \
         btop \
+        build-essential \
         ca-certificates \
+        cmake \
         curl \
         dbus-bin \
         dbus-daemon \
@@ -116,7 +118,6 @@ RUN apt-get update \
         fonts-noto-color-emoji \
         fonts-unifont \
         fonts-wqy-zenhei \
-        gcc \
         git \
         git-lfs \
         grim \
@@ -150,11 +151,12 @@ RUN apt-get update \
         libxfixes3 \
         libxkbcommon0 \
         libxrandr2 \
-        make \
         mesa-utils \
         openssh-client \
         pipewire \
+        pkg-config \
         procps \
+        python3 \
         ripgrep \
         sudo \
         sway \

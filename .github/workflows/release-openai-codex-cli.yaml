@@ -75,6 +75,62 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Build amd64 OpenAI Codex CLI smoke image
+        env:
+          CODEX_VERSION: ${{ inputs.codex_version }}
+          RUNNER_VERSION: ${{ inputs.runner_version }}
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --file images/openai-codex-cli/Dockerfile \
+            --build-arg "CODEX_VERSION=${CODEX_VERSION}" \
+            --build-arg "RUNNER_IMAGE=ghcr.io/${GITHUB_REPOSITORY}/runner:${RUNNER_VERSION}" \
+            --tag rc-openai-codex-cli:smoke \
+            --cache-from type=gha \
+            --load \
+            images/openai-codex-cli
+
+      - name: Smoke test OpenAI Codex CLI native build toolchain
+        run: |
+          smoke="${RUNNER_TEMP}/rc-native-toolchain-smoke"
+          mkdir -p "${smoke}"
+          printf '%s\n' \
+            '{"name":"rc-native-toolchain-smoke","version":"1.0.0","private":true,"gypfile":true}' \
+            > "${smoke}/package.json"
+          printf '%s\n' \
+            '{"targets":[{"target_name":"smoke","sources":["smoke.cc"]}]}' \
+            > "${smoke}/binding.gyp"
+          cat > "${smoke}/smoke.cc" <<'EOF'
+          #include <node_api.h>
+          napi_value Answer(napi_env env, napi_callback_info info) {
+            napi_value result;
+            napi_create_int32(env, 42, &result);
+            return result;
+          }
+          napi_value Init(napi_env env, napi_value exports) {
+            napi_value answer;
+            napi_create_function(env, "answer", NAPI_AUTO_LENGTH, Answer, nullptr, &answer);
+            napi_set_named_property(env, exports, "answer", answer);
+            return exports;
+          }
+          NAPI_MODULE(NODE_GYP_MODULE_NAME, Init)
+          EOF
+          docker run --rm \
+            --user 1000:1000 \
+            --volume "${smoke}:/smoke" \
+            --entrypoint /bin/bash \
+            rc-openai-codex-cli:smoke \
+            -euo pipefail -c '
+              python3 --version
+              g++ --version
+              make --version
+              cmake --version
+              pkg-config --version
+              cd /smoke
+              npm install --foreground-scripts --no-audit --no-fund
+              node -e "if (require(\"./build/Release/smoke.node\").answer() !== 42) process.exit(1)"
+            '
+
       - name: Build and publish OpenAI Codex CLI
         id: push
         uses: docker/build-push-action@v6

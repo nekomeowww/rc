@@ -6,12 +6,17 @@ See the
 See the [live experiment results](../../docs/research/windows-electron-experiment.md)
 for what has actually passed on the Windows node.
 
-The Dockerfile's `runner` target contains Server Core, rcctl, rc-kube, Node, Git,
-standard Windows fonts, and the Visual C++ runtime. The `codex` target adds
-Codex CLI, pnpm, and Bun. Both start through `entrypoint.ps1`, which loads the
-fonts into the container session and invokes the supplied command. Kubernetes
-owns the ordinary container's process lifetime. The default command is
-`rc-kube.exe serve`; Windows Pod construction preserves the image entrypoint.
+The Dockerfile's `runner` target contains the .NET Framework runtime on Windows
+Server Core LTSC 2025, rcctl, rc-kube, Node, Git, Python, CMake, Visual Studio
+2022 Build Tools with the Desktop C++ toolchain and Windows 11 SDK, standard
+Windows fonts, and the Visual C++ runtime. The `codex` target adds Codex CLI,
+pnpm, and Bun. Both start through `entrypoint.ps1`, which loads the Visual Studio
+developer environment and fonts into the container session before invoking the
+supplied command. This makes `cl.exe` and MSBuild available to interactive
+commands while preserving Visual Studio's registered-instance discovery for
+node-gyp. Kubernetes owns the ordinary container's process lifetime. The
+default command is `rc-kube.exe serve`; Windows Pod construction preserves the
+image entrypoint.
 
 ## Assets
 
@@ -21,14 +26,18 @@ binaries, then copy `bin/windows-amd64` to the Windows build machine.
 Stage assets on a Windows machine into the ignored `assets/` directory using
 `prepare-assets.ps1`. Supply only the dedicated tool installation directories;
 application source and user profiles do not belong in the build context.
-`prepare-ci-assets.ps1` downloads the public Node and Visual C++ inputs and
-uses the Git and font files installed on a GitHub-hosted Windows runner. It is
-used by pull-request image validation and tagged releases.
+`prepare-ci-assets.ps1` downloads the public Node, Python, CMake, Visual Studio
+Build Tools, and Visual C++ inputs and uses the Git and font files installed on
+a GitHub-hosted Windows runner. It is used by pull-request image validation and
+tagged releases.
 
 The tested inputs are:
 
 - Node 26 Windows x64. The experiment used `26.8.1` from the [official distribution](https://nodejs.org/dist/v26.8.1/).
 - Portable Git for Windows; the experiment used the node's `2.51.0.windows.2` installation.
+- Python `3.13.15` x64 from the [official Python distribution](https://www.python.org/ftp/python/3.13.15/).
+- CMake `4.3.5` x64 from the [official Kitware release](https://github.com/Kitware/CMake/releases/tag/v4.3.5).
+- The [Visual Studio 2022 Build Tools bootstrapper](https://aka.ms/vs/17/release/vs_buildtools.exe), installing `Microsoft.VisualStudio.Workload.VCTools`, the x64/x86 MSVC tools, and Windows SDK 10.0.26100.
 - The [Visual C++ x64 redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe).
 - Arial, Arial Bold, Segoe UI, Segoe UI Bold, Tahoma, Tahoma Bold, and Microsoft Sans Serif from the Windows host's Fonts directory.
 - A dedicated npm prefix containing `@openai/codex@0.147.0`, `pnpm@10.26.2`, and `bun@1.4.0`.
@@ -38,12 +47,22 @@ base-image family. The staging script runs `node.exe --version` to verify that
 it executes and report the supplied version; it does not require a specific
 patch release. The versions and hashes below record the earlier experiment.
 
-The source archives used in this experiment had these SHA-256 hashes:
+The fixed build assets have these SHA-256 hashes:
 
 ```text
-node-v26.8.1-win-x64.zip
-57693d8e93d1b04e7b7de46aca53ecd63e97564e73de36a68428d7ff08d83587
+57693d8e93d1b04e7b7de46aca53ecd63e97564e73de36a68428d7ff08d83587  node-v26.8.1-win-x64.zip
+edec09c4853aeae9ac36efb8c9f95b6b8e2fee65eee56d9767a8b7c69c574403  python-3.13.15-amd64.exe
+dac5ddcd2d58699ebe1211173afabfe6f0ca24340e2e995f333cb3e00cff72d6  cmake-4.3.5-windows-x86_64.msi
 ```
+
+The staging script verifies these three fixed-version assets before copying
+them into the build context. Microsoft distributes the Visual Studio and VC
+Redistributable bootstrappers through mutable official release URLs, so their
+exact servicing build is not reproducible across dates. The script verifies
+their Microsoft Authenticode signatures instead. They use unattended
+installation and accept success with either exit code `0` or the
+reboot-required code `3010`. The image removes the staged installers and
+Package Cache after setup, and Build Tools uses `--nocache`.
 
 Install the npm tools with the pinned Node on PATH, into a new dedicated prefix:
 
@@ -59,8 +78,19 @@ Then stage the inputs (replace paths with the extracted installation paths):
   -NodeDirectory C:\downloads\node-v26.8.1-win-x64 `
   -GitDirectory C:\tools\git `
   -OpenaiDirectory C:\rc-image-tools `
+  -PythonInstaller C:\downloads\python-3.13.15-amd64.exe `
+  -CMakeInstaller C:\downloads\cmake-4.3.5-windows-x86_64.msi `
+  -VSBuildToolsBootstrapper C:\downloads\vs_buildtools.exe `
   -VCRuntimeInstaller C:\downloads\vc_redist.x64.exe
 ```
+
+The native C++ workload and Windows SDK add several gigabytes to the unpacked
+Windows image (typically about 7-10 GB, depending on the servicing release
+selected by Microsoft's bootstrapper). Builds need at least 2 GB of memory and
+a Windows container disk large enough for the base image, transient installer
+payloads, and final Build Tools layers. Record the exact delta from
+`docker image inspect` or `ctr images ls` in release validation because the
+mutable Build Tools channel makes a single permanent size figure misleading.
 
 The experiment's images contain locally supplied Windows fonts and were kept
 in the node's local image store.
@@ -129,3 +159,14 @@ The earlier experiment images bundled Electron and a temporary test application.
 Their recorded digests and screenshots describe those historical builds. Rebuild
 from the current Dockerfile for the generic runtime image; those results do not
 validate Windows Repository/Worktree integration.
+
+For a toolchain smoke check, run the image through its normal entrypoint as the
+same user used by the Workspace and check `python.exe --version`,
+`cmake.exe --version`, `cl.exe /?`, and `MSBuild.exe -version`. A native addon
+fixture should then run its package's `node-gyp rebuild`; invoking the normal
+entrypoint is important because it imports `VsDevCmd.bat` before starting the
+command. Python and CMake are on the machine-level image PATH.
+`NODE_GYP_FORCE_PYTHON=C:\Python3\python.exe`,
+`npm_config_msvs_version=2022`, and the registered Build Tools instance allow
+node-gyp to select the in-container Python and Visual Studio 2022 without a
+CI-host installation.

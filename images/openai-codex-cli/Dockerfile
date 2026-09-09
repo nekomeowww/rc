@@ -34,8 +34,14 @@ COPY --from=codex /opt/openai /opt/openai
 # and Worktree use different filesystems, pnpm otherwise places the store inside
 # the repository and development file watchers traverse it.
 USER root
+# RUNNER_IMAGE is overridable, so keep the native build toolchain explicit for
+# older or custom Debian-compatible runner images.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends g++ \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        pkg-config \
+        python3 \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sfn /opt/openai/bin/bun /usr/local/bin/bun \
     && ln -sfn /opt/openai/bin/bunx /usr/local/bin/bunx \

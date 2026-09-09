@@ -3,6 +3,9 @@ param(
     [Parameter(Mandatory=$true)][string]$NodeDirectory,
     [Parameter(Mandatory=$true)][string]$GitDirectory,
     [string]$OpenaiDirectory,
+    [Parameter(Mandatory=$true)][string]$PythonInstaller,
+    [Parameter(Mandatory=$true)][string]$CMakeInstaller,
+    [Parameter(Mandatory=$true)][string]$VSBuildToolsBootstrapper,
     [Parameter(Mandatory=$true)][string]$VCRuntimeInstaller,
     [string]$FontDirectory = "$env:WINDIR\Fonts"
 )
@@ -12,6 +15,9 @@ $required = @(
     (Join-Path $RCBinaryDirectory 'rcctl.exe'),
     (Join-Path $NodeDirectory 'node.exe'),
     (Join-Path $GitDirectory 'cmd\git.exe'),
+    $PythonInstaller,
+    $CMakeInstaller,
+    $VSBuildToolsBootstrapper,
     $VCRuntimeInstaller
 )
 if ($OpenaiDirectory) {
@@ -37,6 +43,9 @@ Copy-AssetTree $GitDirectory 'git'
 if ($OpenaiDirectory) {
     Copy-AssetTree $OpenaiDirectory 'openai'
 }
+Copy-Item -LiteralPath $PythonInstaller -Destination (Join-Path $assets 'python-amd64.exe') -Force
+Copy-Item -LiteralPath $CMakeInstaller -Destination (Join-Path $assets 'cmake-x64.msi') -Force
+Copy-Item -LiteralPath $VSBuildToolsBootstrapper -Destination (Join-Path $assets 'vs_buildtools.exe') -Force
 Copy-Item -LiteralPath $VCRuntimeInstaller -Destination (Join-Path $assets 'vc_redist.x64.exe') -Force
 foreach ($file in @('arial.ttf','arialbd.ttf','segoeui.ttf','segoeuib.ttf','tahoma.ttf','tahomabd.ttf','micross.ttf')) {
     Copy-Item -LiteralPath (Join-Path $FontDirectory $file) -Destination (Join-Path $assets "fonts\$file") -Force

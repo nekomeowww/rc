@@ -77,7 +77,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \
         btop \
+        build-essential \
         ca-certificates \
+        cmake \
         curl \
         fonts-freefont-ttf \
         fonts-ipafont-gothic \
@@ -86,7 +88,6 @@ RUN apt-get update \
         fonts-tlwg-loma-otf \
         fonts-unifont \
         fonts-wqy-zenhei \
-        gcc \
         git \
         git-lfs \
         gzip \
@@ -115,9 +116,10 @@ RUN apt-get update \
         libxfixes3 \
         libxkbcommon0 \
         libxrandr2 \
-        make \
         openssh-client \
+        pkg-config \
         procps \
+        python3 \
         ripgrep \
         sudo \
         tar \

@@ -61,6 +61,134 @@ jobs:
           docker build --target runner --tag rc-runner-windows:test images/runner-windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Smoke test Windows native build toolchain
+        run: |
+          $smoke = Join-Path $env:RUNNER_TEMP 'rc-native-toolchain-smoke'
+          New-Item -ItemType Directory -Force $smoke | Out-Null
+          @'
+          {"name":"rc-native-toolchain-smoke","version":"1.0.0","private":true,"gypfile":true}
+          '@ | Set-Content (Join-Path $smoke 'package.json') -Encoding ascii
+          @'
+          {"targets":[{"target_name":"smoke","sources":["smoke.cc"]}]}
+          '@ | Set-Content (Join-Path $smoke 'binding.gyp') -Encoding ascii
+          @'
+          #include <node_api.h>
+          napi_value Answer(napi_env env, napi_callback_info info) {
+            napi_value result;
+            napi_create_int32(env, 42, &result);
+            return result;
+          }
+          napi_value Init(napi_env env, napi_value exports) {
+            napi_value answer;
+            napi_create_function(env, "answer", NAPI_AUTO_LENGTH, Answer, nullptr, &answer);
+            napi_set_named_property(env, exports, "answer", answer);
+            return exports;
+          }
+          NAPI_MODULE(NODE_GYP_MODULE_NAME, Init)
+          '@ | Set-Content (Join-Path $smoke 'smoke.cc') -Encoding ascii
+          @'
+          $ErrorActionPreference = 'Stop'
+          python.exe --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake.exe --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $compilerOutput = cl.exe /? 2>&1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $compilerOutput | Select-Object -First 1
+          msbuild.exe -version -nologo
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Set-Location C:\smoke
+          npm.cmd install --foreground-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node.exe -e "if (require('./build/Release/smoke.node').answer() !== 42) process.exit(1)"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          '@ | Set-Content (Join-Path $smoke 'smoke.ps1') -Encoding ascii
+          docker run --rm --user ContainerUser `
+            --volume "${smoke}:C:\smoke" `
+            rc-runner-windows:test `
+            powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+            -File C:\smoke\smoke.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  test-native-toolchains:
+    permissions:
+      contents: read
+    name: Smoke ${{ matrix.component }} native toolchain
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: runner
+            dockerfile: Dockerfile.runner
+          - component: runner-wayland
+            dockerfile: images/runner-wayland/Dockerfile
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.component }} image
+        env:
+          COMPONENT: ${{ matrix.component }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --file "${DOCKERFILE}" \
+            --tag "rc-${COMPONENT}:test" \
+            --cache-from "type=gha,scope=${COMPONENT}" \
+            --cache-to "type=gha,mode=max,scope=${COMPONENT}" \
+            --load \
+            .
+
+      - name: Smoke test native build toolchain
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          smoke="${RUNNER_TEMP}/rc-native-toolchain-smoke"
+          mkdir -p "${smoke}"
+          printf '%s\n' \
+            '{"name":"rc-native-toolchain-smoke","version":"1.0.0","private":true,"gypfile":true}' \
+            > "${smoke}/package.json"
+          printf '%s\n' \
+            '{"targets":[{"target_name":"smoke","sources":["smoke.cc"]}]}' \
+            > "${smoke}/binding.gyp"
+          cat > "${smoke}/smoke.cc" <<'EOF'
+          #include <node_api.h>
+          napi_value Answer(napi_env env, napi_callback_info info) {
+            napi_value result;
+            napi_create_int32(env, 42, &result);
+            return result;
+          }
+          napi_value Init(napi_env env, napi_value exports) {
+            napi_value answer;
+            napi_create_function(env, "answer", NAPI_AUTO_LENGTH, Answer, nullptr, &answer);
+            napi_set_named_property(env, exports, "answer", answer);
+            return exports;
+          }
+          NAPI_MODULE(NODE_GYP_MODULE_NAME, Init)
+          EOF
+          docker run --rm \
+            --user 1000:1000 \
+            --volume "${smoke}:/smoke" \
+            --entrypoint /bin/bash \
+            "rc-${COMPONENT}:test" \
+            -euo pipefail -c '
+              python3 --version
+              g++ --version
+              make --version
+              cmake --version
+              pkg-config --version
+              cd /smoke
+              npm install --foreground-scripts --no-audit --no-fund
+              node -e "if (require(\"./build/Release/smoke.node\").answer() !== 42) process.exit(1)"
+            '
+
   test:
     permissions:
       contents: read

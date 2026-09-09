@@ -110,13 +110,6 @@ Run lint separately:
 make lint
 ```
 
-Pull-request CI also builds each formal development runner and compiles a
-temporary minimal N-API addon as the image's unprivileged Workspace user. This
-verifies that Python, the platform C++ compiler, Make or MSBuild, CMake, and
-pkg-config are usable by npm's bundled node-gyp. The Linux base runner and
-Wayland runner are tested on `linux/amd64`; the Windows runner is tested as
-`ContainerUser` on the `windows-2025` worker.
-
 The toolchains are part of the immutable images. Workspace processes should
 not use sudo, Chocolatey, winget, or another runtime installer to provide these
 system dependencies.

@@ -65,8 +65,10 @@ RUN $process = Start-Process C:\rc\python-amd64.exe `
     }; `
     & C:\rc\register-fonts.ps1; `
     New-Item -ItemType Directory -Force C:\workspace, C:\home\agent | Out-Null; `
-    & icacls.exe C:\workspace C:\home\agent /grant 'ContainerUser:(OI)(CI)F' /T /C /Q; `
-    if ($LASTEXITCODE -ne 0) { throw 'Could not grant ContainerUser workspace access' }
+    foreach ($path in @('C:\workspace', 'C:\home\agent')) { `
+        & icacls.exe $path /grant '*S-1-5-93-2-2:(OI)(CI)F' /T /C /Q; `
+        if ($LASTEXITCODE -ne 0) { throw 'Could not grant ContainerUser path access' } `
+    }
 
 COPY assets/rc/ C:/rc/bin/
 

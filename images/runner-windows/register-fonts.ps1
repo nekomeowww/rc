@@ -23,10 +23,7 @@ foreach ($name in $fonts.Keys) {
     if (-not (Test-Path $destination)) {
         Copy-Item (Join-Path $fontDirectory $file) $destination
     }
-    $registered = Get-ItemPropertyValue $registryPath -Name $name -ErrorAction SilentlyContinue
-    if ($registered -ne $file) {
-        New-ItemProperty $registryPath -Name $name -Value $file -PropertyType String -Force | Out-Null
-    }
+    New-ItemProperty $registryPath -Name $name -Value $file -PropertyType String -Force | Out-Null
     if ([RcExperimentFonts]::AddFontResourceW($destination) -eq 0) {
         throw "Could not load font: $destination"
     }

@@ -195,21 +195,28 @@ rcctl -n development workspace default dev
 rcctl -n development agent run --workspace dev --agent-credential codex --cwd /workspace/rc -- codex
 ```
 
-Configure an npm registry per Workspace with the `--npm-registry` convenience
-flag:
+#### Optimizations
+
+##### npm
+
+rc natively supports selecting an npm registry for each Workspace. Point
+`--npm-registry` at an npm-compatible registry, cache, or proxy to speed up
+dependency downloads while keeping the configuration scoped to that Workspace:
 
 ```sh
-rcctl workspace create lobehub-dev \
+rcctl workspace create rc-dev \
   --npm-registry http://verdaccio.rc-system.svc.cluster.local:4873
 ```
 
-The flag is syntax sugar for two `Workspace.Spec.Env` defaults:
+For example, you can deploy Verdaccio as a caching proxy in the cluster. A
+ClusterIP Service named `verdaccio` in the `rc-system` namespace is reachable
+from other namespaces at
+`http://verdaccio.rc-system.svc.cluster.local:4873`.
+
+The convenience flag sets two `Workspace.Spec.Env` defaults:
 `NPM_CONFIG_REGISTRY` receives the URL with one trailing slash, while Corepack
 receives the same URL without a trailing slash through its independent
-`COREPACK_NPM_REGISTRY` variable. This keeps registry selection scoped to each
-namespace and Workspace. For example, Verdaccio may run as a ClusterIP Service
-named `verdaccio` in `rc-system` and be addressed from another namespace as
-`http://verdaccio.rc-system.svc.cluster.local:4873`.
+`COREPACK_NPM_REGISTRY` variable.
 
 The same flag is available on `agent run` and `agent exec`. With an existing
 Workspace, it overrides registry defaults only for that AgentProcess and does
@@ -217,7 +224,8 @@ not modify the Workspace. With `--temporary`, the generated Workspace receives
 the defaults. Supplying either registry variable explicitly through `--env` or
 `--env-file` conflicts with `--npm-registry`. This convenience flag configures
 registry locations only; it does not provide registry tokens, usernames, or
-passwords.
+passwords. Configure authentication separately when the selected registry
+requires it.
 
 `agent run` attaches an interactive terminal. `agent exec` runs a non-terminal command and returns its exit code. Agent Processes are persistent resources, so you can inspect and reconnect to them independently of the original terminal:
 

@@ -719,10 +719,10 @@ and may be repeated or comma-separated. For example, an iSCSI StorageClass that
 supports a mounted filesystem on only one node can use:
 
 ```sh
-rcctl -n default workspace mount repo lobehub-cloud \
-  --workspace lobehub-dev \
-  --name lobehub-cloud \
-  --path lobehub-cloud \
+rcctl -n default workspace mount repo rc \
+  --workspace rc-dev \
+  --name rc \
+  --path rc \
   --access-mode ReadWriteOnce
 ```
 

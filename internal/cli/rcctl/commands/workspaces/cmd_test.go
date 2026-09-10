@@ -206,11 +206,11 @@ func TestGeneratedWorkspaceWorktreeAccessModes(t *testing.T) {
 	t.Parallel()
 	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testWorkspaceNamespace}}
 	repository := &repositoriesv1alpha1.Repository{
-		ObjectMeta: metav1.ObjectMeta{Name: "lobehub-cloud", Namespace: testWorkspaceNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "rc", Namespace: testWorkspaceNamespace},
 	}
 
 	t.Run("ReadWriteOnce", func(t *testing.T) {
-		worktree := generatedWorkspaceWorktree(workspace, repository, "lobehub-cloud", []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce})
+		worktree := generatedWorkspaceWorktree(workspace, repository, "rc", []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce})
 
 		require.NotNil(t, worktree.Spec.Storage, "create a storage override for an explicit access mode")
 		assert.Equal(t, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, worktree.Spec.Storage.AccessModes, "request a single-node writable child PVC")
@@ -220,14 +220,14 @@ func TestGeneratedWorkspaceWorktreeAccessModes(t *testing.T) {
 
 	t.Run("Multiple", func(t *testing.T) {
 		modes := []corev1.PersistentVolumeAccessMode{corev1.ReadOnlyMany, corev1.ReadWriteMany}
-		worktree := generatedWorkspaceWorktree(workspace, repository, "lobehub-cloud", modes)
+		worktree := generatedWorkspaceWorktree(workspace, repository, "rc", modes)
 
 		require.NotNil(t, worktree.Spec.Storage, "create a storage override for explicit access modes")
 		assert.Equal(t, modes, worktree.Spec.Storage.AccessModes, "write every requested access mode to the generated Worktree")
 	})
 
 	t.Run("DefaultReadWriteMany", func(t *testing.T) {
-		worktree := generatedWorkspaceWorktree(workspace, repository, "lobehub-cloud", nil)
+		worktree := generatedWorkspaceWorktree(workspace, repository, "rc", nil)
 
 		assert.Nil(t, worktree.Spec.Storage, "omit the override so the Worktree controller retains its ReadWriteMany default")
 	})
@@ -237,7 +237,7 @@ func TestWorkspaceMountRepositoryRejectsInvalidAccessMode(t *testing.T) {
 	t.Parallel()
 	cmd := newMountCommand(kubeconfig.NewFlags())
 
-	err := mountRepository(cmd, kubeconfig.NewFlags(), "lobehub-cloud", mountOptions{accessModes: []string{"SingleNodeWriter"}})
+	err := mountRepository(cmd, kubeconfig.NewFlags(), "rc", mountOptions{accessModes: []string{"SingleNodeWriter"}})
 
 	require.Error(t, err, "reject an unsupported access mode")
 	assert.EqualError(t, err, `unsupported --access-mode "SingleNodeWriter"`)

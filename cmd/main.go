@@ -69,6 +69,8 @@ func main() {
 
 	var runnerImage string
 	var windowsRunnerImage string
+	var darwinRunnerImage string
+	var darwinWorkspaceRoot string
 
 	var secureMetrics bool
 	var enableHTTP2 bool
@@ -81,6 +83,10 @@ func main() {
 		"The image used by Repository and Worktree Jobs and blank Workspace runtimes.")
 	flag.StringVar(&windowsRunnerImage, "windows-runner-image", "",
 		"Default Windows Workspace image, used when spec.image is omitted.")
+	flag.StringVar(&darwinRunnerImage, "darwin-runner-image", "",
+		"Default macOS-vz Workspace VM image, used when spec.image is omitted.")
+	flag.StringVar(&darwinWorkspaceRoot, "darwin-workspace-root", "",
+		"Absolute host directory root shared into persistent Darwin Workspaces.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -246,10 +252,12 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&workspacescontroller.WorkspaceReconciler{
-		Client:             mgr.GetClient(),
-		Scheme:             mgr.GetScheme(),
-		RunnerImage:        runnerImage,
-		WindowsRunnerImage: windowsRunnerImage,
+		Client:              mgr.GetClient(),
+		Scheme:              mgr.GetScheme(),
+		RunnerImage:         runnerImage,
+		WindowsRunnerImage:  windowsRunnerImage,
+		DarwinRunnerImage:   darwinRunnerImage,
+		DarwinWorkspaceRoot: darwinWorkspaceRoot,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "workspaces-workspace")
 		os.Exit(1)

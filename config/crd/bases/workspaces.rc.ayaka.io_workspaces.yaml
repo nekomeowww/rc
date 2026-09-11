@@ -1331,11 +1331,13 @@ spec:
               os:
                 default: linux
                 description: |-
-                  os selects the container operating system. It must match the image and
+                  os selects the runtime operating system. It must match the image and
                   any source Environment; changing it would invalidate persistent home state.
+                  Darwin runtimes currently target macOS-vz-kubelet virtual-machine Pods.
                 enum:
                 - linux
                 - windows
+                - darwin
                 type: string
                 x-kubernetes-validations:
                 - message: Workspace OS is immutable
@@ -1584,8 +1586,9 @@ spec:
                 - type
                 x-kubernetes-list-type: map
               homeVolumeClaimName:
-                description: homeVolumeClaimName contains mutable Workspace home state
-                  and transcripts.
+                description: |-
+                  homeVolumeClaimName contains mutable Workspace home state and transcripts.
+                  It is empty for Darwin Workspaces, which use node-local host storage.
                 type: string
               observedGeneration:
                 description: observedGeneration is the latest generation reflected

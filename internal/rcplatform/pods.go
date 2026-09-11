@@ -20,6 +20,10 @@ const (
 	sudoersMountPath     = "/etc/sudoers.d"
 	sudoersFilePath      = sudoersMountPath + "/agent"
 	sudoersRule          = "agent ALL=(ALL:ALL) NOPASSWD:ALL"
+	darwinExecArgvEnv    = "MACOS_VZ_KUBERNETES_EXEC_ARGV"
+	unixShellExecutable  = "/bin/sh"
+	actionsArgument      = "--actions"
+	lifecycleCommand     = "lifecycle"
 )
 
 // Initializer runs one lifecycle action before the runtime becomes ready.
@@ -32,6 +36,7 @@ type Initializer struct {
 type WorkspacePodIntent struct {
 	Metadata          metav1.ObjectMeta
 	Image, HomeClaim  string
+	HomeHostPath      string
 	ServiceAccount    string
 	AutomountToken    bool
 	Resources         corev1.ResourceRequirements
@@ -43,6 +48,9 @@ type WorkspacePodIntent struct {
 
 // WorkspacePod compiles a final Pod without post-construction platform rewrites.
 func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, error) {
+	if runtime.os == Darwin {
+		return runtime.darwinWorkspacePod(intent)
+	}
 	volumes := make([]corev1.Volume, 0, len(intent.AdditionalVolumes)+2)
 	volumes = append(volumes, corev1.Volume{Name: homeVolumeName, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: intent.HomeClaim}}})
 	volumes = append(volumes, slices.Clone(intent.AdditionalVolumes)...)
@@ -63,7 +71,7 @@ func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, err
 		}
 		initContainers = append(initContainers, corev1.Container{
 			Name: initializer.Name, Image: initializer.Image,
-			Command:      []string{runtime.layout.executable, "lifecycle", "--actions", encoded},
+			Command:      []string{runtime.layout.executable, lifecycleCommand, actionsArgument, encoded},
 			VolumeMounts: slices.Clone(mounts), SecurityContext: runtimepolicy.ContainerSecurityContext(runtime.os),
 		})
 	}
@@ -75,7 +83,7 @@ func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, err
 			return nil, fmt.Errorf("encode Workspace beforeStop actions: %w", err)
 		}
 		containerLifecycle = &corev1.Lifecycle{PreStop: &corev1.LifecycleHandler{Exec: &corev1.ExecAction{
-			Command: []string{runtime.layout.executable, "lifecycle", "--actions", encoded},
+			Command: []string{runtime.layout.executable, lifecycleCommand, actionsArgument, encoded},
 		}}}
 	}
 
@@ -110,6 +118,53 @@ func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, err
 		Spec: runtime.podSpec(intent.ServiceAccount, &intent.AutomountToken, corev1.RestartPolicyAlways,
 			initContainers, []corev1.Container{container}, volumes),
 	}, nil
+}
+
+func (runtime Runtime) darwinWorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, error) {
+	if intent.HomeHostPath == "" {
+		return nil, fmt.Errorf("darwin Workspace home host path is required")
+	}
+	hostPathType := corev1.HostPathDirectoryOrCreate
+	volumes := []corev1.Volume{{Name: homeVolumeName, VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
+		Path: intent.HomeHostPath, Type: &hostPathType,
+	}}}}
+	mounts := []corev1.VolumeMount{{Name: homeVolumeName, MountPath: runtime.layout.home}}
+	actions := make([]lifecycle.Action, 0, len(intent.Initializers))
+	for _, initializer := range intent.Initializers {
+		actions = append(actions, initializer.Action)
+	}
+	encoded, err := lifecycle.Encode(actions)
+	if err != nil {
+		return nil, fmt.Errorf("encode Darwin Workspace initializers: %w", err)
+	}
+	stateDirectory := runtime.join(runtime.layout.home, ".rc", "processes")
+	logPath := runtime.join(runtime.layout.home, ".rc", "rc-kube.log")
+	startup := fmt.Sprintf("set -eu\nmkdir -p %q %q\n", runtime.layout.run, stateDirectory)
+	if len(actions) > 0 {
+		startup += fmt.Sprintf("%q %s %s %q\n", runtime.layout.executable, lifecycleCommand, actionsArgument, encoded)
+	}
+	startup += fmt.Sprintf("if ! %[1]q health %[2]s %[3]q >/dev/null 2>&1; then\n  nohup %[1]q %[4]s %[2]s %[3]q %[5]s %[6]q >%[7]q 2>&1 </dev/null &\nfi\nattempt=0\nuntil %[1]q health %[2]s %[3]q >/dev/null 2>&1; do\n  attempt=$((attempt + 1))\n  [ \"$attempt\" -lt 8 ] || exit 1\n  sleep 1\ndone\n", runtime.layout.executable, socketArgument, runtime.layout.endpoint, serveCommand, stateDirectoryArgument, stateDirectory, logPath)
+
+	containerLifecycle := &corev1.Lifecycle{PostStart: &corev1.LifecycleHandler{Exec: &corev1.ExecAction{
+		Command: []string{unixShellExecutable, "-c", startup},
+	}}}
+	if len(intent.BeforeStop) > 0 {
+		beforeStop, encodeErr := lifecycle.Encode(intent.BeforeStop)
+		if encodeErr != nil {
+			return nil, fmt.Errorf("encode Darwin Workspace beforeStop actions: %w", encodeErr)
+		}
+		containerLifecycle.PreStop = &corev1.LifecycleHandler{Exec: &corev1.ExecAction{
+			Command: []string{runtime.layout.executable, lifecycleCommand, actionsArgument, beforeStop},
+		}}
+	}
+	container := corev1.Container{
+		Name: runtimeContainerName, Image: intent.Image, Resources: intent.Resources,
+		Env: []corev1.EnvVar{{Name: darwinExecArgvEnv, Value: "1"}}, VolumeMounts: mounts, Lifecycle: containerLifecycle,
+	}
+	return &corev1.Pod{ObjectMeta: *intent.Metadata.DeepCopy(), Spec: runtime.podSpec(
+		intent.ServiceAccount, &intent.AutomountToken, corev1.RestartPolicyAlways, nil,
+		[]corev1.Container{container}, volumes,
+	)}, nil
 }
 
 // EditorPodIntent describes the mutable WorkspaceEnvironment editor runtime.
@@ -196,13 +251,17 @@ func (runtime Runtime) readinessProbe() *corev1.Probe {
 }
 
 func (runtime Runtime) podSpec(serviceAccount string, automount *bool, restart corev1.RestartPolicy, init []corev1.Container, containers []corev1.Container, volumes []corev1.Volume) corev1.PodSpec {
-	return corev1.PodSpec{
+	spec := corev1.PodSpec{
 		ServiceAccountName: serviceAccount, AutomountServiceAccountToken: automount,
-		RestartPolicy: restart, OS: &corev1.PodOS{Name: runtime.os},
-		NodeSelector: mapsClone(runtime.placement.NodeSelector), Tolerations: slices.Clone(runtime.placement.Tolerations),
+		RestartPolicy: restart,
+		NodeSelector:  mapsClone(runtime.placement.NodeSelector), Tolerations: slices.Clone(runtime.placement.Tolerations),
 		Affinity: affinityClone(runtime.placement.Affinity), RuntimeClassName: cloneStringPointer(runtime.placement.RuntimeClassName),
 		SecurityContext: runtimepolicy.PodSecurityContext(runtime.os), InitContainers: init, Containers: containers, Volumes: volumes,
 	}
+	if runtime.os != Darwin {
+		spec.OS = &corev1.PodOS{Name: runtime.os}
+	}
+	return spec
 }
 
 func mapsClone(input map[string]string) map[string]string {

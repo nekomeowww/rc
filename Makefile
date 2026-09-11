@@ -172,6 +172,11 @@ build-windows: ## Cross-compile the Windows amd64 runtime binaries for image sta
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -o bin/windows-amd64/rcctl.exe ./cmd/rcctl
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -o bin/windows-amd64/rc-kube.exe ./cmd/rc-kube
 
+.PHONY: build-darwin
+build-darwin: ## Build the macOS arm64 guest runtime binary.
+	mkdir -p bin/darwin-arm64
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -o bin/darwin-arm64/rc-kube ./cmd/rc-kube
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go

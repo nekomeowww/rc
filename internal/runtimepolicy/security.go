@@ -8,6 +8,9 @@ const AgentUserID int64 = 1000
 // Windows development images use the container-local administrator for tool
 // installation and credential symlinks; they never request HostProcess access.
 func PodSecurityContext(os corev1.OSName) *corev1.PodSecurityContext {
+	if os == "darwin" {
+		return nil
+	}
 	if os == corev1.Windows {
 		user := "ContainerAdministrator"
 		return &corev1.PodSecurityContext{WindowsOptions: &corev1.WindowsSecurityContextOptions{RunAsUserName: &user}}
@@ -16,6 +19,9 @@ func PodSecurityContext(os corev1.OSName) *corev1.PodSecurityContext {
 }
 
 func ContainerSecurityContext(os corev1.OSName) *corev1.SecurityContext {
+	if os == "darwin" {
+		return nil
+	}
 	if os == corev1.Windows {
 		return nil
 	}

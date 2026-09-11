@@ -18,10 +18,17 @@ import (
 const (
 	runtimeContainerName   = "rc-kube"
 	windowsExecutable      = "rc-kube.exe"
+	darwinExecutable       = "/usr/local/bin/rc-kube"
+	darwinHome             = "/Volumes/My Shared Files/home"
 	socketArgument         = "--socket"
 	stateDirectoryArgument = "--state-dir"
 	serveCommand           = "serve"
 )
+
+// Darwin is the node OS label used by macOS virtual-kubelet providers. The
+// Kubernetes PodOS API itself currently exposes only Linux and Windows, so
+// Darwin Pods are selected by node label and intentionally omit spec.os.
+const Darwin corev1.OSName = "darwin"
 
 // ErrUnsupportedOS reports an OS outside Kubernetes' Linux and Windows set.
 var ErrUnsupportedOS = errors.New("unsupported runtime OS")
@@ -68,6 +75,9 @@ func Resolve(target Target) (Runtime, error) {
 		targetLayout = layout{home: "/home/agent", run: "/run/rc", executable: runtimeContainerName, endpoint: "/run/rc/rc-kube.sock"}
 	case corev1.Windows:
 		targetLayout = layout{home: `C:\home\agent`, run: `C:\run\rc`, executable: windowsExecutable, endpoint: `\\.\pipe\rc-kube`}
+	case Darwin:
+		run := path.Join(darwinHome, ".rc", "run")
+		targetLayout = layout{home: darwinHome, run: run, executable: darwinExecutable, endpoint: path.Join(run, "rc-kube.sock")}
 	default:
 		return Runtime{}, fmt.Errorf("%w: %q", ErrUnsupportedOS, osName)
 	}

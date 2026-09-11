@@ -58,6 +58,8 @@ import (
 	clioutput "github.com/nekomeowww/rc/pkg/output"
 )
 
+const darwinOSName corev1.OSName = "darwin"
+
 type createOptions struct {
 	placement        command.PlacementOptions
 	environment      string
@@ -116,6 +118,12 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if osName == darwinOSName && options.environment != "" {
+				return fmt.Errorf("darwin Workspaces do not support --environment")
+			}
+			if osName == darwinOSName && (cmd.Flags().Changed("size") || cmd.Flags().Changed("storage-class")) {
+				return fmt.Errorf("darwin Workspaces use the controller's host-path root; --size and --storage-class are unsupported")
+			}
 			resources, err := options.gpu.ResourceRequirements(cmd.Flags().Changed("gpu"), cmd.Flags().Changed("gpu-vram"))
 			if err != nil {
 				return err
@@ -159,7 +167,7 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 				if len(workspace.Spec.Tolerations) == 0 {
 					workspace.Spec.Tolerations = environment.Spec.Tolerations
 				}
-			} else {
+			} else if osName != darwinOSName {
 				size, err := resource.ParseQuantity(options.size)
 				if err != nil || size.Sign() <= 0 {
 					return fmt.Errorf("parse --size: value must be a positive Kubernetes quantity")
@@ -173,6 +181,8 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 				return fmt.Errorf("--no-service-account and --service-account are mutually exclusive")
 			}
 			if options.noServiceAccount {
+				workspace.Spec.AutomountServiceAccountToken = boolPointer(false)
+			} else if osName == darwinOSName {
 				workspace.Spec.AutomountServiceAccountToken = boolPointer(false)
 			}
 			if options.idleTimeout > 0 {

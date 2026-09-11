@@ -19,6 +19,7 @@ import (
 )
 
 const (
+	testLinuxImage        = "example/linux"
 	testWindowsExecutable = "rc-kube.exe"
 	testWindowsEndpoint   = `\\.\pipe\rc-kube`
 )
@@ -63,7 +64,7 @@ func TestRuntimeOSValidationAndDefaultImage(t *testing.T) {
 	requirements := require.New(t)
 	scheme := runtime.NewScheme()
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme))
-	reconciler := &WorkspaceReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), RunnerImage: "example/linux", WindowsRunnerImage: "example/windows"}
+	reconciler := &WorkspaceReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), RunnerImage: testLinuxImage, WindowsRunnerImage: "example/windows"}
 	workspace := &workspacesv1alpha1.Workspace{Spec: workspacesv1alpha1.WorkspaceSpec{OS: corev1.Windows, Storage: &workspacesv1alpha1.PersistentStorageSpec{Size: resource.MustParse("1Gi")}}}
 	resolved, reason, _, err := reconciler.resolveWorkspaceBase(context.Background(), workspace)
 	requirements.NoError(err)
@@ -78,6 +79,28 @@ func TestRuntimeOSValidationAndDefaultImage(t *testing.T) {
 	_, reason, _, err = reconciler.resolveWorkspaceBase(context.Background(), workspace)
 	requirements.NoError(err)
 	assert.Equal(t, "UnsupportedWindowsMount", reason, "fail explicitly before provisioning an incompatible Linux Git mount")
+}
+
+func TestDarwinRuntimeUsesConfiguredHostStorage(t *testing.T) {
+	t.Parallel()
+	reconciler := &WorkspaceReconciler{
+		Client: fake.NewClientBuilder().Build(), RunnerImage: testLinuxImage,
+		DarwinRunnerImage: "example/macos:26.3", DarwinWorkspaceRoot: "/Users/runner/.local/share/rc",
+	}
+	workspace := &workspacesv1alpha1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "xcode", Namespace: "development"},
+		Spec:       workspacesv1alpha1.WorkspaceSpec{OS: rcplatform.Darwin},
+	}
+	resolved, reason, _, err := reconciler.resolveWorkspaceBase(context.Background(), workspace)
+	require.NoError(t, err)
+	assert.Empty(t, reason)
+	assert.Equal(t, "example/macos:26.3", resolved.image)
+	assert.Equal(t, "/Users/runner/.local/share/rc/development/xcode", resolved.homeHostPath)
+	pod, err := workspaceRuntimePod(workspace, resolved)
+	require.NoError(t, err)
+	assert.Nil(t, pod.Spec.OS)
+	assert.Equal(t, "darwin", pod.Spec.NodeSelector[corev1.LabelOSStable])
+	assert.Equal(t, resolved.homeHostPath, pod.Spec.Volumes[0].HostPath.Path)
 }
 
 func TestWindowsEnvironmentEditor(t *testing.T) {

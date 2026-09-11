@@ -290,6 +290,7 @@ Experimental platform guides:
 
 - [Attach a native Windows 11 Kubernetes worker](docs/guides/experimental-windows-11-worker.md)
 - [Run Windows Workspaces](docs/guides/windows-workspaces.md)
+- [Run Darwin Workspaces with macOS-vz-kubelet](docs/guides/darwin-workspaces.md)
 
 ## License
 

@@ -94,6 +94,7 @@ type resolvedWorkspace struct {
 	writeClaims      []workspaceWriteClaim
 	initializers     []workspaceInitializer
 	beforeStop       []lifecycle.Action
+	homeHostPath     string
 }
 
 type workspaceInitializer struct {
@@ -110,9 +111,11 @@ type workspaceWriteClaim struct {
 // WorkspaceReconciler reconciles persistent Workspace storage and runtime Pods.
 type WorkspaceReconciler struct {
 	client.Client
-	Scheme             *runtime.Scheme
-	RunnerImage        string
-	WindowsRunnerImage string
+	Scheme              *runtime.Scheme
+	RunnerImage         string
+	WindowsRunnerImage  string
+	DarwinRunnerImage   string
+	DarwinWorkspaceRoot string
 }
 
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces,verbs=get;list;watch;create;update;patch;delete
@@ -156,47 +159,49 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return result, r.setWorkspaceStatus(ctx, req.NamespacedName, nil, metav1.ConditionFalse, reason, message)
 	}
 
-	home := new(corev1.PersistentVolumeClaim)
-	err = r.Get(ctx, req.NamespacedName, home)
-	if errors.IsNotFound(err) {
-		home = workspaceHomeVolumeClaim(workspace, resolved)
-		if err := controllerutil.SetControllerReference(workspace, home, r.Scheme); err != nil {
-			return ctrl.Result{}, fmt.Errorf("set Workspace owner on home PersistentVolumeClaim: %w", err)
-		}
-		if err := r.Create(ctx, home); err != nil {
-			return ctrl.Result{}, fmt.Errorf("create Workspace home PersistentVolumeClaim: %w", err)
-		}
-		log.Info("Created Workspace home PersistentVolumeClaim", "name", home.Name)
-
-		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Provisioning", "Workspace home volume is provisioning")
-	}
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("get Workspace home PersistentVolumeClaim: %w", err)
-	}
-	if !metav1.IsControlledBy(home, workspace) {
-		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "VolumeClaimConflict", "Workspace home PersistentVolumeClaim is not owned by this Workspace")
-	}
-	if workspace.Status.RuntimeImage == "" && home.Annotations[workspaceImageAnnotation] != "" {
-		resolved.image = home.Annotations[workspaceImageAnnotation]
-		if revision, parseErr := strconv.ParseInt(home.Annotations[workspaceRevisionAnnotation], 10, 64); parseErr == nil {
-			resolved.revision = revision
-		}
-		if workspace.Spec.EnvironmentRef != nil {
-			environment := new(workspacesv1alpha1.WorkspaceEnvironment)
-			key := types.NamespacedName{Name: workspace.Spec.EnvironmentRef.Name, Namespace: workspace.Namespace}
-			if err := r.Get(ctx, key, environment); err != nil {
-				return ctrl.Result{}, fmt.Errorf("re-read WorkspaceEnvironment for captured home metadata: %w", err)
+	if resolved.runtime.OS() != rcplatform.Darwin {
+		home := new(corev1.PersistentVolumeClaim)
+		err = r.Get(ctx, req.NamespacedName, home)
+		if errors.IsNotFound(err) {
+			home = workspaceHomeVolumeClaim(workspace, resolved)
+			if err := controllerutil.SetControllerReference(workspace, home, r.Scheme); err != nil {
+				return ctrl.Result{}, fmt.Errorf("set Workspace owner on home PersistentVolumeClaim: %w", err)
 			}
-			resolved.outdated = resolved.revision != environment.Status.CurrentRevision || resolved.image != environment.Status.CurrentImage
+			if err := r.Create(ctx, home); err != nil {
+				return ctrl.Result{}, fmt.Errorf("create Workspace home PersistentVolumeClaim: %w", err)
+			}
+			log.Info("Created Workspace home PersistentVolumeClaim", "name", home.Name)
+
+			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Provisioning", "Workspace home volume is provisioning")
 		}
-	}
-	if home.Status.Phase != corev1.ClaimBound {
-		if failureReason, failureMessage, failureErr := r.persistentVolumeClaimFailure(ctx, home); failureErr != nil {
-			return ctrl.Result{}, failureErr
-		} else if failureReason != "" {
-			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, failureReason, failureMessage)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("get Workspace home PersistentVolumeClaim: %w", err)
 		}
-		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Provisioning", "Workspace home volume is provisioning")
+		if !metav1.IsControlledBy(home, workspace) {
+			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "VolumeClaimConflict", "Workspace home PersistentVolumeClaim is not owned by this Workspace")
+		}
+		if workspace.Status.RuntimeImage == "" && home.Annotations[workspaceImageAnnotation] != "" {
+			resolved.image = home.Annotations[workspaceImageAnnotation]
+			if revision, parseErr := strconv.ParseInt(home.Annotations[workspaceRevisionAnnotation], 10, 64); parseErr == nil {
+				resolved.revision = revision
+			}
+			if workspace.Spec.EnvironmentRef != nil {
+				environment := new(workspacesv1alpha1.WorkspaceEnvironment)
+				key := types.NamespacedName{Name: workspace.Spec.EnvironmentRef.Name, Namespace: workspace.Namespace}
+				if err := r.Get(ctx, key, environment); err != nil {
+					return ctrl.Result{}, fmt.Errorf("re-read WorkspaceEnvironment for captured home metadata: %w", err)
+				}
+				resolved.outdated = resolved.revision != environment.Status.CurrentRevision || resolved.image != environment.Status.CurrentImage
+			}
+		}
+		if home.Status.Phase != corev1.ClaimBound {
+			if failureReason, failureMessage, failureErr := r.persistentVolumeClaimFailure(ctx, home); failureErr != nil {
+				return ctrl.Result{}, failureErr
+			} else if failureReason != "" {
+				return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, failureReason, failureMessage)
+			}
+			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Provisioning", "Workspace home volume is provisioning")
+		}
 	}
 	resolved, reason, message, err = r.resolveWorkspaceDependencies(ctx, workspace, resolved)
 	if err != nil {
@@ -479,6 +484,32 @@ func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspac
 		return resolved, reason, message, nil
 	}
 	resolved.runtime = platform
+	if platform.OS() == rcplatform.Darwin {
+		if workspace.Spec.EnvironmentRef != nil {
+			return resolved, "UnsupportedDarwinEnvironment", "Darwin Workspaces do not support WorkspaceEnvironment PVC clones", nil
+		}
+		if len(workspace.Spec.Mounts) > 0 {
+			return resolved, "UnsupportedDarwinMount", "Darwin Workspaces do not support Repository or Worktree PVC mounts", nil
+		}
+		if len(workspace.Spec.ConfigMapRefs) > 0 || len(workspace.Spec.SecretRefs) > 0 {
+			return resolved, "UnsupportedDarwinProjection", "Darwin Workspaces do not support ConfigMap or Secret volume mounts", nil
+		}
+		if r.DarwinWorkspaceRoot == "" {
+			return resolved, "DarwinWorkspaceRootRequired", "The controller must configure --darwin-workspace-root", nil
+		}
+		resolved.homeHostPath = filepath.Join(r.DarwinWorkspaceRoot, workspace.Namespace, workspace.Name)
+		resolved.image = workspace.Status.RuntimeImage
+		if resolved.image == "" {
+			resolved.image = workspace.Spec.Image
+			if resolved.image == "" {
+				resolved.image = r.DarwinRunnerImage
+			}
+		}
+		if resolved.image == "" {
+			return resolved, "ImageRequired", "Darwin Workspace runtime image is empty", nil
+		}
+		return resolved, "", "", nil
+	}
 	if platform.OS() == corev1.Windows && len(workspace.Spec.Mounts) > 0 {
 		return resolved, "UnsupportedWindowsMount", "Repository and Worktree mounts use a Linux Git layout; use lifecycle initialization to create a Windows checkout", nil
 	}
@@ -616,6 +647,9 @@ func (r *WorkspaceReconciler) resolveWorkspaceDependencies(ctx context.Context, 
 	}
 
 	resolved.automountSAToken = workspace.Spec.AutomountServiceAccountToken == nil || *workspace.Spec.AutomountServiceAccountToken
+	if resolved.runtime.OS() == rcplatform.Darwin && workspace.Spec.AutomountServiceAccountToken == nil {
+		resolved.automountSAToken = false
+	}
 	if resolved.automountSAToken {
 		resolved.serviceAccount = workspace.Spec.ServiceAccountName
 		if resolved.serviceAccount == "" {
@@ -772,7 +806,7 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 				workspaceWriteClaimsAnnotation:   string(writeClaims),
 				workspaceRuntimePolicyAnnotation: workspaceRuntimePolicyVersion,
 			},
-		}, Image: resolved.image, HomeClaim: workspace.Name,
+		}, Image: resolved.image, HomeClaim: workspace.Name, HomeHostPath: resolved.homeHostPath,
 		ServiceAccount: resolved.serviceAccount, AutomountToken: resolved.automountSAToken,
 		Resources: workspace.Spec.Resources, AdditionalVolumes: resolved.volumes, AdditionalMounts: resolved.volumeMounts,
 		Initializers: initializers, BeforeStop: resolved.beforeStop,
@@ -813,11 +847,12 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 		Affinity         *corev1.Affinity
 		RuntimeClassName *string
 		Lifecycle        *workspacesv1alpha1.WorkspaceLifecycle
+		HomeHostPath     string
 	}{
 		RuntimePolicy: workspaceRuntimePolicyVersion, OS: resolved.runtime.OS(),
 		Image: resolved.image, Mounts: workspace.Spec.Mounts, ConfigMapRefs: workspace.Spec.ConfigMapRefs,
 		SecretRefs: workspace.Spec.SecretRefs, AgentCredentials: workspace.Spec.AgentCredentialRefs,
-		Credentials: workspace.Spec.CredentialRefs, ServiceAccount: resolved.serviceAccount,
+		Credentials: workspace.Spec.CredentialRefs, ServiceAccount: resolved.serviceAccount, HomeHostPath: resolved.homeHostPath,
 		AutomountSAToken: resolved.automountSAToken, Resources: workspace.Spec.Resources,
 		NodeSelector: workspace.Spec.NodeSelector, Tolerations: workspace.Spec.Tolerations,
 		Affinity: workspace.Spec.Affinity, RuntimeClassName: workspace.Spec.RuntimeClassName, Lifecycle: workspace.Spec.Lifecycle,
@@ -990,7 +1025,11 @@ func (r *WorkspaceReconciler) setWorkspaceStatus(ctx context.Context, key types.
 		return fmt.Errorf("re-fetch Workspace before status update: %w", err)
 	}
 	current.Status.ObservedGeneration = current.Generation
-	current.Status.HomeVolumeClaimName = current.Name
+	if current.Spec.OS == rcplatform.Darwin {
+		current.Status.HomeVolumeClaimName = ""
+	} else {
+		current.Status.HomeVolumeClaimName = current.Name
+	}
 	if resolved != nil {
 		if current.Status.RuntimeImage == "" {
 			current.Status.RuntimeImage = resolved.image
@@ -1031,6 +1070,9 @@ func (r *WorkspaceReconciler) setWorkspaceStatus(ctx context.Context, key types.
 func (r *WorkspaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.RunnerImage == "" {
 		return fmt.Errorf("workspace runner image must not be empty")
+	}
+	if r.DarwinWorkspaceRoot != "" && !filepath.IsAbs(r.DarwinWorkspaceRoot) {
+		return fmt.Errorf("darwin Workspace root must be absolute")
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).

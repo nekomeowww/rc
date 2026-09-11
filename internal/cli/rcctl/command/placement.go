@@ -18,14 +18,14 @@ type PlacementOptions struct {
 }
 
 func (options *PlacementOptions) AddFlags(flags *pflag.FlagSet) {
-	flags.StringVar(&options.OS, "os", "", "Runtime OS: linux or windows; defaults to the Environment OS or linux")
+	flags.StringVar(&options.OS, "os", "", "Runtime OS: linux, windows, or darwin; defaults to the Environment OS or linux")
 	flags.StringToStringVar(&options.NodeSelector, "node-selector", nil, "Runtime node labels (key=value)")
 	flags.StringArrayVar(&options.Tolerations, "toleration", nil, "Runtime taint to tolerate (key[=value]:effect); repeatable")
 }
 
 func (options PlacementOptions) Resolve() (corev1.OSName, []corev1.Toleration, error) {
-	if options.OS != "" && options.OS != "linux" && options.OS != "windows" {
-		return "", nil, fmt.Errorf("--os must be linux or windows")
+	if options.OS != "" && options.OS != "linux" && options.OS != "windows" && options.OS != "darwin" {
+		return "", nil, fmt.Errorf("--os must be linux, windows, or darwin")
 	}
 	result := make([]corev1.Toleration, 0, len(options.Tolerations))
 	for _, item := range options.Tolerations {

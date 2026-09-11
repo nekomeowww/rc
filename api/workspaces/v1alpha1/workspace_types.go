@@ -105,9 +105,10 @@ type WorkspaceLifecycle struct {
 
 // WorkspaceSpec defines one persistent development machine.
 type WorkspaceSpec struct {
-	// os selects the container operating system. It must match the image and
+	// os selects the runtime operating system. It must match the image and
 	// any source Environment; changing it would invalidate persistent home state.
-	// +kubebuilder:validation:Enum=linux;windows
+	// Darwin runtimes currently target macOS-vz-kubelet virtual-machine Pods.
+	// +kubebuilder:validation:Enum=linux;windows;darwin
 	// +kubebuilder:default=linux
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Workspace OS is immutable"
 	// +optional
@@ -240,6 +241,7 @@ type WorkspaceStatus struct {
 	RuntimeImage string `json:"runtimeImage,omitempty"`
 
 	// homeVolumeClaimName contains mutable Workspace home state and transcripts.
+	// It is empty for Darwin Workspaces, which use node-local host storage.
 	// +optional
 	HomeVolumeClaimName string `json:"homeVolumeClaimName,omitempty"`
 

@@ -66,6 +66,44 @@ func TestWindowsWorkspacePodIsRenderedOnce(t *testing.T) {
 	assert.Empty(t, container.Env, "process environment does not enter the supervisor")
 }
 
+func TestDarwinWorkspacePodUsesVMProviderContract(t *testing.T) {
+	t.Parallel()
+	runtime, err := Resolve(Target{OS: Darwin, Placement: Placement{Tolerations: []corev1.Toleration{{Key: "virtual-kubelet.io/provider", Value: "macos-vz", Operator: corev1.TolerationOpEqual, Effect: corev1.TaintEffectNoSchedule}}}})
+	require.NoError(t, err)
+	action := lifecycle.Action{Command: []string{"xcodebuild", "-version"}}
+	pod, err := runtime.WorkspacePod(WorkspacePodIntent{
+		Metadata: metav1.ObjectMeta{Name: "xcode", Namespace: "development"}, Image: "example/macos:26.3",
+		HomeHostPath: "/Users/runner/.local/share/rc/development/xcode",
+		Initializers: []Initializer{{Name: "initialize", Image: "example/macos:26.3", Action: action}},
+	})
+	require.NoError(t, err)
+	assert.Nil(t, pod.Spec.OS, "the Kubernetes PodOS schema does not admit darwin")
+	assert.Equal(t, "darwin", pod.Spec.NodeSelector[corev1.LabelOSStable])
+	assert.Nil(t, pod.Spec.SecurityContext)
+	assert.Empty(t, pod.Spec.InitContainers, "macOS-vz represents the first container as a VM")
+	require.Len(t, pod.Spec.Volumes, 1)
+	require.NotNil(t, pod.Spec.Volumes[0].HostPath)
+	assert.Equal(t, "/Users/runner/.local/share/rc/development/xcode", pod.Spec.Volumes[0].HostPath.Path)
+	require.Len(t, pod.Spec.Containers, 1)
+	container := pod.Spec.Containers[0]
+	assert.Empty(t, container.Command, "macOS-vz does not execute the container command")
+	assert.Nil(t, container.ReadinessProbe, "macOS-vz gates readiness on its postStart hook")
+	assert.Nil(t, container.SecurityContext)
+	assert.Equal(t, darwinHome, container.VolumeMounts[0].MountPath)
+	assert.Equal(t, []corev1.EnvVar{{Name: darwinExecArgvEnv, Value: "1"}}, container.Env)
+	require.NotNil(t, container.Lifecycle)
+	require.NotNil(t, container.Lifecycle.PostStart)
+	startup := container.Lifecycle.PostStart.Exec.Command
+	require.Len(t, startup, 3)
+	assert.Equal(t, []string{unixShellExecutable, "-c"}, startup[:2])
+	assert.Contains(t, startup[2], `nohup "`+darwinExecutable+`" serve`)
+	assert.Contains(t, startup[2], darwinHome+"/.rc/run/rc-kube.sock")
+
+	target := runtime.ProcessTarget("development", "xcode", runtimeContainerName)
+	assert.Equal(t, darwinExecutable, target.Executable)
+	assert.Equal(t, darwinHome+"/.rc/run/rc-kube.sock", target.Endpoint)
+}
+
 func TestProcessCompilesLogicalRequest(t *testing.T) {
 	t.Parallel()
 	runtime, err := Resolve(Target{OS: corev1.Windows})

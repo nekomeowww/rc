@@ -65,10 +65,16 @@ spec:
           - --health-probe-bind-address=:8081
           - --runner-image=$(RC_RUNNER_IMAGE)
           - --windows-runner-image=$(RC_WINDOWS_RUNNER_IMAGE)
+          - --darwin-runner-image=$(RC_DARWIN_RUNNER_IMAGE)
+          - --darwin-workspace-root=$(RC_DARWIN_WORKSPACE_ROOT)
         env:
           - name: RC_RUNNER_IMAGE
             value: runner:latest
           - name: RC_WINDOWS_RUNNER_IMAGE
+            value: ""
+          - name: RC_DARWIN_RUNNER_IMAGE
+            value: ""
+          - name: RC_DARWIN_WORKSPACE_ROOT
             value: ""
         image: controller:latest
         name: manager

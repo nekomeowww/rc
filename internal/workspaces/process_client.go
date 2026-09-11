@@ -369,6 +369,9 @@ func (processes *ProcessClient) Logs(ctx context.Context, process *workspacesv1a
 	if err != nil {
 		return err
 	}
+	if volume.runtime.OS() == rcplatform.Darwin {
+		return fmt.Errorf("darwin process logs require the Workspace runtime Pod to be running")
+	}
 	if processes.Config == nil {
 		return fmt.Errorf("kubernetes REST config is required for suspended transcript reads")
 	}

@@ -13,7 +13,7 @@ import (
 )
 
 var _ = Describe("Runtime operating system API", func() {
-	It("defaults Linux, accepts Windows, and prevents changing a persisted OS", func() {
+	It("defaults Linux, accepts Windows and Darwin, and prevents changing a persisted OS", func() {
 		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "runtime-os-"}}
 		Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, namespace)).To(Succeed()) })
@@ -24,9 +24,14 @@ var _ = Describe("Runtime operating system API", func() {
 		Expect(k8sClient.Create(ctx, workspace)).To(Succeed())
 		workspace.Spec.OS = corev1.Linux
 		Expect(apierrors.IsInvalid(k8sClient.Update(ctx, workspace))).To(BeTrue())
+		darwin := &workspacesv1alpha1.Workspace{
+			ObjectMeta: metav1.ObjectMeta{Name: "mac", Namespace: namespace.Name},
+			Spec:       workspacesv1alpha1.WorkspaceSpec{OS: "darwin", Image: "example/macos:26.3"},
+		}
+		Expect(k8sClient.Create(ctx, darwin)).To(Succeed())
 		environment := &workspacesv1alpha1.WorkspaceEnvironment{
 			ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: namespace.Name},
-			Spec:       workspacesv1alpha1.WorkspaceEnvironmentSpec{Image: "example/linux", Storage: workspacesv1alpha1.PersistentStorageSpec{Size: resource.MustParse("1Gi")}},
+			Spec:       workspacesv1alpha1.WorkspaceEnvironmentSpec{Image: testLinuxImage, Storage: workspacesv1alpha1.PersistentStorageSpec{Size: resource.MustParse("1Gi")}},
 		}
 		Expect(k8sClient.Create(ctx, environment)).To(Succeed())
 		Expect(environment.Spec.OS).To(Equal(corev1.Linux))

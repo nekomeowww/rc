@@ -149,6 +149,67 @@ rcctl -n <namespace> agent exec --temporary --environment <environment> -- <boun
 Use `agent list`, `agent logs <process-id>`, `agent resume <process-id>`, and
 `agent stop <process-id>` for the lifecycle of detached or interactive work.
 
+## pnpm caches in Linux Workspaces
+
+Keep source Worktrees on their PVCs. For faster dependency reconstruction, use
+container-local metadata, content storage, and a separate virtual store for each
+Worktree. The Linux runner provides `XDG_CACHE_HOME=/tmp/cache`; the Codex image
+also prepares `/tmp/cache/pnpm/store` and `/tmp/cache/pnpm/virtual` for its runtime
+user. Verify these defaults and directory permissions when using older/custom images.
+
+```sh
+rcctl -n <namespace> agent exec --workspace <workspace> --cwd /workspace/<mount> -- pnpm install --store-dir=/tmp/cache/pnpm/store --virtual-store-dir=/tmp/cache/pnpm/virtual/<worktree-id>
+```
+
+- Replace `<worktree-id>` with the actual Worktree resource name, not a branch
+  basename. Use one stable path per Worktree, shared by its monorepo packages;
+  never share a virtual store across independent Worktrees.
+- Run at the repository's required install root and follow its pinned pnpm,
+  lockfile, and build-script policies. Do not disable lockfiles or scripts globally.
+- Reuse both directory flags for subsequent `install`, `add`, `remove`, and
+  `update` commands. Do not set one global virtual-store path for a Workspace
+  with multiple mounts. Serialize dependency mutations within each Worktree.
+- Explicit flags also override older persistent-home settings. pnpm 11+ no longer
+  reads store settings from `.npmrc`; do not assume the image's pnpm 10 default
+  config controls a project's newer package-manager version.
+- Project `node_modules` entry directories and workspace links remain on the PVC;
+  dependency files live in the local virtual store. All consuming processes must
+  see the same local path. Moving only the content store does not remove PVC
+  dependency-file I/O.
+- `/tmp/cache` is disposable container storage, not tmpfs, an `emptyDir`, or a
+  persistence guarantee. Pod replacement, stop/start, and mount changes can lose
+  it. An Environment snapshot of persistent home does not capture it. Never put
+  credentials there or delete it while dependent processes are running.
+
+### Missing cache and migration
+
+Before reusing PVC dependencies after runtime replacement, verify the expected
+virtual store and representative dependency links. Directory existence alone is
+not proof of a complete install. A pnpm 12.3.4 recovery test reported `Already up
+to date` after the virtual store was lost, despite broken dependency links.
+
+If links are stale, or when migrating existing dependencies to these paths:
+
+1. Identify the exact Worktree and its root/package `node_modules` directories;
+   account for running agents, servers, and watchers before changing them.
+2. Move the generated directories aside to a uniquely named backup on the same
+   PVC, outside workspace package globs. Include package-level directories in a
+   monorepo. Preserve source, manifests, lockfiles, and unrelated caches; do not
+   run broad recursive deletion commands.
+3. Rerun installation with the same explicit store/virtual-store flags and the
+   repository's normal install policy. Validate dependency resolution and a
+   relevant runtime command before treating the Worktree as ready.
+4. Remove only the identified generated backups when cleanup is authorized.
+
+Do not use `--force` as the default recovery shortcut: it can install optional
+dependencies for other platforms. rc does not currently automate this recovery.
+If persistence is preferred, explicitly select a persistent store and virtual
+store (for example the default `node_modules/.pnpm`), accepting PVC I/O costs.
+These Linux paths are not instructions for Windows Workspaces.
+
+References: [pnpm configuration](https://pnpm.io/settings) and
+[virtualStoreDir](https://pnpm.io/settings/node-modules#virtualstoredir).
+
 ## Typical sequence
 
 Inspect first, then create only requested resources: namespace; credentials; Environment or compatible runner; Repository; Workspace; writable Worktree mount; initialization process; then separate AgentProcesses for each agent, server, or watcher. Use installed `rcctl --help` as the command contract because the API is currently `v1alpha1` and flags can change.

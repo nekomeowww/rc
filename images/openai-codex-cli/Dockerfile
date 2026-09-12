@@ -30,9 +30,9 @@ COPY --from=codex /opt/openai /opt/openai
 
 # Debian login shells reset PATH, so expose the pinned tools from a standard
 # system path used by both interactive shells and Codex child processes. Keep
-# pnpm's content-addressable store in the persistent home volume: when the home
-# and Worktree use different filesystems, pnpm otherwise places the store inside
-# the repository and development file watchers traverse it.
+# pnpm's content-addressable store outside the repository so development file
+# watchers do not traverse it. The previous persistent-home store is replaced
+# by rebuildable local storage; pair it with a per-Worktree local virtual store.
 USER root
 # RUNNER_IMAGE is overridable, so keep the native build toolchain explicit for
 # older or custom Debian-compatible runner images.
@@ -48,12 +48,18 @@ RUN apt-get update \
     && ln -sfn /opt/openai/bin/codex /usr/local/bin/codex \
     && ln -sfn /opt/openai/bin/pnpm /usr/local/bin/pnpm \
     && ln -sfn /opt/openai/bin/pnpx /usr/local/bin/pnpx \
-    && install -d -o agent -g agent /home/agent/.local/share/pnpm/store \
+    && install -d -m 0700 -o agent -g agent /tmp/cache /tmp/cache/pnpm /tmp/cache/pnpm/store /tmp/cache/pnpm/virtual \
     && install -d /usr/local/etc \
-    && printf '%s\n' 'store-dir=/home/agent/.local/share/pnpm/store' >> /usr/local/etc/npmrc \
-    && test "$(/opt/openai/bin/pnpm config get store-dir)" = "/home/agent/.local/share/pnpm/store"
+    && printf '%s\n' 'store-dir=/tmp/cache/pnpm/store' >> /usr/local/etc/npmrc \
+    && test "$(/opt/openai/bin/pnpm config get store-dir)" = "/tmp/cache/pnpm/store"
 USER 1000:1000
 
-ENV PATH="/opt/openai/bin:${PATH}"
+# Repeat the cache default for older/custom RUNNER_IMAGE bases. pnpm 11+ no
+# longer reads store settings from npmrc; use explicit install flags as documented
+# in skills/use-rc/SKILL.md (https://pnpm.io/settings).
+ENV PATH="/opt/openai/bin:${PATH}" \
+    XDG_CACHE_HOME="/tmp/cache"
+
+RUN test -w /tmp/cache/pnpm/store && test -w /tmp/cache/pnpm/virtual
 
 ENTRYPOINT ["codex"]

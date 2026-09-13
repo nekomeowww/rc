@@ -30,12 +30,6 @@ RUN & C:\rc\register-fonts.ps1 -Install
 
 COPY assets/rc/ C:/rc/bin/
 
-# Keep rebuildable caches off the persistent home volume. This writable-layer
-# directory is disposable on runtime replacement; do not redirect user profiles.
-RUN New-Item -ItemType Directory -Force C:\tmp\cache\pnpm\store, C:\tmp\cache\pnpm\virtual | Out-Null; `
-    & icacls.exe C:\tmp\cache /grant '*S-1-5-93-2-2:(OI)(CI)F' /T /C /Q; `
-    if ($LASTEXITCODE -ne 0) { throw 'Could not grant ContainerUser cache access' }
-
 ENV APPDATA="C:\home\agent\AppData\Roaming" `
     HOME="C:\home\agent" `
     LOCALAPPDATA="C:\home\agent\AppData\Local" `
@@ -50,10 +44,7 @@ ENV APPDATA="C:\home\agent\AppData\Roaming" `
 # entrypoint.ps1 loads VsDevCmd for runtime commands so cl.exe and MSBuild are
 # also available without hard-coding the servicing-dependent MSVC directory.
 USER ContainerUser
-RUN $probe = 'C:\tmp\cache\pnpm\store\write-probe'; `
-    Set-Content -LiteralPath $probe -Value 'cache'; `
-    Remove-Item -LiteralPath $probe; `
-    & C:\rc\entrypoint.ps1 powershell.exe -NoProfile -File C:\rc\verify-toolchain.ps1; `
+RUN & C:\rc\entrypoint.ps1 powershell.exe -NoProfile -File C:\rc\verify-toolchain.ps1; `
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 LABEL org.opencontainers.image.source="https://github.com/nekomeowww/rc" `

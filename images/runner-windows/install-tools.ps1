@@ -4,18 +4,9 @@ $ErrorActionPreference = 'Stop'
 # a long Docker RUN command can otherwise hide the original installer error.
 function Install-Tool([string]$Executable, [string[]]$Arguments) {
     Write-Output "Installing $Executable"
-    if ($Executable -like '*vs_buildtools.exe') {
-        # The VS bootstrapper's --wait keeps it alive through setup. Emit its
-        # latest progress so offline-build stalls are diagnosable without exec.
-        $process = Start-Process $Executable -ArgumentList $Arguments -PassThru
-        while (-not $process.WaitForExit(30000)) {
-            Get-ChildItem $env:TEMP -Filter 'dd_setup_*.log' -File |
-                Sort-Object LastWriteTime -Descending | Select-Object -First 1 |
-                ForEach-Object { Get-Content $_.FullName -Tail 3 }
-        }
-    } else {
-        $process = Start-Process $Executable -ArgumentList $Arguments -Wait -PassThru
-    }
+    # All installers use the same wait/exit handling; retain logs on failure
+    # instead of polling VS-specific progress during successful installations.
+    $process = Start-Process $Executable -ArgumentList $Arguments -Wait -PassThru
     if ($process.ExitCode -notin @(0, 3010)) {
         # Failed build containers are disposable; retain the installer diagnosis
         # in build output before the snapshot becomes inaccessible.
@@ -51,7 +42,6 @@ if (Test-Path 'C:\rc\vs-layout\vs_buildtools.exe' -PathType Leaf) {
     $roots = @{
         'manifestRootCertificate.cer' = '8F43288AD272F3103B6FB1428485EA3014C0BCFE'
         'manifestCounterSignRootCertificate.cer' = '3B1EFD3A66EA28B16697394703A72CA340A05BD5'
-        'vs_installer_opc.RootCertificate.cer' = '3B1EFD3A66EA28B16697394703A72CA340A05BD5'
     }
     foreach ($name in $roots.Keys) {
         $file = Join-Path 'C:\rc\vs-layout\Certificates' $name
@@ -80,8 +70,11 @@ Remove-Item C:\rc\vs-layout -Recurse -Force
 if (Test-Path 'C:\ProgramData\Package Cache') {
     Remove-Item 'C:\ProgramData\Package Cache' -Recurse -Force
 }
-foreach ($path in @('C:\workspace', 'C:\home\agent')) {
+# Keep rebuildable caches off persistent home, with the same ContainerUser
+# permissions as the workspace. Runtime replacement can discard these paths.
+foreach ($path in @('C:\workspace', 'C:\home\agent', 'C:\tmp\cache')) {
     New-Item -ItemType Directory -Force $path | Out-Null
     & icacls.exe $path /grant '*S-1-5-93-2-2:(OI)(CI)F' /T /C /Q
     if ($LASTEXITCODE -ne 0) { throw 'Could not grant ContainerUser path access' }
 }
+New-Item -ItemType Directory -Force C:\tmp\cache\pnpm\store, C:\tmp\cache\pnpm\virtual | Out-Null

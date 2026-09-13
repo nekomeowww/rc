@@ -2,6 +2,13 @@ $ErrorActionPreference = 'Stop'
 
 # Run through entrypoint.ps1 as ContainerUser so this checks the same compiler
 # environment and permissions as Workspace commands, not the build host.
+# Test both directories using unique files so concurrent probes cannot collide.
+foreach ($cache in @('C:\tmp\cache\pnpm\store', 'C:\tmp\cache\pnpm\virtual')) {
+    $file = Join-Path $cache ([Guid]::NewGuid().ToString('N'))
+    Set-Content -LiteralPath $file -Value 'cache'
+    Remove-Item -LiteralPath $file
+}
+
 & python.exe --version
 if ($LASTEXITCODE -ne 0) { throw 'Python is unavailable' }
 & cmake.exe --version

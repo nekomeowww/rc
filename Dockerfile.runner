@@ -150,9 +150,15 @@ COPY --from=tool-downloader /out/mise /usr/local/bin/mise
 COPY --from=tool-downloader /out/proto /usr/local/bin/proto
 COPY --from=tool-downloader /out/proto-shim /usr/local/bin/proto-shim
 
-ENV SHELL="/bin/bash"
+# Keep rebuildable tool metadata on container-local storage, not the home PVC.
+# This directory is not a persistent volume and may disappear on runtime replacement.
+RUN install -d -m 0700 -o 1000 -g 1000 /tmp/cache
+
+ENV SHELL="/bin/bash" \
+    XDG_CACHE_HOME="/tmp/cache"
 
 USER 1000:1000
+RUN test -w /tmp/cache
 WORKDIR /workspace
 
 ENTRYPOINT ["rc-kube"]

@@ -18,6 +18,9 @@ node-gyp. Kubernetes owns the ordinary container's process lifetime. The
 default command is `rc-kube.exe serve`; Windows Pod construction preserves the
 image entrypoint.
 
+Fonts are copied and registered system-wide during the administrator build step;
+the runtime entrypoint only loads them into the unprivileged user's session.
+
 ## Assets
 
 First run `make build-windows` in the repository to cross-compile the amd64
@@ -84,6 +87,31 @@ Then stage the inputs (replace paths with the extracted installation paths):
   -VCRuntimeInstaller C:\downloads\vc_redist.x64.exe
 ```
 
+For a BuildKit worker without build-step networking, first download a Visual
+Studio layout on a networked Windows machine (this does not install tools on
+that host):
+
+```powershell
+Start-Process C:\downloads\vs_buildtools.exe -Wait -ArgumentList @(
+  '--layout', 'C:\downloads\vs-layout', '--lang', 'en-US', '--quiet', '--wait',
+  '--add', 'Microsoft.VisualStudio.Workload.VCTools',
+  '--add', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
+  '--add', 'Microsoft.VisualStudio.Component.Windows11SDK.26100'
+)
+Invoke-WebRequest -UseBasicParsing `
+  -Uri 'https://www.microsoft.com/pkiops/certs/Microsoft%20Windows%20Code%20Signing%20PCA%202024.crt' `
+  -OutFile C:\downloads\vs-layout\Certificates\MicrosoftWindowsCodeSigningPCA2024.crt
+```
+
+Pass `-VSBuildToolsLayout C:\downloads\vs-layout` when staging into a fresh build
+context. The image installer selects the layout with `--noWeb`; omit that
+parameter for the normal online build. The layout increases transferred context
+and image-layer size even though setup removes its files from the final
+filesystem. See Microsoft's [offline installation instructions](https://learn.microsoft.com/en-us/visualstudio/install/create-an-offline-installation-of-visual-studio?view=vs-2022).
+The installer imports pinned Microsoft roots and the signing intermediate into
+the image only, keeping signature verification enabled. The separate intermediate
+download follows Microsoft's [missing-certificate fix](https://learn.microsoft.com/en-us/troubleshoot/developer/visualstudio/installation/install-failure-2017-later-versions).
+
 The native C++ workload and Windows SDK add several gigabytes to the unpacked
 Windows image (typically about 7-10 GB, depending on the servicing release
 selected by Microsoft's bootstrapper). Builds need at least 2 GB of memory and
@@ -144,6 +172,30 @@ must happen on the Windows runtime; a Linux Docker daemon cannot run the result.
 
 ## Application dependencies and validation
 
+### Local pnpm caches
+
+The image sets `XDG_CACHE_HOME=C:\tmp\cache` and grants `ContainerUser` access
+to the cache directories, without moving `HOME`, `APPDATA`, or `LOCALAPPDATA`.
+Keep active source on the container writable layer as described in the Windows
+guide. From the project's install root, use an independent virtual store per
+checkout (replace `<checkout-id>`):
+
+```powershell
+pnpm.cmd install --store-dir=C:\tmp\cache\pnpm\store --virtual-store-dir=C:\tmp\cache\pnpm\virtual\<checkout-id>
+```
+
+Keep both path flags for later dependency changes and follow the repository's
+lockfile and build-script policies. These caches are disposable and are not
+included in persistent-home snapshots. After runtime replacement, restore source
+and reinstall; if retained node_modules links target a missing virtual store,
+stop affected processes, move only generated node_modules aside, reinstall, and
+verify resolution. Do not default to `--force` or clear active caches.
+
+This does not fix Windows mounted-directory rename limitations or reduce the
+disk space needed to build the image's native toolchain.
+
+### Runtime validation
+
 The runner provides rc's native process runtime, development tools, fonts, and
 system libraries. Applications install their own framework dependencies, such
 as Electron, from their own repository. The image does not bundle an application,
@@ -170,3 +222,10 @@ command. Python and CMake are on the machine-level image PATH.
 `npm_config_msvs_version=2022`, and the registered Build Tools instance allow
 node-gyp to select the in-container Python and Visual Studio 2022 without a
 CI-host installation.
+
+The Dockerfile also runs `C:\rc\verify-toolchain.ps1` through the normal
+entrypoint as `ContainerUser`. It compiles, links and runs a disposable C++
+program using Windows SDK headers and the VC runtime. This gate catches missing
+compiler libraries that version-only probes miss. Older experiment images with
+only a cache layer do not provide this toolchain; rebuild the full `codex` target
+before testing applications that invoke node-gyp.

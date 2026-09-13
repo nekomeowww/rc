@@ -2,5 +2,7 @@
 !Dockerfile
 !entrypoint.ps1
 !register-fonts.ps1
+!verify-toolchain.ps1
+!install-tools.ps1
 !assets/
 !assets/**

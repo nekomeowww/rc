@@ -1,3 +1,4 @@
+param([switch]$Install)
 $ErrorActionPreference = 'Stop'
 $fontDirectory = Join-Path $PSScriptRoot 'fonts'
 $registryPath = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts'
@@ -20,10 +21,15 @@ public static class RcExperimentFonts {
 foreach ($name in $fonts.Keys) {
     $file = $fonts[$name]
     $destination = Join-Path $env:WINDIR "Fonts\$file"
-    if (-not (Test-Path $destination)) {
-        Copy-Item (Join-Path $fontDirectory $file) $destination
+    # System installation belongs to the administrator build step. Runtime
+    # ContainerUser only loads fonts into its session; writing HKLM would fail.
+    if ($Install) {
+        if (-not (Test-Path $destination)) {
+            Copy-Item (Join-Path $fontDirectory $file) $destination
+        }
+        New-ItemProperty $registryPath -Name $name -Value $file -PropertyType String -Force | Out-Null
     }
-    New-ItemProperty $registryPath -Name $name -Value $file -PropertyType String -Force | Out-Null
+    if (-not (Test-Path $destination)) { throw "Missing installed font: $destination" }
     if ([RcExperimentFonts]::AddFontResourceW($destination) -eq 0) {
         throw "Could not load font: $destination"
     }

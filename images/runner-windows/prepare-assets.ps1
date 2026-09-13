@@ -6,6 +6,7 @@ param(
     [Parameter(Mandatory=$true)][string]$PythonInstaller,
     [Parameter(Mandatory=$true)][string]$CMakeInstaller,
     [Parameter(Mandatory=$true)][string]$VSBuildToolsBootstrapper,
+    [string]$VSBuildToolsLayout,
     [Parameter(Mandatory=$true)][string]$VCRuntimeInstaller,
     [string]$FontDirectory = "$env:WINDIR\Fonts"
 )
@@ -31,7 +32,7 @@ foreach ($file in $required) {
 & (Join-Path $NodeDirectory 'node.exe') --version
 if ($LASTEXITCODE -ne 0) { throw 'Could not execute the supplied Node binary' }
 $assets = Join-Path $PSScriptRoot 'assets'
-New-Item -ItemType Directory -Force $assets, (Join-Path $assets 'fonts') | Out-Null
+New-Item -ItemType Directory -Force $assets, (Join-Path $assets 'fonts'), (Join-Path $assets 'vs-layout') | Out-Null
 function Copy-AssetTree($source, $name) {
     & robocopy.exe $source (Join-Path $assets $name) /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP
     if ($LASTEXITCODE -ge 8) { throw "Could not stage $source" }
@@ -46,6 +47,15 @@ if ($OpenaiDirectory) {
 Copy-Item -LiteralPath $PythonInstaller -Destination (Join-Path $assets 'python-amd64.exe') -Force
 Copy-Item -LiteralPath $CMakeInstaller -Destination (Join-Path $assets 'cmake-x64.msi') -Force
 Copy-Item -LiteralPath $VSBuildToolsBootstrapper -Destination (Join-Path $assets 'vs_buildtools.exe') -Force
+if ($VSBuildToolsLayout) {
+    if (-not (Test-Path (Join-Path $VSBuildToolsLayout 'vs_buildtools.exe') -PathType Leaf)) {
+        throw 'VSBuildToolsLayout must contain the offline layout bootstrapper'
+    }
+    if (-not (Test-Path (Join-Path $VSBuildToolsLayout 'Certificates\MicrosoftWindowsCodeSigningPCA2024.crt') -PathType Leaf)) {
+        throw 'Offline layout requires the Microsoft signing intermediate; see README.md'
+    }
+    Copy-AssetTree $VSBuildToolsLayout 'vs-layout'
+}
 Copy-Item -LiteralPath $VCRuntimeInstaller -Destination (Join-Path $assets 'vc_redist.x64.exe') -Force
 foreach ($file in @('arial.ttf','arialbd.ttf','segoeui.ttf','segoeuib.ttf','tahoma.ttf','tahomabd.ttf','micross.ttf')) {
     Copy-Item -LiteralPath (Join-Path $FontDirectory $file) -Destination (Join-Path $assets "fonts\$file") -Force

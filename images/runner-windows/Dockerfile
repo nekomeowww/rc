@@ -80,7 +80,7 @@ RUN $codex = @(Get-ChildItem C:\rc\openai\node_modules\@openai -Recurse -Filter 
     $ripgrep = @(Get-ChildItem C:\rc\openai\node_modules\@openai -Recurse -Filter rg.exe); `
     if ($ripgrep.Count -eq 1) { Copy-Item $ripgrep[0].FullName C:\rc\bin\rg.exe }
 
-RUN if ((& codex.exe --version) -ne "codex-cli $env:CODEX_VERSION") { throw 'Unexpected Codex version' }; `
+RUN if ((& codex.exe --version) -ne ('codex-cli ' + $env:CODEX_VERSION)) { throw 'Unexpected Codex version' }; `
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; `
     if ((& pnpm.cmd --version) -ne $env:PNPM_VERSION) { throw 'Unexpected pnpm version' }; `
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; `

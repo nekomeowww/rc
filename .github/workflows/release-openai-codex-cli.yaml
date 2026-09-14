@@ -107,8 +107,6 @@ jobs:
             RUNNER_IMAGE=ghcr.io/${{ github.repository }}/runner:${{ inputs.runner_version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Attest the OpenAI Codex CLI image
         uses: actions/attest@v4

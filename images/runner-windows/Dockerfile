@@ -58,14 +58,19 @@ CMD ["rc-kube.exe", "serve"]
 
 FROM runner AS codex
 
+ARG CODEX_VERSION=0.154.0
+ARG PNPM_VERSION=12.4.1
+ARG BUN_VERSION=1.4.2
+
 USER ContainerAdministrator
 
 COPY assets/openai/ C:/rc/openai/
 
-ENV PATH="C:\rc\openai\node_modules\.bin;${PATH}"
+ENV PATH="C:\rc\openai\node_modules\.bin;${PATH}" `
+    pnpm_config_store_dir="C:\tmp\cache\pnpm\store"
 
 LABEL org.opencontainers.image.title="Windows Codex Workspace runtime" `
-    org.opencontainers.image.version="0.147.0"
+    org.opencontainers.image.version="${CODEX_VERSION}"
 
 # Use the native Codex executable so process commands preserve their arguments.
 # Batch shims require cmd.exe and cannot preserve arbitrary arguments safely.
@@ -75,11 +80,11 @@ RUN $codex = @(Get-ChildItem C:\rc\openai\node_modules\@openai -Recurse -Filter 
     $ripgrep = @(Get-ChildItem C:\rc\openai\node_modules\@openai -Recurse -Filter rg.exe); `
     if ($ripgrep.Count -eq 1) { Copy-Item $ripgrep[0].FullName C:\rc\bin\rg.exe }
 
-RUN & codex.exe --version; `
+RUN if ((& codex.exe --version) -ne "codex-cli $env:CODEX_VERSION") { throw 'Unexpected Codex version' }; `
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; `
-    & pnpm.cmd --version; `
+    if ((& pnpm.cmd --version) -ne $env:PNPM_VERSION) { throw 'Unexpected pnpm version' }; `
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; `
-    & bun.cmd --version; `
+    if ((& bun.cmd --version) -ne $env:BUN_VERSION) { throw 'Unexpected Bun version' }; `
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 USER ContainerUser

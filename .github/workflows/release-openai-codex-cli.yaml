@@ -6,7 +6,7 @@ on:
       codex_version:
         description: Version of @openai/codex to publish
         required: true
-        default: '0.147.0'
+        default: '0.154.0'
         type: string
       runner_version:
         description: Released rc runner version to extend

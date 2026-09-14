@@ -1,11 +1,11 @@
 param(
     [Parameter(Mandatory=$true)][string]$RCBinaryDirectory,
-    [string]$NodeVersion = '26.8.1',
-    [string]$NodeSHA256 = '57693d8e93d1b04e7b7de46aca53ecd63e97564e73de36a68428d7ff08d83587',
-    [string]$PythonVersion = '3.13.15',
-    [string]$PythonSHA256 = 'edec09c4853aeae9ac36efb8c9f95b6b8e2fee65eee56d9767a8b7c69c574403',
-    [string]$CMakeVersion = '4.3.5',
-    [string]$CMakeSHA256 = 'dac5ddcd2d58699ebe1211173afabfe6f0ca24340e2e995f333cb3e00cff72d6'
+    [string]$NodeVersion = '26.8.2',
+    [string]$NodeSHA256 = 'cf02f5d0c06c794b84f277177d5cf3743d0924ca49f6641cd435dd7cb6ee9085',
+    [string]$PythonVersion = '3.14.7',
+    [string]$PythonSHA256 = '9d9eb2709ef81bf5cd30db3c2096bdbc4ea10087c22e62f27d356b36f6ae9649',
+    [string]$CMakeVersion = '4.4.3',
+    [string]$CMakeSHA256 = 'f3b27c83979727b73540db53dbe610967656b4631746a94b17a1dd0329dd7868'
 )
 
 $ErrorActionPreference = 'Stop'

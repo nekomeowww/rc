@@ -2,11 +2,11 @@
 
 ARG RUNNER_IMAGE=ghcr.io/nekomeowww/rc/runner:latest
 
-FROM node:26-bookworm-slim AS codex
+FROM node:26.8.2-bookworm-slim AS codex
 
-ARG BUN_VERSION=1.4.0
-ARG CODEX_VERSION=0.147.0
-ARG PNPM_VERSION=10.26.2
+ARG BUN_VERSION=1.4.2
+ARG CODEX_VERSION=0.154.0
+ARG PNPM_VERSION=12.4.1
 
 RUN npm install --global --prefix /opt/openai \
         "@openai/codex@${CODEX_VERSION}" \
@@ -19,7 +19,7 @@ RUN npm install --global --prefix /opt/openai \
 
 FROM ${RUNNER_IMAGE}
 
-ARG CODEX_VERSION=0.147.0
+ARG CODEX_VERSION=0.154.0
 
 LABEL org.opencontainers.image.source="https://github.com/nekomeowww/rc" \
       org.opencontainers.image.title="OpenAI Codex CLI environment" \
@@ -48,18 +48,17 @@ RUN apt-get update \
     && ln -sfn /opt/openai/bin/codex /usr/local/bin/codex \
     && ln -sfn /opt/openai/bin/pnpm /usr/local/bin/pnpm \
     && ln -sfn /opt/openai/bin/pnpx /usr/local/bin/pnpx \
-    && install -d -m 0700 -o agent -g agent /tmp/cache /tmp/cache/pnpm /tmp/cache/pnpm/store /tmp/cache/pnpm/virtual \
-    && install -d /usr/local/etc \
-    && printf '%s\n' 'store-dir=/tmp/cache/pnpm/store' >> /usr/local/etc/npmrc \
-    && test "$(/opt/openai/bin/pnpm config get store-dir)" = "/tmp/cache/pnpm/store"
+    && install -d -m 0700 -o agent -g agent /tmp/cache /tmp/cache/pnpm /tmp/cache/pnpm/store /tmp/cache/pnpm/virtual
 USER 1000:1000
 
 # Repeat the cache default for older/custom RUNNER_IMAGE bases. pnpm 11+ no
 # longer reads store settings from npmrc; use explicit install flags as documented
 # in skills/use-rc/SKILL.md (https://pnpm.io/settings).
 ENV PATH="/opt/openai/bin:${PATH}" \
-    XDG_CACHE_HOME="/tmp/cache"
+    XDG_CACHE_HOME="/tmp/cache" \
+    pnpm_config_store_dir="/tmp/cache/pnpm/store"
 
-RUN test -w /tmp/cache/pnpm/store && test -w /tmp/cache/pnpm/virtual
+RUN test -w /tmp/cache/pnpm/store && test -w /tmp/cache/pnpm/virtual \
+    && test "$(pnpm config get storeDir)" = "/tmp/cache/pnpm/store"
 
 ENTRYPOINT ["codex"]

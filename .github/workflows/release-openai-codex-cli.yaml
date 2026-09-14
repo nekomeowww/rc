@@ -1,12 +1,19 @@
 name: Release OpenAI Codex CLI image
 
 on:
+  workflow_call:
+    inputs:
+      codex_version:
+        required: false
+        type: string
+      runner_version:
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       codex_version:
         description: Version of @openai/codex to publish
-        required: true
-        default: '0.154.0'
+        required: false
         type: string
       runner_version:
         description: Released rc runner version to extend
@@ -27,9 +34,23 @@ jobs:
       attestations: write
       id-token: write
     steps:
+      - name: Clone the code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Resolve Codex version
+        id: versions
+        env:
+          REQUESTED_CODEX_VERSION: ${{ inputs.codex_version }}
+        shell: bash
+        run: |
+          version="${REQUESTED_CODEX_VERSION:-$(sed -n 's/^ARG CODEX_VERSION=//p' images/openai-codex-cli/Dockerfile | head -1)}"
+          echo "codex_version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Validate Codex version
         env:
-          CODEX_VERSION: ${{ inputs.codex_version }}
+          CODEX_VERSION: ${{ steps.versions.outputs.codex_version }}
         shell: bash
         run: |
           if [[ ! "${CODEX_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
@@ -47,11 +68,6 @@ jobs:
             exit 1
           fi
 
-      - name: Clone the code
-        uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-
       - name: Generate image metadata
         uses: docker/metadata-action@v5
         id: meta
@@ -60,7 +76,8 @@ jobs:
           flavor: |
             latest=true
           tags: |
-            type=raw,value=${{ inputs.codex_version }}
+            type=raw,value=rc-${{ inputs.runner_version }}
+            type=raw,value=${{ steps.versions.outputs.codex_version }}-rc.${{ inputs.runner_version }}
 
       - name: Setup QEMU
         uses: docker/setup-qemu-action@v3
@@ -82,9 +99,11 @@ jobs:
           context: images/openai-codex-cli
           file: images/openai-codex-cli/Dockerfile
           platforms: linux/amd64,linux/arm64
+          pull: true
+          no-cache: true
           push: true
           build-args: |
-            CODEX_VERSION=${{ inputs.codex_version }}
+            CODEX_VERSION=${{ steps.versions.outputs.codex_version }}
             RUNNER_IMAGE=ghcr.io/${{ github.repository }}/runner:${{ inputs.runner_version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

@@ -172,6 +172,7 @@ RUN apt-get update \
         "corepack@${COREPACK_VERSION}" \
         "@lobehub/cli@${LOBEHUB_CLI_VERSION}" \
     && test "$(lh --version)" = "${LOBEHUB_CLI_VERSION}" \
+    && rm -rf /tmp/lobehub \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/* \
     && usermod --login agent --home /home/agent --move-home --shell /bin/bash ubuntu \

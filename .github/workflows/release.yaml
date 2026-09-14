@@ -14,16 +14,20 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     permissions:
       contents: write
     steps:
       - name: Require a version tag
+        id: version
         shell: bash
         run: |
-          if [[ "${GITHUB_REF}" != refs/tags/v* ]]; then
-            echo "Release must run against a v-prefixed tag." >&2
+          if [[ ! "${GITHUB_REF}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release must run against a stable v-prefixed semantic version tag." >&2
             exit 1
           fi
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Clone the code
         uses: actions/checkout@v6
@@ -41,7 +45,7 @@ jobs:
         with:
           distribution: goreleaser
           version: v2.15.2
-          args: release --clean
+          args: release --clean --draft
         env:
           CONTROLLER_IMAGE: ghcr.io/${{ github.repository }}/controller
           RUNNER_IMAGE: ghcr.io/${{ github.repository }}/runner
@@ -107,6 +111,8 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           platforms: ${{ matrix.platforms }}
+          pull: true
+          no-cache: true
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -149,7 +155,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Prepare Windows runner assets
-        run: ./images/runner-windows/prepare-ci-assets.ps1 -RCBinaryDirectory bin/windows-amd64
+        run: ./images/runner-windows/prepare-ci-assets.ps1 -RCBinaryDirectory bin/windows-amd64 -IncludeCodex
+
+      - name: Free space on the disposable Windows runner
+        run: |
+          # These host SDKs are unused: the image installs its own toolchain.
+          # Keep Git, Go, Node and the Actions tool cache for subsequent steps.
+          if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Only run on a disposable GitHub runner' }
+          Get-PSDrive C, D | Select-Object Name, Used, Free
+          foreach ($path in @('C:\Program Files\Microsoft Visual Studio', 'C:\Program Files (x86)\Microsoft Visual Studio', 'C:\Program Files (x86)\Windows Kits', 'C:\Program Files\dotnet', 'C:\Android')) {
+            if (Test-Path -LiteralPath $path) {
+              Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Continue
+            }
+          }
+          Get-PSDrive C, D | Select-Object Name, Used, Free
 
       - name: Start Windows Docker
         run: |
@@ -166,37 +185,78 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and publish Windows runner
+      - name: Build and publish Windows images
         id: push
         env:
-          IMAGE: ghcr.io/${{ github.repository }}/runner-windows
-          VERSION: ${{ github.ref_name }}
+          IMAGE_ROOT: ghcr.io/${{ github.repository }}
+          VERSION: ${{ needs.publish.outputs.version }}
         run: |
-          $version = $env:VERSION.TrimStart('v')
+          $version = $env:VERSION
           $parts = $version.Split('.')
           $minorVersion = "$($parts[0]).$($parts[1])"
+          $dockerfile = Get-Content images/runner-windows/Dockerfile -Raw
+          $codexVersion = [regex]::Match($dockerfile, '(?m)^ARG CODEX_VERSION=([0-9.]+)').Groups[1].Value
+          if (-not $codexVersion) { throw 'Missing pinned Codex version' }
 
-          docker build --target runner `
-            --tag "$($env:IMAGE):$version" `
-            --tag "$($env:IMAGE):$minorVersion" `
-            --tag "$($env:IMAGE):latest" `
-            images/runner-windows
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          docker push --all-tags $env:IMAGE
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          docker pull "$($env:IMAGE):$version"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          $reference = docker image inspect "$($env:IMAGE):$version" --format '{{index .RepoDigests 0}}'
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $digest = ($reference -split '@', 2)[1]
-          if (-not $digest) { throw 'Published Windows image has no repository digest' }
-          "digest=$digest" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          foreach ($target in @('runner', 'codex')) {
+            if ($target -eq 'runner') {
+              $image = "$($env:IMAGE_ROOT)/runner-windows"
+              $tags = @($version, $minorVersion, 'latest')
+              if ($parts[0] -ne '0') { $tags += $parts[0] }
+            } else {
+              $image = "$($env:IMAGE_ROOT)/openai-codex-cli-windows"
+              $tags = @("rc-$version", "$codexVersion-rc.$version", 'latest')
+            }
+            $tagArguments = @()
+            foreach ($tag in $tags) { $tagArguments += @('--tag', "${image}:$tag") }
+            # The codex target reuses the freshly built runner layers.
+            docker build --pull --platform windows/amd64 --target $target @tagArguments images/runner-windows
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            foreach ($tag in $tags) {
+              docker push "${image}:$tag"
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+            $reference = docker image inspect "${image}:$($tags[0])" --format '{{index .RepoDigests 0}}'
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $digest = ($reference -split '@', 2)[1]
+            if (-not $digest) { throw "Published $target image has no repository digest" }
+            "${target}_digest=$digest" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          }
 
       - name: Attest Windows runner image
         uses: actions/attest@v4
         with:
           subject-name: ghcr.io/${{ github.repository }}/runner-windows
-          subject-digest: ${{ steps.push.outputs.digest }}
+          subject-digest: ${{ steps.push.outputs.runner_digest }}
           push-to-registry: true
+
+      - name: Attest Windows Codex image
+        uses: actions/attest@v4
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/openai-codex-cli-windows
+          subject-digest: ${{ steps.push.outputs.codex_digest }}
+          push-to-registry: true
+
+  docker-codex:
+    needs: [publish, docker]
+    permissions:
+      packages: write
+      contents: read
+      attestations: write
+      id-token: write
+    uses: ./.github/workflows/release-openai-codex-cli.yaml
+    with:
+      runner_version: ${{ needs.publish.outputs.version }}
+
+  finalize:
+    needs: [publish, docker, docker-windows, docker-codex]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the completed release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release edit "$RELEASE_TAG" --draft=false --latest

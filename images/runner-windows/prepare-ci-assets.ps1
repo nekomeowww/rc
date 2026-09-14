@@ -1,5 +1,6 @@
 param(
     [Parameter(Mandatory=$true)][string]$RCBinaryDirectory,
+    [switch]$IncludeCodex,
     [string]$NodeVersion = '26.8.2',
     [string]$NodeSHA256 = 'cf02f5d0c06c794b84f277177d5cf3743d0924ca49f6641cd435dd7cb6ee9085',
     [string]$PythonVersion = '3.14.7',
@@ -52,7 +53,26 @@ Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile
 Assert-MicrosoftSignedAsset $vsBuildToolsBootstrapper
 Assert-MicrosoftSignedAsset $vcRuntimeInstaller
 
-& (Join-Path $PSScriptRoot 'prepare-assets.ps1') `
+$codexArguments = @{}
+if ($IncludeCodex) {
+    $dockerfile = Get-Content (Join-Path $PSScriptRoot 'Dockerfile') -Raw
+    function Get-ToolVersion([string]$name) {
+        $match = [regex]::Match($dockerfile, "(?m)^ARG ${name}_VERSION=([0-9]+\.[0-9]+\.[0-9]+)\r?$")
+        if (-not $match.Success) { throw "Missing pinned $name version in Dockerfile" }
+        return $match.Groups[1].Value
+    }
+    $openaiDirectory = Join-Path $downloadDirectory 'openai'
+    # Use the downloaded Node, including for npm lifecycle scripts.
+    $env:PATH = "$nodeDirectory;$env:PATH"
+    & (Join-Path $nodeDirectory 'npm.cmd') install --prefix $openaiDirectory `
+        "@openai/codex@$(Get-ToolVersion 'CODEX')" `
+        "pnpm@$(Get-ToolVersion 'PNPM')" `
+        "bun@$(Get-ToolVersion 'BUN')"
+    if ($LASTEXITCODE -ne 0) { throw 'Could not install Windows Codex tools' }
+    $codexArguments['OpenaiDirectory'] = $openaiDirectory
+}
+
+& (Join-Path $PSScriptRoot 'prepare-assets.ps1') @codexArguments `
     -RCBinaryDirectory $RCBinaryDirectory `
     -NodeDirectory $nodeDirectory `
     -GitDirectory (Join-Path $env:ProgramFiles 'Git') `

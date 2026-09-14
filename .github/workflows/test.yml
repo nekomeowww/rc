@@ -46,7 +46,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Prepare Windows runner assets
-        run: ./images/runner-windows/prepare-ci-assets.ps1 -RCBinaryDirectory bin/windows-amd64
+        run: ./images/runner-windows/prepare-ci-assets.ps1 -RCBinaryDirectory bin/windows-amd64 -IncludeCodex
+
+      - name: Free space on the disposable Windows runner
+        run: |
+          # These host SDKs are unused: the image installs its own toolchain.
+          # Keep Git, Go, Node and the Actions tool cache for subsequent steps.
+          if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Only run on a disposable GitHub runner' }
+          Get-PSDrive C, D | Select-Object Name, Used, Free
+          foreach ($path in @('C:\Program Files\Microsoft Visual Studio', 'C:\Program Files (x86)\Microsoft Visual Studio', 'C:\Program Files (x86)\Windows Kits', 'C:\Program Files\dotnet', 'C:\Android')) {
+            if (Test-Path -LiteralPath $path) {
+              Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Continue
+            }
+          }
+          Get-PSDrive C, D | Select-Object Name, Used, Free
 
       - name: Start Windows Docker
         run: |
@@ -56,9 +69,11 @@ jobs:
           docker info
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Build Windows runner image
+      - name: Build Windows runner and Codex images
         run: |
           docker build --target runner --tag rc-runner-windows:test images/runner-windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          docker build --target codex --tag rc-codex-windows:test images/runner-windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   test:

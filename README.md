@@ -42,11 +42,30 @@ Each release publishes matching versions of these public images:
 
 - `ghcr.io/nekomeowww/rc/controller`
 - `ghcr.io/nekomeowww/rc/runner`
+- `ghcr.io/nekomeowww/rc/runner-wayland`
 - `ghcr.io/nekomeowww/rc/runner-windows`
 
 The install manifest configures the controller and Linux runner. Select the
 experimental Windows runner explicitly on a Windows Workspace or through the
 manager's `--windows-runner-image` flag.
+
+Releases also publish `openai-codex-cli` (Linux amd64/arm64) and
+`openai-codex-cli-windows` (Windows amd64) under the same GHCR namespace.
+These derived images use `rc-<rc-version>` and `<codex-version>-rc.<rc-version>`
+tags, plus `latest`; the four runtime images use `<rc-version>` tags.
+For example, release `v0.12.1` with Codex `0.154.0` publishes
+`openai-codex-cli:rc-0.12.1` and `openai-codex-cli:0.154.0-rc.0.12.1`.
+Existing tags containing only the Codex version remain available but are no
+longer updated by this workflow.
+
+Push a stable `vMAJOR.MINOR.PATCH` tag to start the complete release. GitHub
+Release assets are staged as a draft, and the release becomes public only after
+all six images and their attestations succeed. Linux Codex extends the exact
+runner version from that release. A failed release stays a draft; fix the
+failure and rerun the failed jobs before treating that version as complete.
+Image tags can become visible while the draft is building.
+The separate Codex workflow can still be dispatched against a selected ref
+with a released runner version and an optional Codex version override.
 
 Your production StorageClass must support CSI PVC cloning. The local Kind setup described below is intentionally disposable and must not be used for production data.
 

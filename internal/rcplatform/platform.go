@@ -197,6 +197,16 @@ func (runtime Runtime) Process(intent ProcessIntent) processruntime.StartRequest
 	}
 }
 
+// MountPath maps an internal absolute POSIX mount location onto the target
+// drive. Keeping the same suffix lets Git for Windows resolve Linux gitdir
+// paths without mutating metadata on the shared PVC.
+func (runtime Runtime) MountPath(location string) string {
+	if runtime.os == corev1.Windows {
+		return `C:` + strings.ReplaceAll(location, "/", `\`)
+	}
+	return location
+}
+
 func (runtime Runtime) join(parts ...string) string {
 	joined := path.Join(parts...)
 	if runtime.os == corev1.Windows {

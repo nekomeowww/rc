@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"path"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/types"
 
@@ -85,6 +86,28 @@ func Action(branch, workingDirectory string) lifecycle.Action {
 		Command:          []string{"/bin/sh", "-ceu", generatedCheckoutScript, "worktree-bootstrap", branch},
 		WorkingDirectory: workingDirectory,
 	}
+}
+
+// WindowsAction initializes a cloned repository in the Windows runtime layer.
+// It preserves dirty files when the requested branch is already selected and
+// explicitly checks native command exit codes (PowerShell does not do so).
+func WindowsAction(branch, workingDirectory string) lifecycle.Action {
+	quotedBranch := "'" + strings.ReplaceAll(branch, "'", "''") + "'"
+	return lifecycle.Action{WorkingDirectory: workingDirectory, Script: `
+$ErrorActionPreference = 'Stop'
+$branch = ` + quotedBranch + `
+$current = & git symbolic-ref --quiet --short HEAD
+if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 1) { throw 'Cannot read current Git branch' }
+if ($current -ne $branch) {
+  & git show-ref --verify --quiet "refs/heads/$branch"
+  if ($LASTEXITCODE -eq 0) { & git checkout $branch }
+  elseif ($LASTEXITCODE -eq 1) { & git checkout -b $branch }
+  else { throw 'Cannot inspect Git branch' }
+  if ($LASTEXITCODE -ne 0) { throw 'Git checkout failed' }
+}
+& git rev-parse --verify HEAD
+if ($LASTEXITCODE -ne 0) { throw 'Git HEAD verification failed' }
+`}
 }
 
 const generatedCheckoutScript = `

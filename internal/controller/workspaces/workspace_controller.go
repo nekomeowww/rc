@@ -510,9 +510,6 @@ func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspac
 		}
 		return resolved, "", "", nil
 	}
-	if platform.OS() == corev1.Windows && len(workspace.Spec.Mounts) > 0 {
-		return resolved, "UnsupportedWindowsMount", "Repository and Worktree mounts use a Linux Git layout; use lifecycle initialization to create a Windows checkout", nil
-	}
 	if workspace.Spec.EnvironmentRef != nil {
 		environment := new(workspacesv1alpha1.WorkspaceEnvironment)
 		key := types.NamespacedName{Name: workspace.Spec.EnvironmentRef.Name, Namespace: workspace.Namespace}
@@ -568,7 +565,7 @@ func (r *WorkspaceReconciler) resolveWorkspaceDependencies(ctx context.Context, 
 	initializerNames := make(map[string]struct{})
 	worktreeRootMountIndexes := make(map[string]int)
 	for _, mount := range workspace.Spec.Mounts {
-		volume, volumeMount, claim, initializer, reason, message, err := r.resolveWorkspaceMount(ctx, workspace.Namespace, mount)
+		volume, volumeMount, claim, initializer, reason, message, err := r.resolveWorkspaceMount(ctx, workspace.Namespace, mount, resolved.runtime)
 		if err != nil {
 			return nil, "", "", err
 		}
@@ -578,7 +575,7 @@ func (r *WorkspaceReconciler) resolveWorkspaceDependencies(ctx context.Context, 
 		resolved.volumes = append(resolved.volumes, volume)
 		resolved.volumeMounts = append(resolved.volumeMounts, volumeMount)
 		if mount.WorktreeRef != nil && volumeMount.SubPath != "" {
-			rootMountPath := worktreebootstrap.VolumeRootMountPath(mount.WorktreeRef.Name)
+			rootMountPath := resolved.runtime.MountPath(worktreebootstrap.VolumeRootMountPath(mount.WorktreeRef.Name))
 			if index, exists := worktreeRootMountIndexes[rootMountPath]; exists {
 				// Native Git metadata is shared by every visible mount of the same
 				// Worktree, so its hidden root must be writable when any mount is writable.
@@ -597,6 +594,10 @@ func (r *WorkspaceReconciler) resolveWorkspaceDependencies(ctx context.Context, 
 			resolved.writeClaims = append(resolved.writeClaims, *claim)
 		}
 		if initializer != nil {
+			if resolved.runtime.OS() == corev1.Windows {
+				// Windows initializers execute inside the main runtime image.
+				initializer.image = resolved.image
+			}
 			if _, exists := initializerNames[initializer.name]; !exists {
 				resolved.initializers = append(resolved.initializers, *initializer)
 				initializerNames[initializer.name] = struct{}{}
@@ -675,13 +676,13 @@ func resolveLifecycleAction(action workspacesv1alpha1.WorkspaceLifecycleAction) 
 	}, nil
 }
 
-func (r *WorkspaceReconciler) resolveWorkspaceMount(ctx context.Context, namespace string, mount workspacesv1alpha1.WorkspaceMount) (corev1.Volume, corev1.VolumeMount, *workspaceWriteClaim, *workspaceInitializer, string, string, error) {
+func (r *WorkspaceReconciler) resolveWorkspaceMount(ctx context.Context, namespace string, mount workspacesv1alpha1.WorkspaceMount, platform rcplatform.Runtime) (corev1.Volume, corev1.VolumeMount, *workspaceWriteClaim, *workspaceInitializer, string, string, error) {
 	cleanPath := filepath.Clean(mount.Path)
-	if cleanPath == "." || cleanPath == ".." || strings.HasPrefix(cleanPath, "../") || filepath.IsAbs(mount.Path) {
+	if cleanPath == "." || cleanPath == ".." || strings.HasPrefix(cleanPath, "../") || filepath.IsAbs(mount.Path) || strings.ContainsAny(mount.Path, `\:`) {
 		return corev1.Volume{}, corev1.VolumeMount{}, nil, nil, "InvalidMountPath", fmt.Sprintf("Mount %s has an invalid path", mount.Name), nil
 	}
 	volume := corev1.Volume{Name: mount.Name}
-	volumeMount := corev1.VolumeMount{Name: mount.Name, MountPath: filepath.Join(workspaceRootMountPath, cleanPath), ReadOnly: mount.ReadOnly}
+	volumeMount := corev1.VolumeMount{Name: mount.Name, MountPath: platform.MountPath(filepath.Join(workspaceRootMountPath, cleanPath)), ReadOnly: mount.ReadOnly}
 	if mount.WorktreeRef != nil {
 		worktree := new(repositoriesv1alpha1.Worktree)
 		key := types.NamespacedName{Name: mount.WorktreeRef.Name, Namespace: namespace}
@@ -705,10 +706,16 @@ func (r *WorkspaceReconciler) resolveWorkspaceMount(ctx context.Context, namespa
 		}
 		var initializer *workspaceInitializer
 		if deferred && !worktreeReady {
+			if mount.ReadOnly {
+				return volume, volumeMount, nil, nil, "WorktreeNotReady", "Deferred Worktree initialization requires a writable mount", nil
+			}
 			initializer = &workspaceInitializer{
 				name:   worktreebootstrap.ContainerName(worktree.Namespace, worktree.Name, worktree.UID),
 				image:  r.RunnerImage,
 				action: worktreebootstrap.Action(worktree.Spec.Branch, volumeMount.MountPath),
+			}
+			if platform.OS() == corev1.Windows {
+				initializer.action = worktreebootstrap.WindowsAction(worktree.Spec.Branch, volumeMount.MountPath)
 			}
 		}
 		if !mount.ReadOnly {

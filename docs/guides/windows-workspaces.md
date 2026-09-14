@@ -11,7 +11,7 @@ with the supervisor through a local named pipe. Linux remains the API default.
 | --- | --- |
 | Runtime image | Native `rc-kube.exe` and `rcctl.exe` on PATH; entrypoint invokes supplied argv |
 | Home and transcripts | Persistent volume at `C:\home\agent` |
-| Development checkout | Container writable layer at `C:\workspace` |
+| Development checkout | Worktree PVC at `C:\workspace\<mount>`; unmounted paths remain container-local |
 | Temporary credentials | `C:\run\rc`; removed when their owning process exits |
 | Supervisor connection | Owner-restricted `\\.\pipe\rc-kube` |
 | Interactive processes | ConPTY, including attach and resize |
@@ -44,11 +44,11 @@ current/draft promotion and Workspace cloning additionally require PVC cloning.
 An existing Linux NFS or local-path StorageClass is not evidence of Windows
 compatibility. This change does not install a Windows storage driver.
 
-The tested Windows container stack failed directory renames on mounted
-`hostPath` and `emptyDir` directories. Build tools such as Vite and pnpm need
-those operations. Keep active checkouts, dependency stores, and build caches on
-`C:\workspace`, and persist selected source changes and artifacts in the home
-volume. Validate filesystem behavior with your actual storage driver.
+The earlier container stack failed directory renames on `hostPath` and
+`emptyDir` mounts. Windows-native SMB backed by NTFS has since passed directory
+symlink and minimal pnpm workspace tests; this does not establish compatibility
+with Samba servers or every CSI driver. Validate clone, subpath mounts, links,
+and rename behavior on the selected storage backend before relying on it.
 
 Windows `lifecycle.initialize` actions run in the supervisor container before
 it starts accepting requests. This preserves files created in its writable
@@ -60,9 +60,32 @@ inside a multi-command PowerShell script. Exact `command` argv bypasses the shel
 Pod replacement and suspension discard the local checkout/cache. Initialize
 from a repository or retained home snapshot on each start, and save desired
 changes before suspension. rc does not silently synchronize local changes back
-to storage. Existing Repository/Worktree mounts contain Linux Git layouts;
-Windows Workspaces reject them with `UnsupportedWindowsMount`. Use generic
-lifecycle checkout commands for Windows projects.
+to storage. Worktree PVC contents, unlike container-local caches, survive Pod
+replacement.
+
+## Repository and Worktree mounts
+
+Windows Workspaces accept the existing Repository and Worktree mount API.
+Mount paths remain relative, slash-separated paths (for example `source`),
+rendered as `C:\workspace\source`. Repository mounts remain read-only and
+writable Worktrees retain the same exclusive write lease as Linux Workspaces.
+
+Repository sync and explicit Worktree bootstrap Jobs still run on Linux. Use
+a StorageClass that supports both Linux and Windows mounts and CSI PVC cloning
+for the parent and child volumes. Changing the child StorageClass does not
+convert an existing ext4 parent into a Windows-compatible filesystem.
+
+Linked Worktree volumes also mount at `C:\mnt\rc\worktrees\<name>` so Git for
+Windows can resolve their existing `/mnt/rc/worktrees/...` metadata on drive C.
+rc does not rewrite that metadata or reset the checkout on each startup.
+Generated root checkouts initialize their branch using PowerShell in the main
+runtime container; Worktree readiness follows successful runtime initialization.
+
+Keep rebuildable stores outside mounted source directories and use a distinct
+virtual store per Worktree. Persistent node_modules links can become stale if
+their container-local targets disappear after runtime replacement; reinstall
+and verify dependency resolution before reuse. This support does not make CSI
+cloning an instantaneous snapshot or impose per-PVC SMB directory quotas.
 
 ## Create a Windows Workspace
 
@@ -131,6 +154,6 @@ installation, filesystem operations, source reload, artifacts, and process
 cleanup across suspension or Pod replacement. Copying a demo into the container
 writable layer does not validate that path.
 
-Windows Repository/Worktree mounts remain unsupported. The earlier Electron
-experiment established native rendering and process supervision only; it did
-not establish support for the complete repository/worktree development flow.
+The earlier Electron experiment established native rendering and process
+supervision only. It is not evidence for this newer Repository/Worktree mount
+path; validate application-specific behavior separately.

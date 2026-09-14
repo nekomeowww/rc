@@ -52,3 +52,14 @@ func TestActionUsesIdempotentGeneratedCheckout(t *testing.T) {
 	assert.Contains(t, action.Command[2], "show-ref --verify")
 	assert.Contains(t, action.Command[2], "checkout -b")
 }
+
+func TestWindowsActionQuotesBranchAndChecksNativeFailures(t *testing.T) {
+	t.Parallel()
+	action := WindowsAction("feature/it's-ready", `C:\workspace\repo`)
+	assert.Equal(t, `C:\workspace\repo`, action.WorkingDirectory)
+	assert.Empty(t, action.Command)
+	assert.Contains(t, action.Script, "$branch = 'feature/it''s-ready'")
+	assert.Contains(t, action.Script, "$LASTEXITCODE -ne 0")
+	assert.Contains(t, action.Script, "$current -ne $branch")
+	assert.NotContains(t, action.Script, "--force", "restarts must preserve dirty checkout contents")
+}

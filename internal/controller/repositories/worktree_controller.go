@@ -326,10 +326,22 @@ func (r *WorktreeReconciler) reconcileWorkspaceBootstrap(ctx context.Context, wo
 	containerName := worktreebootstrap.ContainerName(worktree.Namespace, worktree.Name, worktree.UID)
 	initializing := false
 	failedMessage := ""
+	generatedWorkspace := worktree.Labels["workspaces.rc.ayaka.io/generated-for"]
 	for index := range pods.Items {
 		pod := &pods.Items[index]
 		if !podUsesPersistentVolumeClaim(pod, claimName) {
 			continue
+		}
+		if generatedWorkspace != "" && pod.Spec.OS != nil && pod.Spec.OS.Name == corev1.Windows && pod.Labels["workspaces.rc.ayaka.io/workspace"] == generatedWorkspace {
+			// Windows runs lifecycle initialization before starting rc-kube in
+			// its main container, not in Kubernetes init containers. Its health
+			// probe can succeed only after every initializer has completed.
+			for _, condition := range pod.Status.Conditions {
+				if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue && pod.Status.Phase == corev1.PodRunning {
+					return r.setWorktreeStatus(ctx, worktree, metav1.ConditionTrue, "WorktreeReady", "Windows Workspace initialized the isolated Git checkout", claimName, sourceClaimName, path)
+				}
+			}
+			initializing = true
 		}
 		for _, status := range pod.Status.InitContainerStatuses {
 			if status.Name != containerName {

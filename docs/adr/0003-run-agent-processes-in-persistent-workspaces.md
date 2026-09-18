@@ -2,12 +2,12 @@
 status: accepted
 ---
 
-# Run agent processes in persistent Workspaces
+# Run processes in persistent Workspaces
 
 rc will run commands inside long-lived, namespaced Workspaces instead of
 creating one Pod per command. A Workspace represents one development machine:
 it owns persistent environment state, mounts one or more Worktrees, and hosts
-concurrent at-most-once Agent Processes under an `rc-kube` supervisor. Client
+concurrent at-most-once processes under an `rc-kube` supervisor. Client
 disconnects do not stop a process, while loss of the Workspace runtime marks
 its live processes as lost rather than starting them again.
 

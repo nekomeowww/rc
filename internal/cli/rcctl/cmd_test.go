@@ -101,7 +101,13 @@ func TestCommandTreeContainsWorkspaceRuntimeCommands(t *testing.T) {
 	require.NoError(t, command.Execute(), "render root help")
 	assert.Contains(t, output.String(), "env")
 	assert.Contains(t, output.String(), "workspace")
-	assert.Contains(t, output.String(), "agent")
+	for _, name := range []string{"run", "exec", "ps", "attach", "logs", "stop", "inspect", "rm"} {
+		found, _, err := command.Find([]string{name})
+		require.NoError(t, err)
+		assert.Equal(t, name, found.Name())
+	}
+	_, _, err := command.Find([]string{"agent"})
+	require.Error(t, err, "remove the agent command group")
 }
 
 func TestCommandTreeContainsGPUFlags(t *testing.T) {
@@ -109,8 +115,8 @@ func TestCommandTreeContainsGPUFlags(t *testing.T) {
 
 	testCases := map[string][]string{
 		"WorkspaceCreate": {"workspace", "create", helpArgument},
-		"AgentRun":        {"agent", "run", helpArgument},
-		"AgentExec":       {"agent", "exec", helpArgument},
+		"Run":             {"run", helpArgument},
+		"Exec":            {"exec", helpArgument},
 	}
 	for name, arguments := range testCases {
 		t.Run(name, func(t *testing.T) {

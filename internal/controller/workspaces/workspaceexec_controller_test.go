@@ -33,7 +33,7 @@ import (
 
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
-	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
+	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/rcplatform"
 )
 
@@ -75,7 +75,7 @@ func (processRuntime *recordingProcessRuntime) Stop(_ context.Context, target pr
 	return processRuntime.stopState, nil
 }
 
-func TestAgentProcessReconcileStartsCommandAtReadyWorkspace(t *testing.T) {
+func TestWorkspaceExecReconcileStartsCommandAtReadyWorkspace(t *testing.T) {
 	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
@@ -105,13 +105,13 @@ func TestAgentProcessReconcileStartsCommandAtReadyWorkspace(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testNamespace, UID: types.UID("runtime-pod-uid")},
 		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 	}
-	process := &workspacesv1alpha1.AgentProcess{
+	process := &workspacesv1alpha1.WorkspaceExec{
 		ObjectMeta: metav1.ObjectMeta{Name: "codex-01k2example", Namespace: testNamespace, UID: types.UID("process-uid")},
-		Spec: workspacesv1alpha1.AgentProcessSpec{
-			TargetRef:    workspacesv1alpha1.AgentProcessTargetReference{Kind: workspacesv1alpha1.AgentProcessTargetWorkspace, Name: workspace.Name},
+		Spec: workspacesv1alpha1.WorkspaceExecSpec{
+			TargetRef:    workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: workspace.Name},
 			Command:      []string{agentTypeCodex, "implement the task"},
 			TTY:          true,
-			DesiredState: workspacesv1alpha1.AgentProcessDesiredStateRunning,
+			DesiredState: workspacesv1alpha1.WorkspaceExecDesiredStateRunning,
 			AgentType:    agentTypeCodex,
 			EnvSecretRef: &workspacesv1alpha1.LocalReference{Name: "process-env"},
 			Env:          []workspacesv1alpha1.ProcessEnvironmentVariable{{Name: "CI", Key: "CI"}},
@@ -128,25 +128,25 @@ func TestAgentProcessReconcileStartsCommandAtReadyWorkspace(t *testing.T) {
 	runtimeClient := &recordingProcessRuntime{startState: processruntime.State{
 		ID: process.Name, UID: string(process.UID), Phase: "Running", PID: 42,
 	}}
-	reconciler := &AgentProcessReconciler{Client: kubeClient, Scheme: scheme, Runtime: runtimeClient}
+	reconciler := &WorkspaceExecReconciler{Client: kubeClient, Scheme: scheme, Runtime: runtimeClient}
 	key := types.NamespacedName{Name: process.Name, Namespace: process.Namespace}
 
 	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
-	requirements.NoError(err, "install AgentProcess finalizer")
+	requirements.NoError(err, "install WorkspaceExec finalizer")
 	_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
-	requirements.NoError(err, "start Agent Process")
+	requirements.NoError(err, "start process")
 	assertions.Equal(process.Name, runtimeClient.startedRequest.ID, "use rc process ID")
 	assertions.Equal(string(process.UID), runtimeClient.startedRequest.UID, "use UID as at-most-once key")
 	assertions.Equal(process.Spec.Command, runtimeClient.startedRequest.Command, "preserve exact argv")
 	assertions.Equal(workspace.Spec.DefaultWorkingDirectory, runtimeClient.startedRequest.WorkingDirectory, "use Workspace cwd")
-	assertions.Equal(testTrueValue, runtimeClient.startedRequest.Environment["CI"], "AgentProcess environment overrides the Workspace default")
+	assertions.Equal(testTrueValue, runtimeClient.startedRequest.Environment["CI"], "WorkspaceExec environment overrides the Workspace default")
 	assertions.Equal(testTrueValue, runtimeClient.startedRequest.Environment["WORKSPACE_ONLY"], "inherit Workspace environment without a process override")
 	assertions.Equal(workspace.Namespace, runtimeClient.startedTarget.Namespace, "target same namespace")
 	assertions.Equal(workspace.Status.RuntimePodName, runtimeClient.startedTarget.Pod, "target original runtime Pod")
 
-	persisted := new(workspacesv1alpha1.AgentProcess)
-	requirements.NoError(kubeClient.Get(ctx, key, persisted), "get reconciled Agent Process")
-	assertions.Equal(workspacesv1alpha1.AgentProcessPhaseRunning, persisted.Status.Phase, "publish Running")
+	persisted := new(workspacesv1alpha1.WorkspaceExec)
+	requirements.NoError(kubeClient.Get(ctx, key, persisted), "get reconciled process")
+	assertions.Equal(workspacesv1alpha1.WorkspaceExecPhaseRunning, persisted.Status.Phase, "publish Running")
 	assertions.Equal(string(pod.UID), persisted.Status.RuntimePodUID, "bind process to original Pod UID")
 	assertions.Equal(testWorkspaceName, persisted.Status.RuntimePodName, "publish runtime Pod name")
 	assertions.NotNil(persisted.Status.StartedAt, "record start time")
@@ -186,11 +186,11 @@ func TestProcessCredentialProjectsFilesAndEnvsIndependently(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "tool-auth-file", Namespace: testNamespace},
 		Data:       map[string][]byte{"data": []byte("raw\x00credential")},
 	}
-	process := &workspacesv1alpha1.AgentProcess{
+	process := &workspacesv1alpha1.WorkspaceExec{
 		ObjectMeta: metav1.ObjectMeta{Name: "tool-process", Namespace: testNamespace},
-		Spec:       workspacesv1alpha1.AgentProcessSpec{CredentialRefs: []workspacesv1alpha1.LocalReference{{Name: credentialName}}},
+		Spec:       workspacesv1alpha1.WorkspaceExecSpec{CredentialRefs: []workspacesv1alpha1.LocalReference{{Name: credentialName}}},
 	}
-	reconciler := &AgentProcessReconciler{
+	reconciler := &WorkspaceExecReconciler{
 		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, credential, secret).Build(),
 		Scheme: scheme,
 	}
@@ -247,11 +247,11 @@ func TestSSHCredentialProjectsNativeConfiguration(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testNamespace},
 		Spec:       workspacesv1alpha1.WorkspaceSpec{CredentialRefs: []workspacesv1alpha1.LocalReference{{Name: credentialName}}},
 	}
-	process := &workspacesv1alpha1.AgentProcess{
+	process := &workspacesv1alpha1.WorkspaceExec{
 		ObjectMeta: metav1.ObjectMeta{Name: "ssh-process", Namespace: testNamespace},
-		Spec:       workspacesv1alpha1.AgentProcessSpec{CredentialRefs: []workspacesv1alpha1.LocalReference{{Name: credentialName}}},
+		Spec:       workspacesv1alpha1.WorkspaceExecSpec{CredentialRefs: []workspacesv1alpha1.LocalReference{{Name: credentialName}}},
 	}
-	reconciler := &AgentProcessReconciler{
+	reconciler := &WorkspaceExecReconciler{
 		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(credential, secret).Build(),
 		Scheme: scheme,
 	}
@@ -271,7 +271,6 @@ func TestSSHCredentialProjectsNativeConfiguration(t *testing.T) {
 		credentials: files, sshConfigFragments: projection.sshConfigFragments,
 	})
 	require.NoError(t, err)
-	assert.Empty(t, request.SSHConfigPath, "let rc-kube derive the native SSH config path")
 	assert.Equal(t, projection.sshConfigFragments, request.SSHConfigFragments)
 }
 
@@ -282,33 +281,33 @@ func testRCPlatform(t *testing.T) rcplatform.Runtime {
 	return platform
 }
 
-func TestRunningAgentProcessBecomesLostWhenOriginalPodDisappears(t *testing.T) {
+func TestRunningWorkspaceExecBecomesLostWhenOriginalPodDisappears(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
 	scheme := runtime.NewScheme()
 	requirements.NoError(corev1.AddToScheme(scheme), "register core API types")
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
-	process := &workspacesv1alpha1.AgentProcess{
+	process := &workspacesv1alpha1.WorkspaceExec{
 		ObjectMeta: metav1.ObjectMeta{Name: "codex-lost", Namespace: testNamespace, UID: types.UID("process-uid")},
-		Spec: workspacesv1alpha1.AgentProcessSpec{
-			TargetRef: workspacesv1alpha1.AgentProcessTargetReference{Kind: workspacesv1alpha1.AgentProcessTargetWorkspace, Name: testWorkspaceName},
-			Command:   []string{agentTypeCodex}, DesiredState: workspacesv1alpha1.AgentProcessDesiredStateRunning,
+		Spec: workspacesv1alpha1.WorkspaceExecSpec{
+			TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: testWorkspaceName},
+			Command:   []string{agentTypeCodex}, DesiredState: workspacesv1alpha1.WorkspaceExecDesiredStateRunning,
 		},
-		Status: workspacesv1alpha1.AgentProcessStatus{Phase: workspacesv1alpha1.AgentProcessPhaseRunning, RuntimePodName: testWorkspaceName, RuntimePodUID: "original-uid"},
+		Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseRunning, RuntimePodName: testWorkspaceName, RuntimePodUID: "original-uid"},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(process).WithObjects(process).Build()
-	reconciler := &AgentProcessReconciler{Client: kubeClient, Scheme: scheme, Runtime: &recordingProcessRuntime{}}
+	reconciler := &WorkspaceExecReconciler{Client: kubeClient, Scheme: scheme, Runtime: &recordingProcessRuntime{}}
 	key := types.NamespacedName{Name: process.Name, Namespace: process.Namespace}
 	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
-	requirements.NoError(err, "install AgentProcess finalizer")
+	requirements.NoError(err, "install WorkspaceExec finalizer")
 	_, err = reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
 	requirements.NoError(err, "reconcile missing original runtime")
-	persisted := new(workspacesv1alpha1.AgentProcess)
+	persisted := new(workspacesv1alpha1.WorkspaceExec)
 	requirements.NoError(kubeClient.Get(context.Background(), key, persisted), "get lost process")
-	requirements.Equal(workspacesv1alpha1.AgentProcessPhaseLost, persisted.Status.Phase, "never attach a replacement runtime")
+	requirements.Equal(workspacesv1alpha1.WorkspaceExecPhaseLost, persisted.Status.Phase, "never attach a replacement runtime")
 }
 
-func TestRuntimePodEventEnqueuesBoundActiveAgentProcesses(t *testing.T) {
+func TestRuntimePodEventEnqueuesBoundActiveWorkspaceExecs(t *testing.T) {
 	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
@@ -320,36 +319,36 @@ func TestRuntimePodEventEnqueuesBoundActiveAgentProcesses(t *testing.T) {
 		Name: "environment-editor", Namespace: testNamespace, UID: types.UID("replacement-pod-uid"),
 		Labels: map[string]string{environmentManagedByLabel: "environment"},
 	}}
-	running := &workspacesv1alpha1.AgentProcess{
+	running := &workspacesv1alpha1.WorkspaceExec{
 		ObjectMeta: metav1.ObjectMeta{Name: "running-on-replaced-pod", Namespace: testNamespace},
-		Status: workspacesv1alpha1.AgentProcessStatus{
-			Phase: workspacesv1alpha1.AgentProcessPhaseRunning, RuntimePodName: pod.Name, RuntimePodUID: "original-pod-uid",
+		Status: workspacesv1alpha1.WorkspaceExecStatus{
+			Phase: workspacesv1alpha1.WorkspaceExecPhaseRunning, RuntimePodName: pod.Name, RuntimePodUID: "original-pod-uid",
 		},
 	}
-	starting := &workspacesv1alpha1.AgentProcess{
+	starting := &workspacesv1alpha1.WorkspaceExec{
 		ObjectMeta: metav1.ObjectMeta{Name: "starting-on-runtime-pod", Namespace: testNamespace},
-		Status: workspacesv1alpha1.AgentProcessStatus{
-			Phase: workspacesv1alpha1.AgentProcessPhaseStarting, RuntimePodName: pod.Name, RuntimePodUID: string(pod.UID),
+		Status: workspacesv1alpha1.WorkspaceExecStatus{
+			Phase: workspacesv1alpha1.WorkspaceExecPhaseStarting, RuntimePodName: pod.Name, RuntimePodUID: string(pod.UID),
 		},
 	}
-	terminal := &workspacesv1alpha1.AgentProcess{
+	terminal := &workspacesv1alpha1.WorkspaceExec{
 		ObjectMeta: metav1.ObjectMeta{Name: "completed-on-runtime-pod", Namespace: testNamespace},
-		Status: workspacesv1alpha1.AgentProcessStatus{
-			Phase: workspacesv1alpha1.AgentProcessPhaseSucceeded, RuntimePodName: pod.Name, RuntimePodUID: string(pod.UID),
+		Status: workspacesv1alpha1.WorkspaceExecStatus{
+			Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, RuntimePodName: pod.Name, RuntimePodUID: string(pod.UID),
 		},
 	}
-	unrelated := &workspacesv1alpha1.AgentProcess{
+	unrelated := &workspacesv1alpha1.WorkspaceExec{
 		ObjectMeta: metav1.ObjectMeta{Name: "running-elsewhere", Namespace: testNamespace},
-		Status: workspacesv1alpha1.AgentProcessStatus{
-			Phase: workspacesv1alpha1.AgentProcessPhaseRunning, RuntimePodName: "another-runtime", RuntimePodUID: "another-pod-uid",
+		Status: workspacesv1alpha1.WorkspaceExecStatus{
+			Phase: workspacesv1alpha1.WorkspaceExecPhaseRunning, RuntimePodName: "another-runtime", RuntimePodUID: "another-pod-uid",
 		},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(running, starting, terminal, unrelated).
 		Build()
-	reconciler := &AgentProcessReconciler{Client: kubeClient, Scheme: scheme}
+	reconciler := &WorkspaceExecReconciler{Client: kubeClient, Scheme: scheme}
 
-	requests := reconciler.agentProcessesForRuntimePod(context.Background(), pod)
+	requests := reconciler.executionsForRuntimePod(context.Background(), pod)
 
 	assertions.ElementsMatch([]reconcile.Request{
 		{NamespacedName: client.ObjectKeyFromObject(running)},
@@ -357,12 +356,12 @@ func TestRuntimePodEventEnqueuesBoundActiveAgentProcesses(t *testing.T) {
 	}, requests, "enqueue every active process bound to the changed runtime Pod name")
 }
 
-func TestDeletingActiveAgentProcessStopsOriginalRuntimeBeforeRemovingFinalizer(t *testing.T) {
+func TestDeletingActiveWorkspaceExecStopsOriginalRuntimeBeforeRemovingFinalizer(t *testing.T) {
 	t.Parallel()
 
-	for _, phase := range []workspacesv1alpha1.AgentProcessPhase{
-		workspacesv1alpha1.AgentProcessPhaseStarting,
-		workspacesv1alpha1.AgentProcessPhaseRunning,
+	for _, phase := range []workspacesv1alpha1.WorkspaceExecPhase{
+		workspacesv1alpha1.WorkspaceExecPhaseStarting,
+		workspacesv1alpha1.WorkspaceExecPhaseRunning,
 	} {
 		t.Run(string(phase), func(t *testing.T) {
 			t.Parallel()
@@ -375,18 +374,18 @@ func TestDeletingActiveAgentProcessStopsOriginalRuntimeBeforeRemovingFinalizer(t
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 				Name: testWorkspaceName, Namespace: testNamespace, UID: types.UID("runtime-pod-uid"),
 			}}
-			process := &workspacesv1alpha1.AgentProcess{
+			process := &workspacesv1alpha1.WorkspaceExec{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "codex-delete-" + strings.ToLower(string(phase)), Namespace: testNamespace,
-					UID: types.UID("process-uid"), Finalizers: []string{agentProcessFinalizer},
+					UID: types.UID("process-uid"), Finalizers: []string{executionFinalizer},
 				},
-				Spec: workspacesv1alpha1.AgentProcessSpec{
-					TargetRef: workspacesv1alpha1.AgentProcessTargetReference{
-						Kind: workspacesv1alpha1.AgentProcessTargetWorkspace, Name: testWorkspaceName,
+				Spec: workspacesv1alpha1.WorkspaceExecSpec{
+					TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{
+						Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: testWorkspaceName,
 					},
 					Command: []string{agentTypeCodex},
 				},
-				Status: workspacesv1alpha1.AgentProcessStatus{
+				Status: workspacesv1alpha1.WorkspaceExecStatus{
 					Phase: phase, RuntimePodName: pod.Name, RuntimePodUID: string(pod.UID),
 				},
 			}
@@ -397,16 +396,16 @@ func TestDeletingActiveAgentProcessStopsOriginalRuntimeBeforeRemovingFinalizer(t
 			runtimeClient := &recordingProcessRuntime{stopState: processruntime.State{
 				ID: process.Name, UID: string(process.UID), Phase: "Stopped",
 			}}
-			reconciler := &AgentProcessReconciler{Client: kubeClient, Scheme: scheme, Runtime: runtimeClient}
+			reconciler := &WorkspaceExecReconciler{Client: kubeClient, Scheme: scheme, Runtime: runtimeClient}
 			key := client.ObjectKeyFromObject(process)
 
-			requirements.NoError(kubeClient.Delete(ctx, process), "request direct AgentProcess deletion")
+			requirements.NoError(kubeClient.Delete(ctx, process), "request direct WorkspaceExec deletion")
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
-			requirements.NoError(err, "stop runtime while finalizing AgentProcess")
+			requirements.NoError(err, "stop runtime while finalizing WorkspaceExec")
 			requirements.Equal(process.Name, runtimeClient.stoppedID, "stop the UID-bound process")
 			requirements.Equal(pod.Name, runtimeClient.stoppedTarget.Pod, "stop the original runtime Pod")
-			err = kubeClient.Get(ctx, key, new(workspacesv1alpha1.AgentProcess))
-			requirements.Error(err, "AgentProcess is deleted after runtime stops")
+			err = kubeClient.Get(ctx, key, new(workspacesv1alpha1.WorkspaceExec))
+			requirements.Error(err, "WorkspaceExec is deleted after runtime stops")
 		})
 	}
 }

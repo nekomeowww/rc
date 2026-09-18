@@ -21,39 +21,39 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// AgentProcessTargetKind identifies the runtime owning a process.
+// WorkspaceExecTargetKind identifies the runtime owning a process.
 // +kubebuilder:validation:Enum=Workspace;WorkspaceEnvironment
-type AgentProcessTargetKind string
+type WorkspaceExecTargetKind string
 
-// AgentProcessDesiredState is one-way from Running to Stopped.
+// WorkspaceExecDesiredState is one-way from Running to Stopped.
 // +kubebuilder:validation:Enum=Running;Stopped
-type AgentProcessDesiredState string
+type WorkspaceExecDesiredState string
 
-// AgentProcessPhase is the observed process lifecycle.
+// WorkspaceExecPhase is the observed process lifecycle.
 // +kubebuilder:validation:Enum=Pending;Starting;Running;Succeeded;Failed;Stopped;Lost
-type AgentProcessPhase string
+type WorkspaceExecPhase string
 
 const (
-	AgentProcessTargetWorkspace            AgentProcessTargetKind   = "Workspace"
-	AgentProcessTargetWorkspaceEnvironment AgentProcessTargetKind   = "WorkspaceEnvironment"
-	AgentProcessDesiredStateRunning        AgentProcessDesiredState = "Running"
-	AgentProcessDesiredStateStopped        AgentProcessDesiredState = "Stopped"
-	AgentProcessPhasePending               AgentProcessPhase        = "Pending"
-	AgentProcessPhaseStarting              AgentProcessPhase        = "Starting"
-	AgentProcessPhaseRunning               AgentProcessPhase        = "Running"
-	AgentProcessPhaseSucceeded             AgentProcessPhase        = "Succeeded"
-	AgentProcessPhaseFailed                AgentProcessPhase        = "Failed"
-	AgentProcessPhaseStopped               AgentProcessPhase        = "Stopped"
-	AgentProcessPhaseLost                  AgentProcessPhase        = "Lost"
-	AgentProcessConditionReady                                      = ConditionReady
+	WorkspaceExecTargetWorkspace            WorkspaceExecTargetKind   = "Workspace"
+	WorkspaceExecTargetWorkspaceEnvironment WorkspaceExecTargetKind   = "WorkspaceEnvironment"
+	WorkspaceExecDesiredStateRunning        WorkspaceExecDesiredState = "Running"
+	WorkspaceExecDesiredStateStopped        WorkspaceExecDesiredState = "Stopped"
+	WorkspaceExecPhasePending               WorkspaceExecPhase        = "Pending"
+	WorkspaceExecPhaseStarting              WorkspaceExecPhase        = "Starting"
+	WorkspaceExecPhaseRunning               WorkspaceExecPhase        = "Running"
+	WorkspaceExecPhaseSucceeded             WorkspaceExecPhase        = "Succeeded"
+	WorkspaceExecPhaseFailed                WorkspaceExecPhase        = "Failed"
+	WorkspaceExecPhaseStopped               WorkspaceExecPhase        = "Stopped"
+	WorkspaceExecPhaseLost                  WorkspaceExecPhase        = "Lost"
+	WorkspaceExecConditionReady                                       = ConditionReady
 )
 
-// AgentProcessTargetReference selects a Workspace or Environment draft.
-type AgentProcessTargetReference struct {
+// WorkspaceExecTargetReference selects a Workspace or Environment draft.
+type WorkspaceExecTargetReference struct {
 	// kind is Workspace or WorkspaceEnvironment. Environment targets always
 	// address the mutable draft.
 	// +required
-	Kind AgentProcessTargetKind `json:"kind"`
+	Kind WorkspaceExecTargetKind `json:"kind"`
 
 	// name is the target metadata.name in the same namespace.
 	// +kubebuilder:validation:MinLength=1
@@ -73,13 +73,13 @@ type ProcessEnvironmentVariable struct {
 	Key string `json:"key,omitempty"`
 }
 
-// AgentProcessSpec defines one immutable, at-most-once command.
+// WorkspaceExecSpec defines one immutable, at-most-once command.
 // +kubebuilder:validation:XValidation:rule="self.targetRef == oldSelf.targetRef && self.command == oldSelf.command && has(self.workingDirectory) == has(oldSelf.workingDirectory) && (!has(self.workingDirectory) || self.workingDirectory == oldSelf.workingDirectory) && has(self.tty) == has(oldSelf.tty) && (!has(self.tty) || self.tty == oldSelf.tty) && has(self.envSecretRef) == has(oldSelf.envSecretRef) && (!has(self.envSecretRef) || self.envSecretRef == oldSelf.envSecretRef) && has(self.env) == has(oldSelf.env) && (!has(self.env) || self.env == oldSelf.env) && has(self.agentType) == has(oldSelf.agentType) && (!has(self.agentType) || self.agentType == oldSelf.agentType) && has(self.agentCredentialRef) == has(oldSelf.agentCredentialRef) && (!has(self.agentCredentialRef) || self.agentCredentialRef == oldSelf.agentCredentialRef) && has(self.credentialRefs) == has(oldSelf.credentialRefs) && (!has(self.credentialRefs) || self.credentialRefs == oldSelf.credentialRefs)",message="process execution fields are immutable"
 // +kubebuilder:validation:XValidation:rule="has(oldSelf.desiredState) && oldSelf.desiredState == 'Stopped' ? has(self.desiredState) && self.desiredState == 'Stopped' : true",message="a stopped process cannot return to Running"
-type AgentProcessSpec struct {
+type WorkspaceExecSpec struct {
 	// targetRef selects the owning runtime.
 	// +required
-	TargetRef AgentProcessTargetReference `json:"targetRef"`
+	TargetRef WorkspaceExecTargetReference `json:"targetRef"`
 
 	// command is the exact argv executed by rc-kube.
 	// +kubebuilder:validation:MinItems=1
@@ -97,7 +97,7 @@ type AgentProcessSpec struct {
 	// desiredState requests process start or one-way termination.
 	// +kubebuilder:default=Running
 	// +optional
-	DesiredState AgentProcessDesiredState `json:"desiredState,omitempty"`
+	DesiredState WorkspaceExecDesiredState `json:"desiredState,omitempty"`
 
 	// envSecretRef selects the temporary Secret holding caller environment.
 	// +optional
@@ -122,15 +122,15 @@ type AgentProcessSpec struct {
 	CredentialRefs []LocalReference `json:"credentialRefs,omitempty"`
 }
 
-// AgentProcessStatus defines the observed state of AgentProcess.
-type AgentProcessStatus struct {
+// WorkspaceExecStatus defines the observed state of WorkspaceExec.
+type WorkspaceExecStatus struct {
 	// observedGeneration is the latest generation reflected by status.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// phase is the process lifecycle state.
 	// +optional
-	Phase AgentProcessPhase `json:"phase,omitempty"`
+	Phase WorkspaceExecPhase `json:"phase,omitempty"`
 
 	// runtimePodName is the Pod that owns the original process.
 	// +optional
@@ -165,7 +165,7 @@ type AgentProcessStatus struct {
 	// +optional
 	TranscriptPath string `json:"transcriptPath,omitempty"`
 
-	// conditions represent the current state of the AgentProcess resource.
+	// conditions represent the current state of the WorkspaceExec resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
 	// Standard condition types include:
@@ -189,35 +189,35 @@ type AgentProcessStatus struct {
 // +kubebuilder:printcolumn:name="Exit",type=integer,JSONPath=".status.exitCode"
 // +kubebuilder:printcolumn:name="Started",type=date,JSONPath=".status.startedAt"
 
-// AgentProcess is the Schema for the agentprocesses API
-type AgentProcess struct {
+// WorkspaceExec is the Schema for the workspaceexecs API
+type WorkspaceExec struct {
 	metav1.TypeMeta `json:",inline"`
 
 	// metadata is a standard object metadata
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-	// spec defines the desired state of AgentProcess
+	// spec defines the desired state of WorkspaceExec
 	// +required
-	Spec AgentProcessSpec `json:"spec"`
+	Spec WorkspaceExecSpec `json:"spec"`
 
-	// status defines the observed state of AgentProcess
+	// status defines the observed state of WorkspaceExec
 	// +optional
-	Status AgentProcessStatus `json:"status,omitzero"`
+	Status WorkspaceExecStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
 
-// AgentProcessList contains a list of AgentProcess
-type AgentProcessList struct {
+// WorkspaceExecList contains a list of WorkspaceExec
+type WorkspaceExecList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`
-	Items           []AgentProcess `json:"items"`
+	Items           []WorkspaceExec `json:"items"`
 }
 
 func init() {
 	SchemeBuilder.Register(func(s *runtime.Scheme) error {
-		s.AddKnownTypes(SchemeGroupVersion, &AgentProcess{}, &AgentProcessList{})
+		s.AddKnownTypes(SchemeGroupVersion, &WorkspaceExec{}, &WorkspaceExecList{})
 		return nil
 	})
 }

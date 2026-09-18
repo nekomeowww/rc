@@ -16,8 +16,8 @@ const EnvironmentsGroup = "environments"
 // WorkspacesGroup contains persistent development machine commands.
 const WorkspacesGroup = "workspaces"
 
-// AgentsGroup contains Agent Process commands.
-const AgentsGroup = "agents"
+// ExecutionsGroup contains command execution and process management commands.
+const ExecutionsGroup = "executions"
 
 // Register attaches command constructors to their direct parent.
 func Register(parent *cobra.Command, constructors ...func() *cobra.Command) {

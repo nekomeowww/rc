@@ -107,7 +107,7 @@ func TestRunnerCreatesTemporaryWorkspaceAndWorktreeForRepository(t *testing.T) {
 	gpuResource := corev1.ResourceName("nvidia.com/gpu")
 
 	result, err := runner.Prepare(context.Background(), RunRequest{
-		Namespace: runnerTestNamespace, Temporary: true, Environment: environment.Name,
+		Namespace: runnerTestNamespace, Create: true, Remove: true, Environment: environment.Name,
 		Repositories: []MountRequest{{Name: repository.Name, MountName: "rc", Path: "rc"}},
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{gpuResource: resource.MustParse("2")},
@@ -148,7 +148,7 @@ func TestRunnerMarksTemporaryWorkspaceAndOwnsGeneratedWorktree(t *testing.T) {
 	runner := &Runner{Client: kubeClient, NameGenerator: func(string) string { return "codex-temporary" }}
 
 	target, err := runner.Prepare(context.Background(), RunRequest{
-		Namespace: runnerTestNamespace, Temporary: true, Image: runnerTestImage,
+		Namespace: runnerTestNamespace, Create: true, Remove: true, Image: runnerTestImage,
 		Repositories: []MountRequest{{Name: repository.Name}},
 	})
 	requirements.NoError(err, "prepare temporary Workspace")
@@ -176,7 +176,7 @@ func TestRunnerWritesEnvironmentToTemporaryWorkspace(t *testing.T) {
 	environment := []corev1.EnvVar{{Name: NPMRegistryEnvironmentName, Value: testNPMRegistryURL + "/"}, {Name: CorepackRegistryEnvironmentName, Value: testNPMRegistryURL}}
 
 	target, err := runner.Prepare(context.Background(), RunRequest{
-		Namespace: runnerTestNamespace, Temporary: true, Image: runnerTestImage, Env: environment,
+		Namespace: runnerTestNamespace, Create: true, Remove: true, Image: runnerTestImage, Env: environment,
 	})
 	requirements.NoError(err, "prepare temporary Workspace")
 	assert.Equal(t, environment, target.Workspace.Spec.Env, "put registry defaults on the temporary Workspace")
@@ -219,7 +219,7 @@ func TestRunnerRequiresWorkspaceSelectionWithoutTemporary(t *testing.T) {
 
 	_, err := runner.Prepare(context.Background(), RunRequest{Namespace: runnerTestNamespace})
 
-	requirements.EqualError(err, "select an existing Workspace or explicitly request --temporary")
+	requirements.EqualError(err, "select an existing Workspace with exec or create one with run")
 }
 
 func TestRunnerRejectsWorkspaceSelectionWithTemporary(t *testing.T) {
@@ -230,10 +230,10 @@ func TestRunnerRejectsWorkspaceSelectionWithTemporary(t *testing.T) {
 	runner := &Runner{Client: fake.NewClientBuilder().WithScheme(scheme).Build()}
 
 	_, err := runner.Prepare(context.Background(), RunRequest{
-		Namespace: runnerTestNamespace, Workspace: runnerTestExistingWorkspace, Temporary: true,
+		Namespace: runnerTestNamespace, Workspace: runnerTestExistingWorkspace, Create: true, Remove: true,
 	})
 
-	requirements.EqualError(err, "workspace selection and temporary creation are mutually exclusive")
+	requirements.EqualError(err, "workspace selection and creation are mutually exclusive")
 }
 
 func TestRunnerRejectsExistingTemporaryWorkspace(t *testing.T) {
@@ -315,7 +315,7 @@ func TestRunnerCreatesWorkspaceBeforeGeneratedWorktrees(t *testing.T) {
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repository, conflict).Build()
 	runner := &Runner{Client: kubeClient, NameGenerator: func(string) string { return conflict.Name }}
 
-	_, err := runner.Prepare(context.Background(), RunRequest{Namespace: runnerTestNamespace, Temporary: true, Image: runnerTestImage, Repositories: []MountRequest{{Name: repository.Name}}})
+	_, err := runner.Prepare(context.Background(), RunRequest{Namespace: runnerTestNamespace, Create: true, Remove: true, Image: runnerTestImage, Repositories: []MountRequest{{Name: repository.Name}}})
 	requirements.Error(err, "report Workspace create conflict")
 	worktrees := new(repositoriesv1alpha1.WorktreeList)
 	requirements.NoError(kubeClient.List(context.Background(), worktrees), "list Worktrees after rollback")
@@ -357,7 +357,7 @@ func TestRunnerRollsBackTemporaryTopologyWhenWorktreeCreationFails(t *testing.T)
 	runner := &Runner{Client: kubeClient, NameGenerator: func(string) string { return "temporary-rollback" }}
 
 	_, err := runner.Prepare(context.Background(), RunRequest{
-		Namespace: runnerTestNamespace, Temporary: true, Image: runnerTestImage,
+		Namespace: runnerTestNamespace, Create: true, Remove: true, Image: runnerTestImage,
 		Repositories: []MountRequest{{Name: "first"}, {Name: "second"}},
 	})
 	requirements.ErrorContains(err, "injected Worktree creation failure", "report the Worktree creation error")
@@ -366,4 +366,20 @@ func TestRunnerRollsBackTemporaryTopologyWhenWorktreeCreationFails(t *testing.T)
 	worktrees := new(repositoriesv1alpha1.WorktreeList)
 	requirements.NoError(kubeClient.List(context.Background(), worktrees), "list Worktrees after rollback")
 	requirements.Empty(worktrees.Items, "delete every Worktree created before the failure")
+}
+
+func TestRunnerCreatesRetainedNamedWorkspace(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	runner := &Runner{Client: kubeClient}
+	target, err := runner.Prepare(context.Background(), RunRequest{
+		Namespace: runnerTestNamespace, Create: true, Name: "retained", Image: runnerTestImage,
+	})
+	require.NoError(t, err)
+	assert.True(t, target.Created)
+	assert.Equal(t, "retained", target.Workspace.Name)
+	assert.Equal(t, workspacesv1alpha1.WorkspaceRetentionPolicyRetain, target.Workspace.Spec.EffectiveRetentionPolicy())
+	assert.False(t, target.Workspace.Spec.IsTemporary())
 }

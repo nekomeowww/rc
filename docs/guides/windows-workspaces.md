@@ -123,7 +123,7 @@ execute a batch shim.
 ### Git SSH authentication fails
 
 Allow the SSH Private Key Credential on the Workspace and select it on the
-Agent Process. Use an SSH remote and check access with `git ls-remote <remote> HEAD`.
+process. Use an SSH remote and check access with `git ls-remote <remote> HEAD`.
 Git for Windows' bundled SSH can resolve home and drive-qualified `Include`
 paths differently from native SSH. rc supplies a temporary configuration with
 the selected SSH fragments through `GIT_SSH_COMMAND` and removes it on exit.
@@ -133,10 +133,10 @@ these overrides and any custom `Include` paths if authentication still fails.
 ### A command fails before producing output
 
 Check that the client, controller, and runner use compatible versions, then
-inspect the Agent Process termination reason and transcript. Preparation
+inspect the process termination reason and transcript. Preparation
 failures after the transcript opens normally produce exit code 125; missing
 or unexecutable commands produce 127 or 126. Correct the configuration and
-create a new Agent Process: retrying the same identity returns its retained
+create a new process: retrying the same identity returns its retained
 failure. Cancellation before launch rolls back preparation instead.
 
 ## Validation

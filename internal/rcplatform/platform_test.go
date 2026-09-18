@@ -8,7 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
+	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/lifecycle"
 )
 
@@ -115,9 +115,6 @@ func TestProcessCompilesLogicalRequest(t *testing.T) {
 	assert.Equal(t, processruntime.DefaultDirectoryWorkspace, request.DefaultDirectory)
 	assert.Equal(t, &processruntime.AgentRef{Type: "codex", Credential: "default"}, request.Agent)
 	assert.True(t, request.ExposeCredentials)
-	assert.Empty(t, request.RuntimeDirectory)
-	assert.Empty(t, request.TranscriptPath)
-	assert.Empty(t, request.SSHConfigPath)
 	assert.NotContains(t, request.Environment, "CODEX_HOME")
 	assert.NotContains(t, request.Environment, "RC_CREDENTIALS_DIR")
 }

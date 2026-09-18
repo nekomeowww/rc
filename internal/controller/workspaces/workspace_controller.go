@@ -23,7 +23,7 @@ import (
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
-	"path/filepath"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -121,14 +121,14 @@ type WorkspaceReconciler struct {
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces/finalizers,verbs=update
-// +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaceenvironments;agentprocesses,verbs=get;list;watch
+// +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaceenvironments;workspaceexecs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=repositories;worktrees,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims;pods;serviceaccounts;configmaps;secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods/exec;pods/log;pods/portforward,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=agentprocesses/status,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaceexecs/status,verbs=get;list;watch;create;update;patch;delete
 
 //nolint:gocyclo // Reconcile is an explicit lifecycle state machine with guarded transitions.
 func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -241,7 +241,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	if desiredState == workspacesv1alpha1.WorkspaceDesiredStateSuspended {
 		if active {
-			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "ActiveProcesses", "Workspace cannot suspend while Agent Processes are active")
+			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "ActiveProcesses", "Workspace cannot suspend while processes are active")
 		}
 		pod := new(corev1.Pod)
 		if err := r.Get(ctx, req.NamespacedName, pod); err == nil {
@@ -326,7 +326,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	if pod.Annotations[workspaceTopologyAnnotation] != expectedTopology {
 		if active {
-			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "TopologyChangeBlocked", "Workspace topology changed while Agent Processes are active")
+			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "TopologyChangeBlocked", "Workspace topology changed while processes are active")
 		}
 		if err := r.Delete(ctx, pod); err != nil {
 			return ctrl.Result{}, fmt.Errorf("replace Workspace runtime Pod: %w", err)
@@ -362,25 +362,25 @@ func (r *WorkspaceReconciler) finalizeWorkspace(ctx context.Context, workspace *
 	if !controllerutil.ContainsFinalizer(workspace, workspaceFinalizer) {
 		return ctrl.Result{}, nil
 	}
-	processes := new(workspacesv1alpha1.AgentProcessList)
+	processes := new(workspacesv1alpha1.WorkspaceExecList)
 	if err := r.List(ctx, processes, client.InNamespace(workspace.Namespace)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("list Agent Processes while finalizing Workspace: %w", err)
+		return ctrl.Result{}, fmt.Errorf("list processes while finalizing Workspace: %w", err)
 	}
 	waiting := false
 	for index := range processes.Items {
 		process := &processes.Items[index]
-		if process.Spec.TargetRef.Kind != workspacesv1alpha1.AgentProcessTargetWorkspace || process.Spec.TargetRef.Name != workspace.Name {
+		if process.Spec.TargetRef.Kind != workspacesv1alpha1.WorkspaceExecTargetWorkspace || process.Spec.TargetRef.Name != workspace.Name {
 			continue
 		}
 		waiting = true
-		if agentProcessTerminal(process.Status.Phase) {
+		if executionTerminal(process.Status.Phase) {
 			if err := r.Delete(ctx, process); err != nil && !errors.IsNotFound(err) {
-				return ctrl.Result{}, fmt.Errorf("delete terminal Agent Process while finalizing Workspace: %w", err)
+				return ctrl.Result{}, fmt.Errorf("delete terminal process while finalizing Workspace: %w", err)
 			}
-		} else if process.Spec.DesiredState != workspacesv1alpha1.AgentProcessDesiredStateStopped {
-			process.Spec.DesiredState = workspacesv1alpha1.AgentProcessDesiredStateStopped
+		} else if process.Spec.DesiredState != workspacesv1alpha1.WorkspaceExecDesiredStateStopped {
+			process.Spec.DesiredState = workspacesv1alpha1.WorkspaceExecDesiredStateStopped
 			if err := r.Update(ctx, process); err != nil {
-				return ctrl.Result{}, fmt.Errorf("stop Agent Process while finalizing Workspace: %w", err)
+				return ctrl.Result{}, fmt.Errorf("stop process while finalizing Workspace: %w", err)
 			}
 		}
 	}
@@ -497,7 +497,7 @@ func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspac
 		if r.DarwinWorkspaceRoot == "" {
 			return resolved, "DarwinWorkspaceRootRequired", "The controller must configure --darwin-workspace-root", nil
 		}
-		resolved.homeHostPath = filepath.Join(r.DarwinWorkspaceRoot, workspace.Namespace, workspace.Name)
+		resolved.homeHostPath = path.Join(r.DarwinWorkspaceRoot, workspace.Namespace, workspace.Name)
 		resolved.image = workspace.Status.RuntimeImage
 		if resolved.image == "" {
 			resolved.image = workspace.Spec.Image
@@ -677,12 +677,12 @@ func resolveLifecycleAction(action workspacesv1alpha1.WorkspaceLifecycleAction) 
 }
 
 func (r *WorkspaceReconciler) resolveWorkspaceMount(ctx context.Context, namespace string, mount workspacesv1alpha1.WorkspaceMount, platform rcplatform.Runtime) (corev1.Volume, corev1.VolumeMount, *workspaceWriteClaim, *workspaceInitializer, string, string, error) {
-	cleanPath := filepath.Clean(mount.Path)
-	if cleanPath == "." || cleanPath == ".." || strings.HasPrefix(cleanPath, "../") || filepath.IsAbs(mount.Path) || strings.ContainsAny(mount.Path, `\:`) {
+	cleanPath := path.Clean(mount.Path)
+	if cleanPath == "." || cleanPath == ".." || strings.HasPrefix(cleanPath, "../") || path.IsAbs(mount.Path) || strings.ContainsAny(mount.Path, `\:`) {
 		return corev1.Volume{}, corev1.VolumeMount{}, nil, nil, "InvalidMountPath", fmt.Sprintf("Mount %s has an invalid path", mount.Name), nil
 	}
 	volume := corev1.Volume{Name: mount.Name}
-	volumeMount := corev1.VolumeMount{Name: mount.Name, MountPath: platform.MountPath(filepath.Join(workspaceRootMountPath, cleanPath)), ReadOnly: mount.ReadOnly}
+	volumeMount := corev1.VolumeMount{Name: mount.Name, MountPath: platform.MountPath(path.Join(workspaceRootMountPath, cleanPath)), ReadOnly: mount.ReadOnly}
 	if mount.WorktreeRef != nil {
 		worktree := new(repositoriesv1alpha1.Worktree)
 		key := types.NamespacedName{Name: mount.WorktreeRef.Name, Namespace: namespace}
@@ -700,7 +700,7 @@ func (r *WorkspaceReconciler) resolveWorkspaceMount(ctx context.Context, namespa
 			return volume, volumeMount, nil, nil, "WorktreeNotReady", fmt.Sprintf("Mounted Worktree %s is not ready", worktree.Name), nil
 		}
 		volume.PersistentVolumeClaim = &corev1.PersistentVolumeClaimVolumeSource{ClaimName: worktree.Status.VolumeClaimName, ReadOnly: mount.ReadOnly}
-		cleanWorktreePath := filepath.Clean(worktree.Status.WorktreePath)
+		cleanWorktreePath := path.Clean(worktree.Status.WorktreePath)
 		if cleanWorktreePath != repositoryRootMountPath {
 			volumeMount.SubPath = strings.TrimPrefix(cleanWorktreePath, repositoryRootMountPath+"/")
 		}
@@ -885,20 +885,20 @@ func runtimePlatformCondition(err error) (string, string) {
 }
 
 func workspaceProcessState(ctx context.Context, kubeClient client.Client, workspace *workspacesv1alpha1.Workspace) (bool, bool, *metav1.Time, error) {
-	processes := new(workspacesv1alpha1.AgentProcessList)
+	processes := new(workspacesv1alpha1.WorkspaceExecList)
 	if err := kubeClient.List(ctx, processes, client.InNamespace(workspace.Namespace)); err != nil {
-		return false, false, nil, fmt.Errorf("list Workspace Agent Processes: %w", err)
+		return false, false, nil, fmt.Errorf("list Workspace processes: %w", err)
 	}
 	hasProcesses := false
 	active := false
 	var lastCompletion *metav1.Time
 	for index := range processes.Items {
 		process := &processes.Items[index]
-		if process.Spec.TargetRef.Kind != workspacesv1alpha1.AgentProcessTargetWorkspace || process.Spec.TargetRef.Name != workspace.Name {
+		if process.Spec.TargetRef.Kind != workspacesv1alpha1.WorkspaceExecTargetWorkspace || process.Spec.TargetRef.Name != workspace.Name {
 			continue
 		}
 		hasProcesses = true
-		if !agentProcessTerminal(process.Status.Phase) {
+		if !executionTerminal(process.Status.Phase) {
 			active = true
 		}
 		if process.Status.CompletedAt != nil && (lastCompletion == nil || process.Status.CompletedAt.After(lastCompletion.Time)) {
@@ -910,9 +910,9 @@ func workspaceProcessState(ctx context.Context, kubeClient client.Client, worksp
 	return active, hasProcesses, lastCompletion, nil
 }
 
-func agentProcessTerminal(phase workspacesv1alpha1.AgentProcessPhase) bool {
+func executionTerminal(phase workspacesv1alpha1.WorkspaceExecPhase) bool {
 	switch phase {
-	case workspacesv1alpha1.AgentProcessPhaseSucceeded, workspacesv1alpha1.AgentProcessPhaseFailed, workspacesv1alpha1.AgentProcessPhaseStopped, workspacesv1alpha1.AgentProcessPhaseLost:
+	case workspacesv1alpha1.WorkspaceExecPhaseSucceeded, workspacesv1alpha1.WorkspaceExecPhaseFailed, workspacesv1alpha1.WorkspaceExecPhaseStopped, workspacesv1alpha1.WorkspaceExecPhaseLost:
 		return true
 	default:
 		return false
@@ -940,7 +940,7 @@ func (r *WorkspaceReconciler) ensureWorkspaceAccess(ctx context.Context, namespa
 	role := &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{Name: defaultWorkspaceServiceAccount, Namespace: namespace},
 		Rules: []rbacv1.PolicyRule{
-			{APIGroups: []string{"workspaces.rc.ayaka.io"}, Resources: []string{"workspaceenvironments", "workspaces", "agentprocesses", "agentprocesses/status"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
+			{APIGroups: []string{"workspaces.rc.ayaka.io"}, Resources: []string{"workspaceenvironments", "workspaces", "workspaceexecs", "workspaceexecs/status"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
 			{APIGroups: []string{"repositories.rc.ayaka.io"}, Resources: []string{"repositories", "repositoryexecs", "worktrees"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
 			{APIGroups: []string{"configs.rc.ayaka.io"}, Resources: []string{"credentials", "agentcredentials"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
 			{APIGroups: []string{""}, Resources: []string{"configmaps", "secrets", "pods", "pods/log", "pods/exec", "pods/portforward"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
@@ -1078,7 +1078,7 @@ func (r *WorkspaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.RunnerImage == "" {
 		return fmt.Errorf("workspace runner image must not be empty")
 	}
-	if r.DarwinWorkspaceRoot != "" && !filepath.IsAbs(r.DarwinWorkspaceRoot) {
+	if r.DarwinWorkspaceRoot != "" && !path.IsAbs(r.DarwinWorkspaceRoot) {
 		return fmt.Errorf("darwin Workspace root must be absolute")
 	}
 
@@ -1087,7 +1087,7 @@ func (r *WorkspaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&corev1.Pod{}).
 		Owns(&coordinationv1.Lease{}).
-		Watches(&workspacesv1alpha1.AgentProcess{}, handler.EnqueueRequestsFromMapFunc(workspaceForProcess)).
+		Watches(&workspacesv1alpha1.WorkspaceExec{}, handler.EnqueueRequestsFromMapFunc(workspaceForProcess)).
 		Watches(&workspacesv1alpha1.WorkspaceEnvironment{}, handler.EnqueueRequestsFromMapFunc(r.workspacesForEnvironment)).
 		Watches(&repositoriesv1alpha1.Worktree{}, handler.EnqueueRequestsFromMapFunc(r.workspacesForWorktree)).
 		Named("workspaces-workspace").
@@ -1095,8 +1095,8 @@ func (r *WorkspaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 func workspaceForProcess(_ context.Context, object client.Object) []reconcile.Request {
-	process, ok := object.(*workspacesv1alpha1.AgentProcess)
-	if !ok || process.Spec.TargetRef.Kind != workspacesv1alpha1.AgentProcessTargetWorkspace {
+	process, ok := object.(*workspacesv1alpha1.WorkspaceExec)
+	if !ok || process.Spec.TargetRef.Kind != workspacesv1alpha1.WorkspaceExecTargetWorkspace {
 		return nil
 	}
 

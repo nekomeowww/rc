@@ -4,14 +4,14 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
-  name: agentprocesses.workspaces.rc.ayaka.io
+  name: workspaceexecs.workspaces.rc.ayaka.io
 spec:
   group: workspaces.rc.ayaka.io
   names:
-    kind: AgentProcess
-    listKind: AgentProcessList
-    plural: agentprocesses
-    singular: agentprocess
+    kind: WorkspaceExec
+    listKind: WorkspaceExecList
+    plural: workspaceexecs
+    singular: workspaceexec
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
@@ -33,7 +33,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: AgentProcess is the Schema for the agentprocesses API
+        description: WorkspaceExec is the Schema for the workspaceexecs API
         properties:
           apiVersion:
             description: |-
@@ -53,7 +53,7 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of AgentProcess
+            description: spec defines the desired state of WorkspaceExec
             properties:
               agentCredentialRef:
                 description: agentCredentialRef selects one Workspace AgentCredential.
@@ -174,7 +174,7 @@ spec:
               rule: 'has(oldSelf.desiredState) && oldSelf.desiredState == ''Stopped''
                 ? has(self.desiredState) && self.desiredState == ''Stopped'' : true'
           status:
-            description: status defines the observed state of AgentProcess
+            description: status defines the observed state of WorkspaceExec
             properties:
               attachedClients:
                 description: attachedClients is the latest supervisor client count.
@@ -186,7 +186,7 @@ spec:
                 type: string
               conditions:
                 description: |-
-                  conditions represent the current state of the AgentProcess resource.
+                  conditions represent the current state of the WorkspaceExec resource.
                   Each condition has a unique type and reflects the status of a specific aspect of the resource.
 
                   Standard condition types include:

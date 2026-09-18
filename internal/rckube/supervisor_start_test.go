@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
+	processruntime "github.com/nekomeowww/rc/internal/execution"
 )
 
 const missingStartCommand = "command-must-not-run"
@@ -22,10 +22,10 @@ func TestSupervisorRetainsSSHPreparationFailure(t *testing.T) {
 	requirements := require.New(t)
 	stateDirectory := t.TempDir()
 	runtimeRoot := t.TempDir()
-	supervisor := NewSupervisor(stateDirectory, time.Second, WithRoots(t.TempDir(), t.TempDir(), runtimeRoot))
+	supervisor := NewSupervisor(stateDirectory, time.Second, WithRoots("relative-home", t.TempDir(), runtimeRoot))
 	request := processruntime.StartRequest{
 		ID: "ssh-rejected", UID: "ssh-uid", Command: []string{missingStartCommand},
-		ExposeCredentials: true, SSHConfigPath: "relative-config",
+		ExposeCredentials:  true,
 		CredentialFiles:    map[string][]byte{"credentials/selected/id": []byte("synthetic-key")},
 		SSHConfigFragments: map[string]string{"selected": "Host github.com\n  IdentityFile ${identityFile}\n"},
 	}
@@ -39,7 +39,7 @@ func TestSupervisorRetainsSSHPreparationFailure(t *testing.T) {
 	assertions.NoDirExists(filepath.Join(runtimeRoot, "processes", request.ID))
 	assertions.NoFileExists(filepath.Join(runtimeRoot, "credentials", "selected", "id"))
 
-	request.SSHConfigPath = filepath.Join(t.TempDir(), "config")
+	supervisor.homeDir = t.TempDir()
 	retried, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err)
 	assertions.Equal(failed, retried, "a duplicate request must not launch after a terminal outcome")

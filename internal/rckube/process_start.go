@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
+	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/osprocess"
 )
 
@@ -113,21 +113,12 @@ func (attempt *processStart) openTranscript(ctx context.Context, request process
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	runtimeDirectory := request.RuntimeDirectory
-	if runtimeDirectory == "" {
-		runtimeDirectory = filepath.Join(supervisor.runtimeRoot, "processes", request.ID)
-	}
-	if filepath.Base(runtimeDirectory) != request.ID {
-		return errors.New("process runtime directory must end with the process ID")
-	}
+	runtimeDirectory := filepath.Join(supervisor.runtimeRoot, "processes", request.ID)
 	process.runtimeDir = runtimeDirectory
 	if err := os.MkdirAll(runtimeDirectory, 0o700); err != nil {
 		return fmt.Errorf("create temporary process runtime directory: %w", err)
 	}
-	transcriptPath := request.TranscriptPath
-	if transcriptPath == "" {
-		transcriptPath = filepath.Join(filepath.Dir(attempt.ownerPath), "transcript.log")
-	}
+	transcriptPath := filepath.Join(filepath.Dir(attempt.ownerPath), "transcript.log")
 	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o700); err != nil {
 		return fmt.Errorf("create transcript directory: %w", err)
 	}
@@ -151,8 +142,8 @@ func (attempt *processStart) prepareCredentials(ctx context.Context, request pro
 	if err := writeCredentialFiles(runtimeDirectory, request.CredentialFiles); err != nil {
 		return processCredentials{}, err
 	}
-	credentialsRoot := request.CredentialsRoot
-	if credentialsRoot == "" && (request.ExposeCredentials || len(request.SSHConfigFragments) > 0) {
+	credentialsRoot := ""
+	if request.ExposeCredentials || len(request.SSHConfigFragments) > 0 {
 		credentialsRoot = filepath.Join(supervisor.runtimeRoot, "credentials")
 	}
 	if err := ctx.Err(); err != nil {
@@ -171,8 +162,8 @@ func (attempt *processStart) prepareCredentials(ctx context.Context, request pro
 		return processCredentials{}, err
 	}
 	process.credentialLinks = append(process.credentialLinks, links...)
-	sshConfigPath := request.SSHConfigPath
-	if sshConfigPath == "" && len(request.SSHConfigFragments) > 0 && supervisor.homeDir != "" {
+	sshConfigPath := ""
+	if len(request.SSHConfigFragments) > 0 && supervisor.homeDir != "" {
 		sshConfigPath = filepath.Join(supervisor.homeDir, ".ssh", "config")
 	}
 	if err := ctx.Err(); err != nil {
@@ -183,8 +174,8 @@ func (attempt *processStart) prepareCredentials(ctx context.Context, request pro
 		return processCredentials{}, err
 	}
 	process.credentialLinks = append(process.credentialLinks, sshConfigLinks...)
-	agentHome := request.AgentHome
-	if agentHome == "" && request.Agent != nil && request.Agent.Type != "" && supervisor.homeDir != "" {
+	agentHome := ""
+	if request.Agent != nil && request.Agent.Type != "" && supervisor.homeDir != "" {
 		credential := request.Agent.Credential
 		if credential == "" {
 			credential = "default"

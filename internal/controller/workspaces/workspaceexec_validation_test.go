@@ -1,3 +1,5 @@
+//go:build integration
+
 /*
 Copyright 2026.
 
@@ -26,21 +28,21 @@ import (
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 )
 
-var _ = Describe("AgentProcess API validation", func() {
+var _ = Describe("WorkspaceExec API validation", func() {
 	It("allows a stop transition when optional execution fields are absent", func() {
-		process := &workspacesv1alpha1.AgentProcess{
+		process := &workspacesv1alpha1.WorkspaceExec{
 			ObjectMeta: metav1.ObjectMeta{GenerateName: "validation-", Namespace: testAPINamespace},
-			Spec: workspacesv1alpha1.AgentProcessSpec{
-				TargetRef: workspacesv1alpha1.AgentProcessTargetReference{Kind: workspacesv1alpha1.AgentProcessTargetWorkspace, Name: "workspace"},
-				Command:   []string{testTrueValue}, DesiredState: workspacesv1alpha1.AgentProcessDesiredStateRunning,
+			Spec: workspacesv1alpha1.WorkspaceExecSpec{
+				TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: "workspace"},
+				Command:   []string{testTrueValue}, DesiredState: workspacesv1alpha1.WorkspaceExecDesiredStateRunning,
 			},
 		}
 		Expect(k8sClient.Create(ctx, process)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, process) })
 
-		current := new(workspacesv1alpha1.AgentProcess)
+		current := new(workspacesv1alpha1.WorkspaceExec)
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(process), current)).To(Succeed())
-		current.Spec.DesiredState = workspacesv1alpha1.AgentProcessDesiredStateStopped
+		current.Spec.DesiredState = workspacesv1alpha1.WorkspaceExecDesiredStateStopped
 		Expect(k8sClient.Update(ctx, current)).To(Succeed())
 	})
 })

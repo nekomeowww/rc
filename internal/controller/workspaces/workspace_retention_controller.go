@@ -42,7 +42,7 @@ type WorkspaceRetentionReconciler struct {
 }
 
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces,verbs=get;list;watch;delete
-// +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=agentprocesses,verbs=get;list;watch
+// +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaceexecs,verbs=get;list;watch
 
 func (r *WorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	workspace := new(workspacesv1alpha1.Workspace)
@@ -81,7 +81,7 @@ func (r *WorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctrl.R
 func (r *WorkspaceRetentionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&workspacesv1alpha1.Workspace{}).
-		Watches(&workspacesv1alpha1.AgentProcess{}, handler.EnqueueRequestsFromMapFunc(workspaceForProcess)).
+		Watches(&workspacesv1alpha1.WorkspaceExec{}, handler.EnqueueRequestsFromMapFunc(workspaceForProcess)).
 		Named("workspaces-workspace-retention").
 		Complete(r)
 }

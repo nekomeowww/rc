@@ -125,32 +125,32 @@ Workspaces retain their resolved Setup Revisions until explicitly upgraded.
 **Workspace**:
 A named, persistent development machine with independent writable user state.
 It combines one resolved environment foundation, zero or more Workspace Setups,
-code mounts, credentials, and compute capacity for concurrent Agent Processes.
+code mounts, credentials, and compute capacity for concurrent processes.
 _Avoid_: Agent Pod, workspace template
 
 **Temporary Workspace**:
-A short-lived Workspace created because a run explicitly requests `--temporary`.
-rcctl requests its deletion when the synchronous invocation finishes or fails;
-the retention controller also deletes it after all of its Agent Processes are
-terminal, including detached processes, and collects abandoned instances whose
-first Agent Process was never created. Its `DeleteAfterProcessesExit` retention
-policy is the complete lifecycle marker. Deletion includes Worktrees created
-from `--repo` and owned by the Temporary Workspace.
+A short-lived Workspace created by `rcctl run --rm`. After execution creation,
+the retention controller deletes it once all processes are terminal and the
+result-reading grace period expires, including when the client disconnects.
+It also collects abandoned instances whose first process was never created.
+Its `DeleteAfterProcessesExit` retention policy is the lifecycle marker.
+Deletion includes Worktrees created from `--repo` and owned by the Workspace.
 
 **Workspace Mount**:
 A named association between a Workspace path and either a writable Worktree or
 a read-only Repository.
 
-**Agent Process**:
+**Workspace Exec**:
 An rc-managed, at-most-once command running against a Workspace or Environment
 Draft. It may use a terminal, but it is not an agent-native session.
 _Avoid_: Agent Exec as a distinct resource, agent session
 
-**Agent Exec**:
-The short CLI operation for running a non-terminal Agent Process synchronously.
-It is not a separate Kubernetes resource kind.
+**Exec**:
+The top-level `rcctl exec WORKSPACE -- COMMAND` operation starts a command in
+an existing Workspace and records it as a WorkspaceExec. `rcctl run` creates
+a new Workspace first. Both support terminal, attached, and detached execution.
 
 **Agent Home**:
-Persistent configuration, cache, and session state shared by Agent Processes
+Persistent configuration, cache, and session state shared by processes
 that use the same Agent Type and Agent Credential in one Workspace. Credential
 material is not part of the Agent Home.

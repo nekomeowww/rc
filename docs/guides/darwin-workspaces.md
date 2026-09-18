@@ -59,8 +59,8 @@ rcctl -n rc-dev workspace create xcode \
   --node-selector kubernetes.io/hostname=neko-macos-1 \
   --toleration virtual-kubelet.io/provider=macos-vz:NoSchedule
 
-rcctl -n rc-dev agent exec --workspace xcode -- xcodebuild -version
-rcctl -n rc-dev agent run --detach --workspace xcode -- your-gui-process
+rcctl -n rc-dev exec xcode -- xcodebuild -version
+rcctl -n rc-dev exec --detach xcode -- your-gui-process
 ```
 
 Service-account token mounting defaults off for Darwin. AgentCredential and
@@ -81,6 +81,6 @@ system-wide tools and Xcode/Simulator runtimes in the base VM image. Deleting a
 Workspace does not recursively delete its host directory; an administrator can
 archive or remove it on the macOS host.
 
-`rcctl agent logs` uses Pod exec while the Darwin Workspace is running. Unlike
+`rcctl logs` uses Pod exec while the Darwin Workspace is running. Unlike
 PVC-backed runtimes, rc cannot create a lightweight transcript-reader container
 after the VM Pod is suspended; resume the Workspace before reading its logs.

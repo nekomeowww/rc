@@ -54,7 +54,9 @@ type RunRequest struct {
 	Namespace                    string
 	Workspace                    string
 	DefaultWorkspace             string
-	Temporary                    bool
+	Create                       bool
+	Remove                       bool
+	Name                         string
 	Environment                  string
 	DefaultEnvironment           string
 	Repositories                 []MountRequest
@@ -81,11 +83,11 @@ type Runner struct {
 }
 
 func (runner *Runner) Prepare(ctx context.Context, request RunRequest) (RunTarget, error) {
-	if request.Temporary && request.Workspace != "" {
-		return RunTarget{}, fmt.Errorf("workspace selection and temporary creation are mutually exclusive")
+	if request.Create && request.Workspace != "" {
+		return RunTarget{}, fmt.Errorf("workspace selection and creation are mutually exclusive")
 	}
-	if request.Temporary {
-		return runner.createTemporaryTarget(ctx, request)
+	if request.Create {
+		return runner.createTarget(ctx, request)
 	}
 
 	workspaceName := request.Workspace
@@ -113,7 +115,7 @@ func (runner *Runner) Prepare(ctx context.Context, request RunRequest) (RunTarge
 
 		return RunTarget{Workspace: workspace}, nil
 	}
-	return RunTarget{}, fmt.Errorf("select an existing Workspace or explicitly request --temporary")
+	return RunTarget{}, fmt.Errorf("select an existing Workspace with exec or create one with run")
 }
 
 func (runner *Runner) validateExistingTarget(ctx context.Context, workspace *workspacesv1alpha1.Workspace, request RunRequest) error {
@@ -195,7 +197,10 @@ func containsLocalReference(references []workspacesv1alpha1.LocalReference, name
 	return false
 }
 
-func (runner *Runner) createTemporaryTarget(ctx context.Context, request RunRequest) (target RunTarget, returnedErr error) {
+func (runner *Runner) workspaceName(request RunRequest) string {
+	if request.Name != "" {
+		return request.Name
+	}
 	prefix := request.NamePrefix
 	if prefix == "" {
 		prefix = "workspace"
@@ -204,7 +209,11 @@ func (runner *Runner) createTemporaryTarget(ctx context.Context, request RunRequ
 	if nameGenerator == nil {
 		nameGenerator = GenerateSortableName
 	}
-	workspaceName := nameGenerator(prefix)
+	return nameGenerator(prefix)
+}
+
+func (runner *Runner) createTarget(ctx context.Context, request RunRequest) (target RunTarget, returnedErr error) {
+	workspaceName := runner.workspaceName(request)
 	environmentName := request.Environment
 	if environmentName == "" {
 		environmentName = request.DefaultEnvironment
@@ -238,7 +247,7 @@ func (runner *Runner) createTemporaryTarget(ctx context.Context, request RunRequ
 	createdWorktrees := make([]*repositoriesv1alpha1.Worktree, 0, len(request.Repositories))
 	var createdWorkspace *workspacesv1alpha1.Workspace
 	defer func() {
-		returnedErr = runner.rollbackTemporaryTarget(ctx, createdWorkspace, createdWorktrees, returnedErr)
+		returnedErr = runner.rollbackTarget(ctx, createdWorkspace, createdWorktrees, returnedErr)
 	}()
 	for _, source := range request.Repositories {
 		repository := new(repositoriesv1alpha1.Repository)
@@ -308,9 +317,12 @@ func (runner *Runner) createTemporaryTarget(ctx context.Context, request RunRequ
 			Resources:                    request.Resources,
 			ServiceAccountName:           request.ServiceAccountName,
 			AutomountServiceAccountToken: request.AutomountServiceAccountToken,
-			RetentionPolicy:              workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit,
+			RetentionPolicy:              workspacesv1alpha1.WorkspaceRetentionPolicyRetain,
 			Env:                          append([]corev1.EnvVar(nil), request.Env...),
 		},
+	}
+	if request.Remove {
+		workspace.Spec.RetentionPolicy = workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit
 	}
 	if environmentName != "" {
 		workspace.Spec.EnvironmentRef = &workspacesv1alpha1.LocalReference{Name: environmentName}
@@ -322,12 +334,12 @@ func (runner *Runner) createTemporaryTarget(ctx context.Context, request RunRequ
 		workspace.Spec.CredentialRefs = append(workspace.Spec.CredentialRefs, workspacesv1alpha1.LocalReference{Name: name})
 	}
 	if err := runner.Client.Create(ctx, workspace); err != nil {
-		return RunTarget{}, fmt.Errorf("create temporary Workspace %q: %w", workspace.Name, err)
+		return RunTarget{}, fmt.Errorf("create Workspace %q: %w", workspace.Name, err)
 	}
 	createdWorkspace = workspace
 	for _, worktree := range generatedWorktrees {
 		if err := controllerutil.SetControllerReference(workspace, worktree, runner.Client.Scheme()); err != nil {
-			return RunTarget{}, fmt.Errorf("set temporary Workspace owner on generated Worktree %q: %w", worktree.Name, err)
+			return RunTarget{}, fmt.Errorf("set Workspace owner on generated Worktree %q: %w", worktree.Name, err)
 		}
 		if err := runner.Client.Create(ctx, worktree); err != nil {
 			return RunTarget{}, fmt.Errorf("create generated Worktree %q: %w", worktree.Name, err)
@@ -338,14 +350,14 @@ func (runner *Runner) createTemporaryTarget(ctx context.Context, request RunRequ
 	return RunTarget{Workspace: workspace, Created: true}, nil
 }
 
-func (runner *Runner) rollbackTemporaryTarget(ctx context.Context, workspace *workspacesv1alpha1.Workspace, worktrees []*repositoriesv1alpha1.Worktree, cause error) error {
+func (runner *Runner) rollbackTarget(ctx context.Context, workspace *workspacesv1alpha1.Workspace, worktrees []*repositoriesv1alpha1.Worktree, cause error) error {
 	if cause == nil {
 		return nil
 	}
 	cleanupContext := context.WithoutCancel(ctx)
 	if workspace != nil {
 		if err := runner.Client.Delete(cleanupContext, workspace); err != nil && !apierrors.IsNotFound(err) {
-			cause = errors.Join(cause, fmt.Errorf("delete temporary Workspace %q after preparation failed: %w", workspace.Name, err))
+			cause = errors.Join(cause, fmt.Errorf("delete Workspace %q after preparation failed: %w", workspace.Name, err))
 		}
 	}
 	for _, worktree := range worktrees {

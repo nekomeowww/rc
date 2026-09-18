@@ -1,11 +1,11 @@
 ---
 name: use-rc
-description: Operate rc Kubernetes development environments with rcctl. Use when the user asks to use rc or rcctl, or needs persistent remote coding Workspaces, Git Worktrees, or supervised agent processes. Do not use merely because Kubernetes is available.
+description: Operate rc Kubernetes development environments with rcctl. Use when the user asks to use rc or rcctl, or needs persistent remote coding Workspaces, Git Worktrees, or supervised processes. Do not use merely because Kubernetes is available.
 ---
 
 # Use rc
 
-Use rc as a Kubernetes-backed development runtime. Treat Repository mirrors, writable Worktrees, persistent Workspaces, and supervised AgentProcesses as separate resources.
+Use rc as a Kubernetes-backed development runtime. Treat Repository mirrors, writable Worktrees, persistent Workspaces, and supervised WorkspaceExecs as separate resources.
 
 ## Before operating
 
@@ -17,18 +17,18 @@ Use rc as a Kubernetes-backed development runtime. Treat Repository mirrors, wri
 ## Select the execution shape
 
 - Use `repo exec` or `worktree exec` only for short, non-interactive work.
-- Use `agent exec/run --temporary` for a bounded isolated task whose home and generated Worktree may be removed after completion.
-- Default to reusing a suitable named Workspace for the same project and trust boundary. One Workspace is designed to mount multiple Worktrees and run multiple AgentProcesses concurrently, so mount the project's additional branches there and start each agent, server, watcher, or command as a separate process.
+- Use `run/run --rm` for a bounded isolated task whose home and generated Worktree may be removed after completion.
+- Default to reusing a suitable named Workspace for the same project and trust boundary. One Workspace is designed to mount multiple Worktrees and run multiple WorkspaceExecs concurrently, so mount the project's additional branches there and start each agent, server, watcher, or command as a separate process.
 - A Repository is the shared mirror, not a writable checkout. Write in a Worktree. A read-write Worktree has one Workspace/WorktreeExec owner at a time.
 - Create another Workspace only when isolation or incompatible requirements justify it: a different trust/credential boundary, OS/image/ServiceAccount, compute or node placement, independent lifecycle, exclusive Worktree ownership, or processes that cannot share the Pod's resources or network namespace (for example, conflicting fixed ports). Mount changes replace the shared Workspace Pod; account for active processes first.
 
 ## Credentials, access, and processes
 
 - Scope Git clone credentials to the Repository clone operation. An imported GitHub CLI credential does not authenticate `gh` or Git inside a Workspace.
-- Workspace credential references are an allowlist; select required process credentials explicitly on every AgentProcess. Do not put secrets in images, Environment snapshots, command arguments, source, or logs.
+- Workspace credential references are an allowlist; select required process credentials explicitly on every WorkspaceExec. Do not put secrets in images, Environment snapshots, command arguments, source, or logs.
 - A Workspace is one trust boundary: its processes share a Pod, home, mounts, network identity, and effective access. Use a separate Workspace for untrusted work or a different secret set.
-- rc normally injects the same-namespace `rc-workspace` ServiceAccount into a Workspace. It permits rc and related Kubernetes operations in that namespace, so software launched in a Workspace or AgentProcess can programmatically use `rcctl` to manage same-namespace rc resources. It does not grant unrelated cluster-wide privileges. Use `--no-service-account` or an explicitly chosen same-namespace ServiceAccount only when requested.
-- AgentProcesses are supervised and at-most-once. Use rc's detach, resume, log, and stop lifecycle rather than `nohup`, `tmux`, or application daemon modes.
+- rc normally injects the same-namespace `rc-workspace` ServiceAccount into a Workspace. It permits rc and related Kubernetes operations in that namespace, so software launched in a Workspace or WorkspaceExec can programmatically use `rcctl` to manage same-namespace rc resources. It does not grant unrelated cluster-wide privileges. Use `--no-service-account` or an explicitly chosen same-namespace ServiceAccount only when requested.
+- WorkspaceExecs are supervised and at-most-once. Use rc's detach, resume, log, and stop lifecycle rather than `nohup`, `tmux`, or application daemon modes.
 
 ## Basic command patterns
 
@@ -43,7 +43,7 @@ rcctl -n <namespace> env list
 rcctl -n <namespace> repo list
 rcctl -n <namespace> worktree list
 rcctl -n <namespace> workspace list
-rcctl -n <namespace> agent list -o wide
+rcctl -n <namespace> ps -o wide
 ```
 
 ### Import Git credentials
@@ -99,11 +99,11 @@ spec:
 
 Use `git@github.com:<owner>/<repository>.git` with `--credential-ref github-ssh`
 for an SSH Repository clone, and explicitly select `--credential github-ssh`
-on each AgentProcess that needs authenticated Git operations.
+on each WorkspaceExec that needs authenticated Git operations.
 
 ### Import Codex auth credential
 
-To make the local Codex login selectable by Codex AgentProcesses, import its
+To make the local Codex login selectable by Codex WorkspaceExecs, import its
 auth file as an AgentCredential. Do not print or copy its contents; add
 `--agent-credential codex` when creating the Workspace or process that needs
 it.
@@ -141,13 +141,13 @@ long-lived processes whenever possible.
 ### Run one-off and persistent work
 
 ```sh
-rcctl -n <namespace> agent exec --workspace <workspace> --cwd /workspace/<mount> -- <command> <args...>
-rcctl -n <namespace> agent run -d --workspace <workspace> --cwd /workspace/<mount> -- <server-or-watcher> <args...>
-rcctl -n <namespace> agent exec --temporary --environment <environment> -- <bounded-command> <args...>
+rcctl -n <namespace> exec --cwd /workspace/<mount> <workspace> -- <command> <args...>
+rcctl -n <namespace> exec -d --cwd /workspace/<mount> <workspace> -- <server-or-watcher> <args...>
+rcctl -n <namespace> run --rm --environment <environment> -- <bounded-command> <args...>
 ```
 
-Use `agent list`, `agent logs <process-id>`, `agent resume <process-id>`, and
-`agent stop <process-id>` for the lifecycle of detached or interactive work.
+Use `ps`, `logs <process-id>`, `attach <process-id>`, and
+`stop <process-id>` for the lifecycle of detached or interactive work.
 
 ## pnpm caches in Linux Workspaces
 
@@ -156,7 +156,7 @@ images use `XDG_CACHE_HOME=/tmp/cache`; check this and directory permissions for
 older/custom images.
 
 ```sh
-rcctl -n <namespace> agent exec --workspace <workspace> --cwd /workspace/<mount> -- pnpm install --store-dir=/tmp/cache/pnpm/store --virtual-store-dir=/tmp/cache/pnpm/virtual/<worktree-id>
+rcctl -n <namespace> exec --cwd /workspace/<mount> <workspace> -- pnpm install --store-dir=/tmp/cache/pnpm/store --virtual-store-dir=/tmp/cache/pnpm/virtual/<worktree-id>
 ```
 
 - Use the Worktree resource name for `<worktree-id>`. Share the content store
@@ -186,6 +186,6 @@ See [pnpm virtualStoreDir](https://pnpm.io/settings/node-modules#virtualstoredir
 
 ## Typical sequence
 
-Inspect first, then create only requested resources: namespace; credentials; Environment or compatible runner; Repository; Workspace; writable Worktree mount; initialization process; then separate AgentProcesses for each agent, server, or watcher. Use installed `rcctl --help` as the command contract because the API is currently `v1alpha1` and flags can change.
+Inspect first, then create only requested resources: namespace; credentials; Environment or compatible runner; Repository; Workspace; writable Worktree mount; initialization process; then separate WorkspaceExecs for each agent, server, or watcher. Use installed `rcctl --help` as the command contract because the API is currently `v1alpha1` and flags can change.
 
 For LobeHub CLI login or `lh connect`, use `$setup-lobehub-cli`. Do not copy a host-created LobeHub credential file into a Workspace: its encryption is tied to host/user identity. Log in once inside a persistent Workspace instead.

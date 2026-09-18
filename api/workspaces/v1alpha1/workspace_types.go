@@ -206,7 +206,7 @@ type WorkspaceSpec struct {
 	IdleTimeout *metav1.Duration `json:"idleTimeout,omitempty"`
 
 	// retentionPolicy controls whether the Workspace is retained after all of its
-	// Agent Processes exit. It defaults to Retain.
+	// processes exit. It defaults to Retain.
 	// +kubebuilder:default=Retain
 	// +optional
 	RetentionPolicy WorkspaceRetentionPolicy `json:"retentionPolicy,omitempty"`

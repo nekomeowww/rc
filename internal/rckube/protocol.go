@@ -16,7 +16,7 @@ limitations under the License.
 
 package rckube
 
-import processruntime "github.com/nekomeowww/rc/internal/agentprocess"
+import processruntime "github.com/nekomeowww/rc/internal/execution"
 
 const protocolVersion = 4
 

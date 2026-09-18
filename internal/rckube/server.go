@@ -25,7 +25,7 @@ import (
 	"net"
 	"sync"
 
-	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
+	processruntime "github.com/nekomeowww/rc/internal/execution"
 )
 
 const protocolCodeBadRequest = "bad_request"

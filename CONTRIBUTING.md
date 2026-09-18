@@ -80,7 +80,7 @@ Keep it running in one terminal, then use another terminal for resources and
 
 ```sh
 go run ./cmd/rcctl --context kind-rc-dev -n default repo list
-kubectl get repositories,worktrees,workspaces,agentprocesses -A
+kubectl get repositories,worktrees,workspaces,workspaceexecs -A
 ```
 
 The setup commands derive a kubeconfig for the named Kind cluster before
@@ -94,15 +94,26 @@ make cleanup-kind KIND_CLUSTER=rc-dev
 
 ## Run tests
 
-Run the unit and envtest suite with:
+Run ordinary tests on Linux, macOS, or Windows without Kubernetes binaries:
 
 ```sh
+go test ./...
+# Or collect coverage:
 make test
 ```
 
+Controller tests that start a Kubernetes API server use the `integration` build
+tag. Run them separately on Linux or macOS:
+
+```sh
+make test-integration
+```
+
 This target regenerates manifests and DeepCopy code, formats and vets Go source,
-downloads the matching envtest Kubernetes binaries, and runs all non-e2e Go
-tests.
+downloads matching envtest binaries, and runs `go test -tags=integration
+./internal/controller/...`. Fake-client controller tests remain in the default
+suite. CI runs ordinary tests on both Linux and Windows, with a separate Linux
+job for envtest. Kind E2E tests require the existing `e2e` build tag.
 
 Run lint separately:
 
@@ -200,7 +211,7 @@ while configuration APIs remain in the original API package:
 cmd/                         manager, rcctl, and rc-kube entry points
 api/v1alpha1/                Credential and AgentCredential APIs
 api/repositories/v1alpha1/   Repository, Worktree, and RepositoryExec APIs
-api/workspaces/v1alpha1/     Environment, Workspace, and AgentProcess APIs
+api/workspaces/v1alpha1/     Environment, Workspace, and WorkspaceExec APIs
 internal/controller/         reconciliation logic by API group
 internal/cli/rcctl/          rcctl command implementation
 internal/rckube/             in-Pod process supervisor
@@ -221,7 +232,7 @@ Before opening a pull request:
 1. Keep the change focused and explain the user-visible behavior.
 2. Add or update tests for changed behavior.
 3. Regenerate manifests and DeepCopy code when API types or markers change.
-4. Run `make lint` and `make test`.
+4. Run `make lint`, `make test`, and `make test-integration`.
 5. Run `make test-e2e` for controller, RBAC, deployment, or cluster integration
    changes.
 6. Update README, samples, design docs, or ADRs when commands, APIs, lifecycle

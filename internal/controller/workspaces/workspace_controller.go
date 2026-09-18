@@ -23,7 +23,7 @@ import (
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
-	"path/filepath"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -497,7 +497,7 @@ func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspac
 		if r.DarwinWorkspaceRoot == "" {
 			return resolved, "DarwinWorkspaceRootRequired", "The controller must configure --darwin-workspace-root", nil
 		}
-		resolved.homeHostPath = filepath.Join(r.DarwinWorkspaceRoot, workspace.Namespace, workspace.Name)
+		resolved.homeHostPath = path.Join(r.DarwinWorkspaceRoot, workspace.Namespace, workspace.Name)
 		resolved.image = workspace.Status.RuntimeImage
 		if resolved.image == "" {
 			resolved.image = workspace.Spec.Image
@@ -677,12 +677,12 @@ func resolveLifecycleAction(action workspacesv1alpha1.WorkspaceLifecycleAction) 
 }
 
 func (r *WorkspaceReconciler) resolveWorkspaceMount(ctx context.Context, namespace string, mount workspacesv1alpha1.WorkspaceMount, platform rcplatform.Runtime) (corev1.Volume, corev1.VolumeMount, *workspaceWriteClaim, *workspaceInitializer, string, string, error) {
-	cleanPath := filepath.Clean(mount.Path)
-	if cleanPath == "." || cleanPath == ".." || strings.HasPrefix(cleanPath, "../") || filepath.IsAbs(mount.Path) || strings.ContainsAny(mount.Path, `\:`) {
+	cleanPath := path.Clean(mount.Path)
+	if cleanPath == "." || cleanPath == ".." || strings.HasPrefix(cleanPath, "../") || path.IsAbs(mount.Path) || strings.ContainsAny(mount.Path, `\:`) {
 		return corev1.Volume{}, corev1.VolumeMount{}, nil, nil, "InvalidMountPath", fmt.Sprintf("Mount %s has an invalid path", mount.Name), nil
 	}
 	volume := corev1.Volume{Name: mount.Name}
-	volumeMount := corev1.VolumeMount{Name: mount.Name, MountPath: platform.MountPath(filepath.Join(workspaceRootMountPath, cleanPath)), ReadOnly: mount.ReadOnly}
+	volumeMount := corev1.VolumeMount{Name: mount.Name, MountPath: platform.MountPath(path.Join(workspaceRootMountPath, cleanPath)), ReadOnly: mount.ReadOnly}
 	if mount.WorktreeRef != nil {
 		worktree := new(repositoriesv1alpha1.Worktree)
 		key := types.NamespacedName{Name: mount.WorktreeRef.Name, Namespace: namespace}
@@ -700,7 +700,7 @@ func (r *WorkspaceReconciler) resolveWorkspaceMount(ctx context.Context, namespa
 			return volume, volumeMount, nil, nil, "WorktreeNotReady", fmt.Sprintf("Mounted Worktree %s is not ready", worktree.Name), nil
 		}
 		volume.PersistentVolumeClaim = &corev1.PersistentVolumeClaimVolumeSource{ClaimName: worktree.Status.VolumeClaimName, ReadOnly: mount.ReadOnly}
-		cleanWorktreePath := filepath.Clean(worktree.Status.WorktreePath)
+		cleanWorktreePath := path.Clean(worktree.Status.WorktreePath)
 		if cleanWorktreePath != repositoryRootMountPath {
 			volumeMount.SubPath = strings.TrimPrefix(cleanWorktreePath, repositoryRootMountPath+"/")
 		}
@@ -1078,7 +1078,7 @@ func (r *WorkspaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.RunnerImage == "" {
 		return fmt.Errorf("workspace runner image must not be empty")
 	}
-	if r.DarwinWorkspaceRoot != "" && !filepath.IsAbs(r.DarwinWorkspaceRoot) {
+	if r.DarwinWorkspaceRoot != "" && !path.IsAbs(r.DarwinWorkspaceRoot) {
 		return fmt.Errorf("darwin Workspace root must be absolute")
 	}
 

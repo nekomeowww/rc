@@ -32,7 +32,7 @@ func TestLifecycleCommandRunsEncodedActions(t *testing.T) {
 	t.Parallel()
 	argv := []string{"printf", "initialized"}
 	if runtime.GOOS == "windows" {
-		argv = []string{"cmd.exe", "/c", "echo|set /p=initialized"}
+		argv = []string{"powershell.exe", "-NoProfile", "-Command", "[Console]::Write('initialized')"}
 	}
 	encoded, err := lifecycle.Encode([]lifecycle.Action{{
 		Command: argv, WorkingDirectory: t.TempDir(),

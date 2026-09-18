@@ -26,13 +26,13 @@ import (
 
 func TestResultErrorRejectsEveryNonSuccessTerminalPhase(t *testing.T) {
 	t.Parallel()
-	for _, phase := range []workspacesv1alpha1.AgentProcessPhase{
-		workspacesv1alpha1.AgentProcessPhaseFailed,
-		workspacesv1alpha1.AgentProcessPhaseStopped,
-		workspacesv1alpha1.AgentProcessPhaseLost,
+	for _, phase := range []workspacesv1alpha1.WorkspaceExecPhase{
+		workspacesv1alpha1.WorkspaceExecPhaseFailed,
+		workspacesv1alpha1.WorkspaceExecPhaseStopped,
+		workspacesv1alpha1.WorkspaceExecPhaseLost,
 	} {
-		process := &workspacesv1alpha1.AgentProcess{Status: workspacesv1alpha1.AgentProcessStatus{Phase: phase}}
+		process := &workspacesv1alpha1.WorkspaceExec{Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: phase}}
 		require.Error(t, ResultError(process), "phase %s must fail a foreground command", phase)
 	}
-	require.NoError(t, ResultError(&workspacesv1alpha1.AgentProcess{Status: workspacesv1alpha1.AgentProcessStatus{Phase: workspacesv1alpha1.AgentProcessPhaseSucceeded}}))
+	require.NoError(t, ResultError(&workspacesv1alpha1.WorkspaceExec{Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded}}))
 }

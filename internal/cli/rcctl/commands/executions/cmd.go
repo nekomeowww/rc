@@ -14,12 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package agents
+package executions
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"strconv"
@@ -49,7 +50,11 @@ import (
 type runOptions struct {
 	placement        command.PlacementOptions
 	workspace        string
-	temporary        bool
+	createWorkspace  bool
+	remove           bool
+	name             string
+	interactive      bool
+	tty              bool
 	detach           bool
 	environment      string
 	repositories     []string
@@ -76,53 +81,70 @@ type listOptions struct {
 	agent         string
 	idPrefix      string
 	allNamespaces bool
+	all           bool
 	output        clioutput.Options
 }
 
-// Register attaches Agent Process commands to rcctl.
+// Register attaches execution commands directly to rcctl.
 func Register(root *cobra.Command, kubeconfigFlags *kubeconfig.Flags) {
-	root.AddCommand(NewCommand(kubeconfigFlags))
-}
-
-// NewCommand returns the Agent Process command group.
-func NewCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
-	root := &cobra.Command{Use: "agent", Aliases: []string{"agents"}, Short: "Run and reconnect to persistent Agent Processes", GroupID: command.AgentsGroup}
-	root.AddCommand(newRunCommand(kubeconfigFlags, true), newRunCommand(kubeconfigFlags, false), newResumeCommand(kubeconfigFlags), newListCommand(kubeconfigFlags), newGetCommand(kubeconfigFlags), newLogsCommand(kubeconfigFlags), newStopCommand(kubeconfigFlags), newDeleteCommand(kubeconfigFlags))
-
-	return root
-}
-
-func newRunCommand(kubeconfigFlags *kubeconfig.Flags, tty bool) *cobra.Command {
-	options := new(runOptions)
-	verb := "exec"
-	short := "Run a command and wait for its exit status"
-	if tty {
-		verb = "run"
-		short = "Run and attach to an interactive Agent Process"
+	commands := []*cobra.Command{
+		newRunCommand(kubeconfigFlags, true), newRunCommand(kubeconfigFlags, false),
+		newAttachCommand(kubeconfigFlags), newListCommand(kubeconfigFlags),
+		newInspectCommand(kubeconfigFlags), newLogsCommand(kubeconfigFlags),
+		newStopCommand(kubeconfigFlags), newRemoveCommand(kubeconfigFlags),
 	}
+	for _, cmd := range commands {
+		cmd.GroupID = command.ExecutionsGroup
+		root.AddCommand(cmd)
+	}
+}
+
+// newRunCommand routes run to a new Workspace and exec to an existing Workspace.
+// Both use runProcess to create the execution and optionally attach its streams.
+func newRunCommand(kubeconfigFlags *kubeconfig.Flags, createWorkspace bool) *cobra.Command {
+	options := &runOptions{createWorkspace: createWorkspace}
 	cmd := &cobra.Command{
-		Use: verb + " [flags] [--] COMMAND [ARG...]", Short: short, Args: cobra.MinimumNArgs(1),
+		Use:   "run [flags] -- COMMAND [ARG...]",
+		Short: "Create a Workspace and run a command",
+		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runProcess(cmd, kubeconfigFlags, args, tty, *options)
+			if !createWorkspace {
+				options.workspace = args[0]
+				args = args[1:]
+				// With interspersed flag parsing disabled, a separator after
+				// WORKSPACE is part of the positional arguments.
+				if len(args) > 0 && args[0] == "--" {
+					args = args[1:]
+				}
+				if len(args) == 0 || args[0] == "" {
+					return fmt.Errorf("exec requires WORKSPACE and COMMAND")
+				}
+			}
+			return runProcess(cmd, kubeconfigFlags, args, *options)
 		},
 	}
-	addRunFlags(cmd, options)
-	if tty {
-		cmd.Flags().BoolVarP(&options.detach, "detach", "d", false, "Start the Agent Process without attaching")
+	if !createWorkspace {
+		cmd.Use = "exec [flags] WORKSPACE -- COMMAND [ARG...]"
+		cmd.Short = "Run a command in an existing Workspace"
+		cmd.Args = cobra.MinimumNArgs(2)
 	}
+	addRunFlags(cmd, options)
+	cmd.Flags().BoolVarP(&options.detach, "detach", "d", false, "Start without attaching")
+	cmd.Flags().BoolVarP(&options.interactive, "interactive", "i", false, "Forward standard input to the process")
+	cmd.Flags().BoolVarP(&options.tty, "tty", "t", false, "Allocate a terminal")
 	cmd.Flags().SetInterspersed(false)
-
 	return cmd
 }
 
 func addRunFlags(cmd *cobra.Command, options *runOptions) {
 	options.placement.AddFlags(cmd.Flags())
-	cmd.Flags().StringVar(&options.workspace, "workspace", "", "Existing Workspace name")
-	cmd.Flags().BoolVar(&options.temporary, "temporary", false, "Create an isolated Workspace and delete it after the AgentProcess terminates")
-	cmd.MarkFlagsMutuallyExclusive("workspace", "temporary")
-	cmd.Flags().StringVar(&options.environment, "environment", "", "WorkspaceEnvironment for a temporary Workspace or existing-target requirement")
-	cmd.Flags().StringArrayVar(&options.repositories, "repo", nil, "Repository requirement or temporary writable Worktree source; repeat")
-	cmd.Flags().StringArrayVar(&options.worktrees, "worktree", nil, "Worktree requirement or temporary mount; repeat")
+	if options.createWorkspace {
+		cmd.Flags().BoolVar(&options.remove, "rm", false, "Delete the created Workspace after all its processes terminate")
+		cmd.Flags().StringVar(&options.name, "name", "", "Name for the new Workspace; generated when omitted")
+	}
+	cmd.Flags().StringVar(&options.environment, "environment", "", "WorkspaceEnvironment for a new Workspace or existing-target requirement")
+	cmd.Flags().StringArrayVar(&options.repositories, "repo", nil, "Repository requirement or new writable Worktree source; repeat")
+	cmd.Flags().StringArrayVar(&options.worktrees, "worktree", nil, "Worktree requirement or new Workspace mount; repeat")
 	cmd.Flags().StringArrayVar(&options.agentCredentials, "agent-credential", nil, "Ordered AgentCredential names; repeat")
 	cmd.Flags().StringArrayVar(&options.credentials, "credential", nil, "Credential names to project into the process; repeat")
 	cmd.Flags().StringArrayVar(&options.legacyGeneric, "dangerously-include-credentials", nil, "Deprecated alias for --credential; repeat")
@@ -131,17 +153,19 @@ func addRunFlags(cmd *cobra.Command, options *runOptions) {
 	cmd.Flags().StringArrayVar(&options.environmentFiles, "env-file", nil, "Read environment values from a file; repeat")
 	cmd.Flags().BoolVar(&options.noPassthrough, "no-env-passthrough", false, "Disable caller environment pass-through")
 	cmd.Flags().StringVar(&options.cwd, "cwd", "", "Working directory")
-	cmd.Flags().StringVar(&options.image, "image", "", "Runner image for a temporary blank Workspace")
-	cmd.Flags().StringVar(&options.storageClass, "storage-class", "", "StorageClass for a temporary blank Workspace")
-	cmd.Flags().StringVar(&options.size, "size", "20Gi", "Home volume size for a temporary blank Workspace")
-	cmd.Flags().StringVar(&options.serviceAccount, "service-account", "", "Same-namespace ServiceAccount for a temporary Workspace")
-	cmd.Flags().BoolVar(&options.noServiceAccount, "no-service-account", false, "Disable ServiceAccount token mounting for a temporary Workspace")
+	if options.createWorkspace {
+		cmd.Flags().StringVar(&options.image, "image", "", "Runner image for a new blank Workspace")
+		cmd.Flags().StringVar(&options.storageClass, "storage-class", "", "StorageClass for a new blank Workspace")
+		cmd.Flags().StringVar(&options.size, "size", "20Gi", "Home volume size for a new blank Workspace")
+		cmd.Flags().StringVar(&options.serviceAccount, "service-account", "", "Same-namespace ServiceAccount for a new Workspace")
+		cmd.Flags().BoolVar(&options.noServiceAccount, "no-service-account", false, "Disable ServiceAccount token mounting for a new Workspace")
+	}
 	cmd.Flags().StringVar(&options.npmRegistry, "npm-registry", "", "npm registry URL for this command")
 	options.gpu.AddFlags(cmd.Flags())
 }
 
 //nolint:gocyclo // This command coordinates target, credential, environment, and terminal setup.
-func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []string, tty bool, options runOptions) (returnedErr error) {
+func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []string, options runOptions) (returnedErr error) {
 	registryEnvironment, err := workspaceservice.NPMRegistryEnvironment(options.npmRegistry)
 	if err != nil {
 		return err
@@ -170,13 +194,6 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 	if placementErr != nil {
 		return placementErr
 	}
-	if !options.temporary {
-		for _, name := range []string{"image", "storage-class", "size", "service-account", "no-service-account"} {
-			if cmd.Flags().Changed(name) {
-				return fmt.Errorf("--%s requires --temporary", name)
-			}
-		}
-	}
 	resources, err := options.gpu.ResourceRequirements(cmd.Flags().Changed("gpu"), cmd.Flags().Changed("gpu-vram"))
 	if err != nil {
 		return err
@@ -204,13 +221,13 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 	}
 	runRequest := workspaceservice.RunRequest{
 		OS: osName, NodeSelector: options.placement.NodeSelector, Tolerations: tolerations,
-		Namespace: namespace, Workspace: options.workspace, DefaultWorkspace: defaults.Workspace, Temporary: options.temporary,
+		Namespace: namespace, Workspace: options.workspace, DefaultWorkspace: defaults.Workspace, Create: options.createWorkspace, Remove: options.remove, Name: options.name,
 		Environment: options.environment, DefaultEnvironment: defaults.Environment,
 		Repositories: repositories, Worktrees: worktrees,
 	}
 	credentialRefs := append(append([]string(nil), options.credentials...), options.legacyGeneric...)
 	credentialNames, agentCredential, selectedAgentType, err := selectAgentCredentials(
-		cmd.Context(), clusterClient.Kube, namespace, agentType, options.agentCredentials, options.temporary,
+		cmd.Context(), clusterClient.Kube, namespace, agentType, options.agentCredentials, options.createWorkspace,
 	)
 	if err != nil {
 		return err
@@ -218,13 +235,8 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 	if selectedAgentType != "" {
 		agentType = selectedAgentType
 	}
-	if agentType == "" && len(credentialRefs) == 0 {
-		if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "warning: command %q has no recognized agent adapter; AgentCredentials will not be selected automatically\n", argv[0]); err != nil {
-			return err
-		}
-	}
 	var storage *workspacesv1alpha1.PersistentStorageSpec
-	if options.temporary {
+	if options.createWorkspace {
 		storage, err = temporaryStorage(options)
 		if err != nil {
 			return err
@@ -245,7 +257,7 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 	runRequest.ServiceAccountName = options.serviceAccount
 	runRequest.AutomountServiceAccountToken = automount
 	runRequest.NamePrefix = agentType
-	routeNPMRegistryEnvironment(options.temporary, &runRequest, values, registryEnvironment)
+	routeNPMRegistryEnvironment(options.createWorkspace, &runRequest, values, registryEnvironment)
 	target, err := (&workspaceservice.Runner{Client: clusterClient.Kube}).Prepare(cmd.Context(), runRequest)
 	if err != nil {
 		return err
@@ -258,7 +270,7 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 		cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(cmd.Context()), 30*time.Second)
 		defer cancel()
 		if err := client.IgnoreNotFound(clusterClient.Kube.Delete(cleanupContext, target.Workspace)); err != nil {
-			returnedErr = errors.Join(returnedErr, fmt.Errorf("delete temporary Workspace %q: %w", target.Workspace.Name, err))
+			returnedErr = errors.Join(returnedErr, fmt.Errorf("delete new Workspace %q: %w", target.Workspace.Name, err))
 		}
 	}()
 	if target.Created {
@@ -286,24 +298,24 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 	}
 	processClient := &workspaceservice.ProcessClient{Kube: clusterClient.Kube, Runtime: clusterClient.Processes, Config: config}
 	process, err := processClient.Start(cmd.Context(), workspaceservice.ProcessStartRequest{
-		Namespace: namespace, Target: workspacesv1alpha1.AgentProcessTargetReference{Kind: workspacesv1alpha1.AgentProcessTargetWorkspace, Name: target.Workspace.Name},
-		Command: argv, WorkingDirectory: options.cwd, TTY: tty, AgentType: agentType,
+		Namespace: namespace, Target: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: target.Workspace.Name},
+		Command: argv, WorkingDirectory: options.cwd, TTY: options.tty, AgentType: agentType,
 		AgentCredential: agentCredential, Credentials: credentialRefs, Environment: values,
 	})
 	if err != nil {
 		return err
 	}
+	cleanupTemporaryOnReturn = false
 	if _, err := fmt.Fprintln(cmd.ErrOrStderr(), process.Name); err != nil {
 		return err
 	}
-	indicator := progress.Start(cmd.ErrOrStderr(), "starting AgentProcess...")
+	indicator := progress.Start(cmd.ErrOrStderr(), "starting WorkspaceExec...")
 	ready, err := processClient.WaitUntilAttachable(cmd.Context(), process)
 	indicator.Stop()
 	if err != nil {
 		return err
 	}
 	if options.detach && !processTerminal(ready.Status.Phase) {
-		cleanupTemporaryOnReturn = false
 		return nil
 	}
 	if processTerminal(ready.Status.Phase) {
@@ -311,7 +323,11 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 			return err
 		}
 	} else {
-		if err := processClient.Attach(cmd.Context(), ready, cmd.InOrStdin(), cmd.OutOrStdout()); err != nil && cmd.Context().Err() == nil {
+		var input io.Reader
+		if options.interactive {
+			input = cmd.InOrStdin()
+		}
+		if err := processClient.Attach(cmd.Context(), ready, input, cmd.OutOrStdout()); err != nil && cmd.Context().Err() == nil {
 			return err
 		}
 	}
@@ -457,9 +473,9 @@ func waitWorkspaceReady(ctx context.Context, kubeClient client.Client, workspace
 	})
 }
 
-func newResumeCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
+func newAttachCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	return &cobra.Command{
-		Use: "resume ID", Short: "Attach another terminal to the original live Agent Process", Args: cobra.ExactArgs(1),
+		Use: "attach ID", Short: "Attach another terminal to the original live process", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			processClient, namespace, err := processClient(kubeconfigFlags)
 			if err != nil {
@@ -469,11 +485,11 @@ func newResumeCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if process.Status.Phase != workspacesv1alpha1.AgentProcessPhaseRunning {
-				return fmt.Errorf("cannot connect to AgentProcess %s in phase %s", process.Name, process.Status.Phase)
+			if process.Status.Phase != workspacesv1alpha1.WorkspaceExecPhaseRunning {
+				return fmt.Errorf("cannot connect to WorkspaceExec %s in phase %s", process.Name, process.Status.Phase)
 			}
 			if err := processClient.Attach(cmd.Context(), process, cmd.InOrStdin(), cmd.OutOrStdout()); err != nil {
-				return fmt.Errorf("cannot connect to original AgentProcess %s: %w", process.Name, err)
+				return fmt.Errorf("cannot connect to original WorkspaceExec %s: %w", process.Name, err)
 			}
 			return nil
 		},
@@ -482,7 +498,7 @@ func newResumeCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 
 func newLogsCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	return &cobra.Command{
-		Use: "logs ID", Short: "Read the persistent Agent Process transcript", Args: cobra.ExactArgs(1),
+		Use: "logs ID", Short: "Read the persistent process transcript", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			processClient, namespace, err := processClient(kubeconfigFlags)
 			if err != nil {
@@ -499,7 +515,7 @@ func newLogsCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 
 func newStopCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	return &cobra.Command{
-		Use: "stop ID", Short: "Request one-way Agent Process termination", Args: cobra.ExactArgs(1),
+		Use: "stop ID", Short: "Request one-way process termination", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			processClient, namespace, err := processClient(kubeconfigFlags)
 			if err != nil {
@@ -512,7 +528,7 @@ func newStopCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err := processClient.Stop(cmd.Context(), process); err != nil {
 				return err
 			}
-			indicator := progress.Start(cmd.ErrOrStderr(), "stopping AgentProcess...")
+			indicator := progress.Start(cmd.ErrOrStderr(), "stopping WorkspaceExec...")
 			defer indicator.Stop()
 			_, err = processClient.WaitUntilTerminal(cmd.Context(), process)
 			return err
@@ -520,9 +536,9 @@ func newStopCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	}
 }
 
-func newDeleteCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
+func newRemoveCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	return &cobra.Command{
-		Use: "delete ID", Short: "Delete a terminal Agent Process record and its temporary environment", Args: cobra.ExactArgs(1),
+		Use: "rm ID", Short: "Delete a completed execution record", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			processClient, namespace, err := processClient(kubeconfigFlags)
 			if err != nil {
@@ -533,7 +549,7 @@ func newDeleteCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 				return err
 			}
 			if !processTerminal(process.Status.Phase) {
-				return fmt.Errorf("agent process %s is still %s; stop it first", process.Name, process.Status.Phase)
+				return fmt.Errorf("process %s is still %s; stop it first", process.Name, process.Status.Phase)
 			}
 			return processClient.Kube.Delete(cmd.Context(), process)
 		},
@@ -543,7 +559,7 @@ func newDeleteCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	options := new(listOptions)
 	cmd := &cobra.Command{
-		Use: "list", Aliases: []string{"ls"}, Short: "List Agent Process records", Args: cobra.NoArgs,
+		Use: "ps", Short: "List running processes", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := options.output.Validate(true); err != nil {
 				return err
@@ -556,7 +572,7 @@ func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			list := new(workspacesv1alpha1.AgentProcessList)
+			list := new(workspacesv1alpha1.WorkspaceExecList)
 			listOptions := []client.ListOption{}
 			if !options.allNamespaces {
 				listOptions = append(listOptions, client.InNamespace(namespace))
@@ -564,13 +580,14 @@ func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err := clusterClient.Kube.List(cmd.Context(), list, listOptions...); err != nil {
 				return err
 			}
-			list.Items = agentListItems(list.Items, *options)
+			list.Items = processListItems(list.Items, *options)
 			return options.output.PrintList(
 				cmd.OutOrStdout(), list, clusterClient.Kube.Scheme(),
-				agentListTable(list.Items, options.allNamespaces, time.Now()),
+				processListTable(list.Items, options.allNamespaces, time.Now()),
 			)
 		},
 	}
+	cmd.Flags().BoolVarP(&options.all, "all", "a", false, "Include pending and completed processes")
 	cmd.Flags().StringVar(&options.workspace, "workspace", "", "Filter by target Workspace")
 	cmd.Flags().StringVar(&options.phase, "phase", "", "Filter by process phase")
 	cmd.Flags().StringVar(&options.agent, "agent", "", "Filter by recognized agent type")
@@ -581,10 +598,10 @@ func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	return cmd
 }
 
-func newGetCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
+func newInspectCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	options := new(clioutput.Options)
 	cmd := &cobra.Command{
-		Use: "get ID", Short: "Show an Agent Process record", Args: cobra.ExactArgs(1),
+		Use: "inspect ID", Short: "Show a process record", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := options.Validate(false); err != nil {
 				return err
@@ -597,7 +614,7 @@ func newGetCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return options.PrintDetails(cmd.OutOrStdout(), process, processClient.Kube.Scheme(), agentDetailFields(process))
+			return options.PrintDetails(cmd.OutOrStdout(), process, processClient.Kube.Scheme(), processDetailFields(process))
 		},
 	}
 	options.AddFlags(cmd, false)
@@ -605,10 +622,13 @@ func newGetCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	return cmd
 }
 
-func agentListItems(processes []workspacesv1alpha1.AgentProcess, options listOptions) []workspacesv1alpha1.AgentProcess {
-	items := make([]workspacesv1alpha1.AgentProcess, 0, len(processes))
+func processListItems(processes []workspacesv1alpha1.WorkspaceExec, options listOptions) []workspacesv1alpha1.WorkspaceExec {
+	items := make([]workspacesv1alpha1.WorkspaceExec, 0, len(processes))
 	for _, process := range processes {
-		if options.workspace != "" && process.Spec.TargetRef.Name != options.workspace {
+		if !options.all && options.phase == "" && process.Status.Phase != workspacesv1alpha1.WorkspaceExecPhaseRunning {
+			continue
+		}
+		if options.workspace != "" && (process.Spec.TargetRef.Kind != workspacesv1alpha1.WorkspaceExecTargetWorkspace || process.Spec.TargetRef.Name != options.workspace) {
 			continue
 		}
 		if options.phase != "" && !strings.EqualFold(string(process.Status.Phase), options.phase) {
@@ -622,7 +642,7 @@ func agentListItems(processes []workspacesv1alpha1.AgentProcess, options listOpt
 		}
 		items = append(items, process)
 	}
-	slices.SortStableFunc(items, func(left, right workspacesv1alpha1.AgentProcess) int {
+	slices.SortStableFunc(items, func(left, right workspacesv1alpha1.WorkspaceExec) int {
 		if compared := left.CreationTimestamp.Compare(right.CreationTimestamp.Time); compared != 0 {
 			return compared
 		}
@@ -635,21 +655,21 @@ func agentListItems(processes []workspacesv1alpha1.AgentProcess, options listOpt
 	return items
 }
 
-func agentListTable(processes []workspacesv1alpha1.AgentProcess, includeNamespace bool, now time.Time) clioutput.Table {
+func processListTable(processes []workspacesv1alpha1.WorkspaceExec, includeNamespace bool, now time.Time) clioutput.Table {
 	columns := make([]clioutput.Column, 0, 10)
 	if includeNamespace {
 		columns = append(columns, clioutput.Column{Name: "NAMESPACE", MaxWidth: 24})
 	}
 	columns = append(columns,
 		clioutput.Column{Name: "ID", MaxWidth: 32},
-		clioutput.Column{Name: "TARGET", MaxWidth: 24},
+		clioutput.Column{Name: "WORKSPACE", MaxWidth: 24},
 		clioutput.Column{Name: "COMMAND", MinWidth: 12, MaxWidth: 48, Flexible: true},
 		clioutput.Column{Name: "TTY", Wide: true},
-		clioutput.Column{Name: "AGENT", MaxWidth: 16},
-		clioutput.Column{Name: "PHASE"},
+		clioutput.Column{Name: "AGENT", MaxWidth: 16, Wide: true},
+		clioutput.Column{Name: "STATUS"},
 		clioutput.Column{Name: "CLIENTS", Wide: true},
 		clioutput.Column{Name: "AGE"},
-		clioutput.Column{Name: "EXIT"},
+		clioutput.Column{Name: "EXIT", Wide: true},
 	)
 	rows := make([][]any, 0, len(processes))
 	for _, process := range processes {
@@ -665,7 +685,11 @@ func agentListTable(processes []workspacesv1alpha1.AgentProcess, includeNamespac
 		if includeNamespace {
 			row = append(row, process.Namespace)
 		}
-		row = append(row, process.Name, process.Spec.TargetRef.Name, strings.Join(process.Spec.Command, " "), process.Spec.TTY,
+		target := process.Spec.TargetRef.Name
+		if process.Spec.TargetRef.Kind == workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment {
+			target = "env/" + target
+		}
+		row = append(row, process.Name, target, strings.Join(process.Spec.Command, " "), process.Spec.TTY,
 			clioutput.ValueOrDash(process.Spec.AgentType), clioutput.ValueOrDash(string(process.Status.Phase)), process.Status.AttachedClients, age, exit)
 		rows = append(rows, row)
 	}
@@ -673,7 +697,7 @@ func agentListTable(processes []workspacesv1alpha1.AgentProcess, includeNamespac
 	return clioutput.Table{Columns: columns, Rows: rows}
 }
 
-func agentDetailFields(process *workspacesv1alpha1.AgentProcess) []clioutput.Field {
+func processDetailFields(process *workspacesv1alpha1.WorkspaceExec) []clioutput.Field {
 	return []clioutput.Field{
 		{Name: "Name", Value: process.Name},
 		{Name: "Namespace", Value: process.Namespace},
@@ -759,10 +783,10 @@ func processClient(kubeconfigFlags *kubeconfig.Flags) (*workspaceservice.Process
 	return &workspaceservice.ProcessClient{Kube: clusterClient.Kube, Runtime: clusterClient.Processes, Config: config}, namespace, nil
 }
 
-func processTerminal(phase workspacesv1alpha1.AgentProcessPhase) bool {
+func processTerminal(phase workspacesv1alpha1.WorkspaceExecPhase) bool {
 	switch phase {
-	case workspacesv1alpha1.AgentProcessPhaseSucceeded, workspacesv1alpha1.AgentProcessPhaseFailed,
-		workspacesv1alpha1.AgentProcessPhaseStopped, workspacesv1alpha1.AgentProcessPhaseLost:
+	case workspacesv1alpha1.WorkspaceExecPhaseSucceeded, workspacesv1alpha1.WorkspaceExecPhaseFailed,
+		workspacesv1alpha1.WorkspaceExecPhaseStopped, workspacesv1alpha1.WorkspaceExecPhaseLost:
 		return true
 	default:
 		return false

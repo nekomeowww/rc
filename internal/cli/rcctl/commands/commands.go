@@ -3,9 +3,9 @@ package commands
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/nekomeowww/rc/internal/cli/rcctl/commands/agents"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/commands/credentials"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/commands/environments"
+	"github.com/nekomeowww/rc/internal/cli/rcctl/commands/executions"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/commands/repositories"
 	workspacecommands "github.com/nekomeowww/rc/internal/cli/rcctl/commands/workspaces"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/commands/worktrees"
@@ -19,5 +19,5 @@ func Register(root *cobra.Command, kubeconfigFlags *kubeconfig.Flags) {
 	worktrees.Register(root, kubeconfigFlags)
 	environments.Register(root, kubeconfigFlags)
 	workspacecommands.Register(root, kubeconfigFlags)
-	agents.Register(root, kubeconfigFlags)
+	executions.Register(root, kubeconfigFlags)
 }

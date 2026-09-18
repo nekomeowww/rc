@@ -79,7 +79,7 @@ resources:
   controller: true
   domain: rc.ayaka.io
   group: workspaces
-  kind: AgentProcess
+  kind: WorkspaceExec
   path: github.com/nekomeowww/rc/api/workspaces/v1alpha1
   version: v1alpha1
 - api:

@@ -209,7 +209,7 @@ func runEnvironmentProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags
 	processClient := &workspaceservice.ProcessClient{Kube: clusterClient.Kube, Runtime: clusterClient.Processes, Config: clusterClient.Config}
 	process, err := processClient.Start(cmd.Context(), workspaceservice.ProcessStartRequest{
 		Namespace: namespace,
-		Target:    workspacesv1alpha1.AgentProcessTargetReference{Kind: workspacesv1alpha1.AgentProcessTargetWorkspaceEnvironment, Name: name},
+		Target:    workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment, Name: name},
 		Command:   processCommand, WorkingDirectory: options.cwd, TTY: tty, AgentType: agentType,
 		AgentCredential: options.agentCredential, Credentials: options.credentials, Environment: values,
 	})
@@ -219,7 +219,7 @@ func runEnvironmentProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags
 	if _, err := fmt.Fprintln(cmd.ErrOrStderr(), process.Name); err != nil {
 		return err
 	}
-	indicator := progress.Start(cmd.ErrOrStderr(), "starting AgentProcess...")
+	indicator := progress.Start(cmd.ErrOrStderr(), "starting WorkspaceExec...")
 	ready, err := processClient.WaitUntilAttachable(cmd.Context(), process)
 	indicator.Stop()
 	if err != nil {
@@ -302,14 +302,14 @@ func newStopCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			processes := new(workspacesv1alpha1.AgentProcessList)
+			processes := new(workspacesv1alpha1.WorkspaceExecList)
 			if err := clusterClient.Kube.List(cmd.Context(), processes, client.InNamespace(namespace)); err != nil {
 				return err
 			}
 			for index := range processes.Items {
 				process := &processes.Items[index]
-				if process.Spec.TargetRef.Kind == workspacesv1alpha1.AgentProcessTargetWorkspaceEnvironment && process.Spec.TargetRef.Name == args[0] && !terminal(process.Status.Phase) {
-					return fmt.Errorf("workspace environment %q has active AgentProcess %q", args[0], process.Name)
+				if process.Spec.TargetRef.Kind == workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment && process.Spec.TargetRef.Name == args[0] && !terminal(process.Status.Phase) {
+					return fmt.Errorf("workspace environment %q has active WorkspaceExec %q", args[0], process.Name)
 				}
 			}
 			environment := new(workspacesv1alpha1.WorkspaceEnvironment)
@@ -380,10 +380,10 @@ func waitEnvironmentReady(ctx context.Context, kubeClient client.Client, environ
 	})
 }
 
-func terminal(phase workspacesv1alpha1.AgentProcessPhase) bool {
+func terminal(phase workspacesv1alpha1.WorkspaceExecPhase) bool {
 	switch phase {
-	case workspacesv1alpha1.AgentProcessPhaseSucceeded, workspacesv1alpha1.AgentProcessPhaseFailed,
-		workspacesv1alpha1.AgentProcessPhaseStopped, workspacesv1alpha1.AgentProcessPhaseLost:
+	case workspacesv1alpha1.WorkspaceExecPhaseSucceeded, workspacesv1alpha1.WorkspaceExecPhaseFailed,
+		workspacesv1alpha1.WorkspaceExecPhaseStopped, workspacesv1alpha1.WorkspaceExecPhaseLost:
 		return true
 	default:
 		return false

@@ -19,8 +19,8 @@ work.
   Workspace.
 - Combine multiple Worktrees, configurations, and credentials in one
   same-namespace trust boundary.
-- Allow an agent running in a Workspace to use `rcctl` to configure other
-  Environments and Workspaces and dispatch more Agent Processes.
+- Allow an running in a Workspace to use `rcctl` to configure other
+  Environments and Workspaces and dispatch more processes.
 
 ## Non-goals
 
@@ -28,7 +28,7 @@ The first version will not:
 
 - hot-plug a new PVC into a running Pod;
 - store a complete Linux root filesystem in a PVC;
-- restart or reconstruct an Agent Process after its runtime Pod is lost;
+- restart or reconstruct an process after its runtime Pod is lost;
 - isolate credentials from other processes in the same Workspace;
 - write directly to a Repository parent volume;
 - resolve mutable image tags to digests;
@@ -50,12 +50,12 @@ Repository ── clone ── Worktree ── Workspace
 Credential / AgentCredential ─────────┤
 ConfigMap / Secret ───────────────────┤
                                       │
-                                      ├── AgentProcess
-                                      ├── AgentProcess
-                                      └── AgentProcess
+                                      ├── WorkspaceExec
+                                      ├── WorkspaceExec
+                                      └── WorkspaceExec
 ```
 
-An Agent Process may instead target the draft of a Workspace Environment. This
+A process may instead target the draft of a Workspace Environment. This
 allows `env edit` and `env exec` to reuse the same process and terminal runtime.
 
 All resource references are same-namespace. This matches Secret references and
@@ -130,8 +130,8 @@ The lifecycle is:
    and storage configuration.
 2. The first `env edit` or `env exec` after a commit clones current into draft.
 3. An editor Pod mounts draft at `/home/agent` and runs `rc-kube`.
-4. Edit and exec operations create Agent Processes targeting the draft.
-5. `env commit` is rejected while a draft Agent Process is active.
+4. Edit and exec operations create processes targeting the draft.
+5. `env commit` is rejected while a draft process is active.
 6. A successful commit stops the editor Pod, waits for the draft filesystem to
    unmount cleanly, promotes draft to current, increments the content revision,
    and deletes the previous current PVC.
@@ -164,7 +164,7 @@ suspension. Suspending the editor never deletes draft.
 The default Workspace image runs as the non-root `agent` user and includes the
 `sudo` executable, but it does not contain a passwordless sudoers rule. Normal
 Workspace runtime Pods also disable privilege escalation and drop all Linux
-capabilities, so Agent Processes cannot use `sudo` or become root.
+capabilities, so processes cannot use `sudo` or become root.
 The runtime security-policy version participates in the Workspace topology
 hash, so a policy change rolls an idle runtime Pod through the existing guarded
 topology-replacement path.
@@ -193,8 +193,8 @@ rcctl env stop <name>
 rcctl env delete <name>
 ```
 
-`env edit` creates a terminal Agent Process running a shell. `env exec` creates
-a non-terminal Agent Process, waits for it to finish, streams stdout and stderr,
+`env edit` creates a terminal process running a shell. `env exec` creates
+a non-terminal process, waits for it to finish, streams stdout and stderr,
 and returns the command's exit code. Both survive client disconnect through the
 same rules as Workspace processes and receive an rc process ID. `env stop`
 stops an idle editor without deleting draft and is rejected while a draft
@@ -233,7 +233,7 @@ The stable filesystem layout is:
 Mount names and paths are unique. By default, a `--repo foo` shortcut names its
 mount `foo`; a collision requires an explicit mount name. User-selected code
 paths remain beneath `/workspace`; they cannot replace the home or rc runtime
-paths. A Workspace may set a default working directory, and an Agent Process
+paths. A Workspace may set a default working directory, and an process
 may override it with `--cwd`. When neither is set, the process starts in
 `/workspace` rather than guessing a primary repository.
 
@@ -273,7 +273,7 @@ Kubernetes semantics:
 - updates to an already projected file are eventually reflected by kubelet;
 - adding or removing a projected source changes Pod topology and requires a
   runtime replacement;
-- environment values are resolved when an Agent Process starts; and
+- environment values are resolved when an process starts; and
 - a running process never receives environment mutations.
 
 Credentials use Credential and AgentCredential references rather than being
@@ -291,12 +291,12 @@ scheduling settings such as node selection, affinity, tolerations, and
 RuntimeClass. The CLI should expose common CPU, memory, and accelerator flags
 and leave uncommon scheduling configuration to manifests.
 
-`workspace create`, `agent run`, and `agent exec` expose GPU requests. `--gpu`
+`workspace create`, `run`, and `exec` expose GPU requests. `--gpu`
 sets the `nvidia.com/gpu` count and `--gpu-vram` independently sets the
 `nvidia.com/gpumem` quantity. `--gpu-resource NAME=QUANTITY` is repeatable and
 adds a vendor-specific Kubernetes extended resource directly. rcctl writes
 each selected GPU resource to both runtime container requests and limits. When
-an Agent Process targets an existing Workspace, these flags are requirements:
+an process targets an existing Workspace, these flags are requirements:
 the command rejects a Workspace that does not already provide the requested
 quantities instead of mutating its runtime topology.
 
@@ -316,7 +316,7 @@ processes and then suspends the Workspace.
 
 Kubernetes does not permit adding PVC volumes to an existing Pod. Mount,
 Environment, Service Account, and projected-volume topology changes therefore
-replace the runtime Pod. A change is rejected while Agent Processes are active
+replace the runtime Pod. A change is rejected while processes are active
 unless the caller explicitly forces termination. rc will not use privileged
 mount propagation as a default hot-plug mechanism.
 
@@ -350,14 +350,16 @@ an idempotent branch checkout in its first init container. The Worktree
 controller observes that init container and owns the final Worktree `Ready`
 condition. Ordinary independently managed Worktrees retain their bootstrap Job.
 
-## Agent Process
+## WorkspaceExec
 
-AgentProcess is the only process CRD. `agent run` and `agent exec` are different
-I/O defaults for the same resource, not separate API kinds.
+WorkspaceExec records a command running in a Workspace or Workspace Environment
+draft. `run` creates a Workspace and a WorkspaceExec; `exec WORKSPACE` creates a
+WorkspaceExec in an existing Workspace. Both default to non-terminal I/O and
+support `-it` and `-d`.
 
 ### Desired state
 
-An Agent Process records:
+A process records:
 
 - a target Workspace or Workspace Environment draft;
 - the exact argv supplied by the caller;
@@ -370,7 +372,7 @@ The Kubernetes object name is the rc process ID. rcctl generates a sortable,
 agent-prefixed name such as `codex-01k2...` for a recognized adapter and a
 generic `process-...` name otherwise. Commands such as `resume`, `logs`, `stop`,
 and `delete` accept a namespace-unique prefix for interactive convenience;
-scripts and Kubernetes API clients use the full name. The Agent Process spec is
+scripts and Kubernetes API clients use the full name. The process spec is
 otherwise immutable after creation. Agent-native session IDs are separate and
 never substitute for this ID.
 
@@ -393,10 +395,10 @@ time, termination reason, and the persistent transcript index.
 
 Process creation is declarative:
 
-1. `rcctl` creates the AgentProcess object and immediately prints its ID.
+1. `rcctl` creates the WorkspaceExec object and immediately prints its ID.
 2. `rc-controller` resolves a ready target runtime.
 3. The controller invokes `rc-kube process start <id>` through Pod exec.
-4. `rc-kube` uses the AgentProcess UID as its idempotency key and starts the
+4. `rc-kube` uses the WorkspaceExec UID as its idempotency key and starts the
    command at most once.
 5. The controller records Running after the supervisor acknowledges ownership.
 6. `rcctl` attaches after Running is observed.
@@ -428,7 +430,8 @@ other directives.
 
 ### Terminal and attach behavior
 
-`agent run` defaults to a PTY and `agent exec` defaults to non-terminal I/O. A
+`run` and `exec` default to non-terminal I/O. `-t` allocates a PTY and
+`-i` forwards stdin; use `-it` for an interactive terminal. A
 PTY process supports bracketed input, resize, signals, and an unmodified
 terminal byte stream; client disconnect leaves the PTY and process owned by
 `rc-kube`.
@@ -446,14 +449,14 @@ viewport. Because one PTY has one size, background clients do not receive an
 independently rendered viewport. Slow clients are explicitly disconnected
 instead of silently losing output.
 
-`rcctl agent resume <id>` means reconnect to that rc-managed live process. It
+`rcctl attach <id>` means reconnect to that rc-managed live process. It
 does not refer to a Codex or other agent-native session ID. If the process or
 runtime no longer exists, resume fails; it neither creates another process nor
 invokes an agent-native resume command.
 
 ### Stop and logs
 
-`rcctl agent stop <id>` changes the one-way desired state. The supervisor sends
+`rcctl stop <id>` changes the one-way desired state. The supervisor sends
 SIGTERM to the process group, waits for the configured grace period, and then
 uses SIGKILL. Stopped processes cannot be started again. Deleting the CR is a
 separate operation.
@@ -463,7 +466,7 @@ in CR status. It may contain source code, command output, and secrets printed by
 the process, so the Workspace volume is sensitive data. Log storage has a
 configurable bound and reports truncation. The append-only raw transcript is
 also used to seed a newly attached terminal and survives process exit and
-runtime restarts. When the target runtime exists, `agent logs` reads through
+runtime restarts. When the target runtime exists, `logs` reads through
 `rc-kube`. Otherwise the controller creates a short-lived read-only helper Pod
 that mounts only the target log volume. The helper does not mount Worktrees or
 Credentials and does not change the target desired state.
@@ -497,7 +500,7 @@ while retaining the non-secret Agent home.
 SSH configuration follows the same lifetime split. The non-secret managed
 `Include` in `~/.ssh/config` persists, while rendered SSH Configuration
 Fragments, identity files, and known-host files exist only while at least one
-Agent Process uses their Credential. Existing user SSH configuration is
+process uses their Credential. Existing user SSH configuration is
 preserved. Fragment names are derived from Credential names and load in lexical
 order.
 
@@ -514,7 +517,7 @@ Commands inherit the environment of the calling `rcctl` process by default.
 and `--env-file` provide selective input and explicit overrides.
 
 Automatic pass-through excludes values that describe the caller's local paths,
-terminal, Kubernetes client, shell integration, IDE session, or agent runtime.
+terminal, Kubernetes client, shell integration, IDE session, or runtime.
 This includes well-known names and families such as:
 
 ```text
@@ -571,9 +574,9 @@ likely to break a recognized adapter, but it does not reject the value. rc
 process identity and supervisor control never depend on environment variables
 that a caller can override.
 
-Passed values are stored in a temporary Secret owned by the AgentProcess rather
+Passed values are stored in a temporary Secret owned by the WorkspaceExec rather
 than inline in the CR. The controller reads that Secret when starting the
-process. Its OwnerReference removes it with the AgentProcess record.
+process. Its OwnerReference removes it with the WorkspaceExec record.
 
 ## Kubernetes access from a Workspace
 
@@ -613,56 +616,35 @@ explicit `--namespace` or `-n`, then the kubeconfig context namespace, then
 
 ## CLI target resolution
 
-An XDG configuration file may select a default Workspace and a default
-Workspace Environment per Kubernetes context and namespace. The default
-Environment is used only when constructing a Temporary Workspace; an existing
-Workspace already fixes its own Environment. CLI resource selection uses
-`--environment <name>` so `--env NAME[=value]` remains unambiguously reserved
-for process environment variables.
+An XDG configuration file may select a default Workspace and Environment per
+Kubernetes context and namespace. `exec WORKSPACE` explicitly selects an
+existing Ready Workspace. `run` always creates an independent Workspace and
+may use the configured default Environment.
 
-The resolution rules for `agent run` and `agent exec` are:
+Environment, Repository, and Worktree arguments with `exec` are requirements:
+`--environment` must match and each code resource must already have a matching
+mount. A missing Workspace or mismatched requirement is an error.
 
-1. An explicit `--workspace <name>` must name an existing Ready Workspace.
-2. Without that flag, an existing configured default Workspace is used.
-3. Environment, Repository, and Worktree arguments supplied with an existing
-   Workspace are requirements, not mutations: `--environment` must match and
-   each code resource must already be represented by a matching mount. A
-   mismatch stops the run; `--repo` does not create a Worktree in this case.
-4. If neither an explicit nor configured default Workspace exists, rcctl
-   reports an error. Creating a Workspace is never an implicit fallback.
-5. `--temporary` explicitly requests an independent Workspace even when a
-   default exists and gives it the `DeleteAfterProcessesExit` retention policy.
-6. `--workspace` and `--temporary` are mutually exclusive. An explicitly named
-   missing Workspace is always an error and is never
-   created as a typo recovery behavior.
+A new Workspace uses command options and caller environment pass-through.
+Creation flags (`--name`, `--image`, `--storage-class`, `--size`,
+`--service-account`, `--rm`) are exposed only by `run`. It never copies a default
+Workspace's live home, mounts, credentials, or resource settings. A known agent
+may select the sole compatible AgentCredential in the namespace; several
+candidates require explicit `--agent-credential` flags.
 
-A Temporary Workspace is independent. It does not copy a default Workspace's
-live home volume, Worktree mounts, Credentials, ConfigMaps, Secrets, or resource
-settings. It uses only command arguments and caller environment pass-through.
-Creation-only flags such as `--image`, `--storage-class`, `--size`, and
-`--service-account` require `--temporary`; they are never silently ignored for
-an existing Workspace.
-If exactly one compatible AgentCredential exists in the namespace, a known
-agent may select it automatically; several candidates require explicit ordered
-`--agent-credential` flags.
+Referenced Environments, Repositories, and existing Worktrees must already be
+Ready. `run --repo NAME` creates and mounts a generated Worktree from the
+Repository; `--worktree NAME` mounts an existing Worktree. Generated Worktrees
+are owned by the new Workspace, including retained Workspaces.
 
-All referenced Environments, Repositories, and existing Worktrees must already
-exist and be Ready. While constructing a Temporary Workspace, `--repo <name>`
-is the only shorthand that creates another domain resource: it creates and
-mounts a Worktree from that existing Repository. There is no
-`--auto-create-worktree` flag.
-
-A Workspace created for `--temporary` is deleted when the synchronous command
-returns, including failure and cancellation. A successful detached command
-leaves cleanup to the retention controller, which requests deletion after all
-Agent Processes become terminal. The controller retains a five-minute grace
-period so another client can observe the terminal result and transcript. It
-also deletes a Temporary Workspace that has no AgentProcess after a fifteen-
-minute startup deadline, covering client failure between resource creations.
-A Temporary Workspace owns Worktrees created by its `--repo` shortcuts, so its
-home PVC, runtime Pod, process records, generated Worktrees, and their PVCs are
-all garbage-collected. Existing Worktrees selected with `--worktree` are never
-owned or deleted by the Temporary Workspace.
+`run` retains the Workspace by default. `run --rm` sets
+`DeleteAfterProcessesExit`. Once the WorkspaceExec exists, the retention
+controller handles cleanup even if the client disconnects. It waits five
+minutes after all processes become terminal so clients can read results and
+logs, or fifteen minutes after creation if no WorkspaceExec was created.
+Before execution creation succeeds, rcctl cleans up a temporary Workspace on
+preparation failure. Existing Worktrees are never owned or deleted by this
+cleanup.
 
 ## CLI surface
 
@@ -690,14 +672,14 @@ rcctl workspace stop <name> [--force]
 rcctl workspace delete <name> [--force] [--cascade-created-worktrees]
 rcctl workspace port-forward <name> <local-port>[:<remote-port>]
 
-rcctl agent run [target options] [--] <command> [args...]
-rcctl agent exec [target options] [--] <command> [args...]
-rcctl agent resume <id>
-rcctl agent list [--workspace <name>] [--all-namespaces] [-o table|wide|json|yaml]
-rcctl agent get <id> [-o table|json|yaml]
-rcctl agent logs <id>
-rcctl agent stop <id>
-rcctl agent delete <id>
+rcctl run [options] [--rm] [--name <name>] [-it] [-d] -- <command> [args...]
+rcctl exec [options] [-it] [-d] <workspace> -- <command> [args...]
+rcctl attach <id>
+rcctl ps [-a] [--workspace <name>] [--all-namespaces] [-o table|wide|json|yaml]
+rcctl inspect <id> [-o table|json|yaml]
+rcctl logs <id>
+rcctl stop <id>
+rcctl rm <id>
 ```
 
 Repository clone does not initialize submodules by default.
@@ -745,7 +727,7 @@ Lease with Workspace runtimes. This is intentionally a narrow, lightweight
 operation for short commands that need only the base Runner Image: it does not
 create a Workspace home PVC or provide Environment state, caches, credentials,
 process persistence, or a terminal. Commands needing those capabilities use
-`agent exec --temporary --worktree`. RepositoryExec and WorktreeExec record the
+`run --rm --worktree`. RepositoryExec and WorktreeExec record the
 Job name in status before attempting Job creation. A recorded Job that later
 disappears terminates as `JobLost`; the controller never recreates it, avoiding
 the risk of repeating a side effect. While a WorktreeExec Job is non-terminal,
@@ -755,29 +737,28 @@ another writer owns the Lease or the Lease cannot be verified. `worktree delete`
 only after Workspace references and active writers are gone; deleting the CR
 then garbage-collects its owned PVC and bootstrap Job.
 
-For `agent run` and `agent exec`, the first positional argument is the command.
-For `env exec`, the Environment name precedes the command. In all three forms,
-rcctl options must precede the command. `--` is optional and exists only to
-disambiguate a command or argument that would otherwise parse as an rcctl
-option. The stored argv is exactly the command and remaining arguments;
-adapters do not rewrite it or interpret a task description. Target options
-include repeatable `--repo`, `--worktree`, and `--credential` selectors,
-`--environment`, and `--cwd`.
+For `run`, the first positional argument is the command. For `exec`, the
+Workspace name precedes the command; for `env exec`, the Environment name
+precedes it. rcctl flags must precede that first positional argument. The
+optional `--` separator before the command is stripped; all remaining command
+arguments are preserved exactly, including flags intended for the child.
 
-`agent exec` uses non-terminal I/O, waits synchronously, streams stdout and
-stderr, and exits with the command's exit code. `agent run` defaults to a full
-interactive terminal. Both create a persistent AgentProcess before attaching
-and can run concurrently with other processes in one Workspace.
+`run` and `exec` default to non-terminal I/O, wait for completion, and return
+the command's exit code. `-it` attaches an interactive terminal and `-d` returns
+after startup. Both create a WorkspaceExec and allow concurrent processes.
 
-`agent list` defaults to every AgentProcess in the current namespace, not only
-the XDG default Workspace. Its compact table includes the process ID, target,
-shortened command, agent type, phase, age, and exit code. Records are ordered
-from oldest to newest so the latest process is at the bottom. `-o wide` adds
-TTY mode and attached client count. The command can filter by Workspace,
-phase, agent type, and ID prefix, in addition to listing all namespaces when
-authorized. Every list command accepts `-o json` and `-o yaml` for complete,
-machine-readable resource data; the corresponding `get` command prints an
-untruncated human-readable detail view by default.
+`ps` lists running processes across the current namespace. `-a` also includes
+pending and completed executions. `--workspace` selects only processes whose
+target kind is Workspace and whose target name matches; Environment drafts
+with the same name are excluded. `--phase` explicitly selects a phase,
+including terminal phases without requiring `-a`. Agent type, ID prefix and
+all-namespace filters remain available.
+
+The compact table contains ID, Workspace (or `env/NAME` for Environment drafts),
+command, status and age. `-o wide` adds agent type, TTY, client count and exit
+code. Records are ordered oldest first. `-o json` and `-o yaml` preserve full
+resource data. `inspect ID` provides details; `attach`, `logs`, `stop`, and `rm`
+operate directly on the process ID. `rm` requires a terminal process.
 
 `workspace port-forward` uses Kubernetes Pod port-forward and does not require
 a declared container port. Closing the client stops only the forwarding
@@ -787,18 +768,17 @@ outside this feature.
 ## Retention and deletion
 
 Finishing a process does not delete a retained Workspace, home volume,
-AgentProcess record, transcript, or automatically created Worktree. A Workspace
+WorkspaceExec record, transcript, or automatically created Worktree. A Workspace
 with an idle timeout may suspend to release compute while retaining its state.
 The exception is a Workspace with the `DeleteAfterProcessesExit` retention
-policy, as created by `--temporary`: rcctl deletes it when a synchronous
-invocation returns, and the retention controller deletes it after the terminal
-grace period when the client detached or disconnected.
+policy, as created by `run --rm`: the retention controller deletes it after
+the terminal grace period, independently of the CLI connection.
 
 Deleting a Workspace:
 
-- terminates its active Agent Processes;
+- terminates its active processes;
 - deletes its runtime Pod, home volume, process records, and transcripts; and
-- deletes generated Worktrees owned by a Temporary Workspace, but never deletes
+- deletes generated Worktrees owned by the Workspace, but never deletes
   an existing Worktree selected with `--worktree`.
 
 The CLI rejects deletion with active processes unless `--force` is present.
@@ -875,7 +855,7 @@ status:
 
 ```yaml
 apiVersion: workspaces.rc.ayaka.io/v1alpha1
-kind: AgentProcess
+kind: WorkspaceExec
 metadata:
   name: codex-01k2example
 spec:
@@ -910,11 +890,11 @@ Use Kubebuilder rather than manually creating API or controller files:
 ```sh
 kubebuilder create api --group workspaces --version v1alpha1 --kind WorkspaceEnvironment
 kubebuilder create api --group workspaces --version v1alpha1 --kind Workspace
-kubebuilder create api --group workspaces --version v1alpha1 --kind AgentProcess
+kubebuilder create api --group workspaces --version v1alpha1 --kind WorkspaceExec
 ```
 
 Define reference, storage, mount, target, phase, and condition types. Add CEL
-validation for immutable Agent Process execution fields, mount union fields,
+validation for immutable process execution fields, mount union fields,
 same-object target variants, and one-way stop behavior where schema validation
 can express it. Mark WorkspaceEnvironment with plural `workspaceenvironments`
 and short name `env`. Regenerate manifests and DeepCopy methods after type
@@ -939,12 +919,12 @@ volume from the first implementation.
 ### 4. Build the rc-kube supervisor
 
 Add an `rc-kube` entry point and a versioned local protocol. Implement
-idempotent start by AgentProcess UID, process groups, PTY and non-PTY I/O,
+idempotent start by WorkspaceExec UID, process groups, PTY and non-PTY I/O,
 signals, exit observation, bounded transcript persistence, and Unix-socket
 attach. The base Workspace image must contain compatible `rc-kube` and `rcctl`
 binaries.
 
-### 5. Reconcile Agent Processes
+### 5. Reconcile processes
 
 Implement controller-to-supervisor Pod exec, status transitions, at-most-once
 retries, stop escalation, runtime-loss detection, and Environment draft

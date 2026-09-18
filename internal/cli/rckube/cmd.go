@@ -27,7 +27,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
+	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/lifecycle"
 	runtime "github.com/nekomeowww/rc/internal/rckube"
 	"github.com/nekomeowww/rc/internal/rcnative"

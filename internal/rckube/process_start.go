@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
+	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/osprocess"
 )
 

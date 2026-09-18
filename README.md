@@ -1,11 +1,11 @@
 # rc
 
 `rc` runs persistent, Kubernetes-backed development workspaces for coding agents.
-It keeps repositories, Git worktrees, home directories, credentials, and agent processes as explicit Kubernetes resources, while `rcctl` provides the day-to-day command-line workflow.
+It keeps repositories, Git worktrees, home directories, credentials, and processes as explicit Kubernetes resources, while `rcctl` provides the day-to-day command-line workflow.
 
 The project consists of three programs:
 
-- `rcctl` creates resources, imports credentials, and starts or reconnects to agent processes.
+- `rcctl` creates resources, imports credentials, and starts or reconnects to processes.
 - `rc-kube` supervises processes inside Workspace and Environment Pods.
 - `rc-controller` reconciles rc resources in Kubernetes.
 
@@ -18,10 +18,10 @@ rc models a remote Git repository and a writable checkout separately:
 
 ```text
 Git remote -> Repository parent PVC -> Worktree child PVC -> Workspace
-                                                        \-> AgentProcess
+                                                        \-> WorkspaceExec
 ```
 
-A `Repository` is the synchronized, authoritative mirror of a Git remote. A `Worktree` is an independent CSI clone of that Repository volume initialized with native `git worktree add` semantics. A `Workspace` mounts one or more Worktrees together with a persistent home directory, and can run multiple concurrent `AgentProcess` resources.
+A `Repository` is the synchronized, authoritative mirror of a Git remote. A `Worktree` is an independent CSI clone of that Repository volume initialized with native `git worktree add` semantics. A `Workspace` mounts one or more Worktrees together with a persistent home directory, and can run multiple concurrent `WorkspaceExec` resources.
 
 This gives each task an ordinary Git branch and working tree without repeatedly downloading the same remote. Worktrees remain inspectable after a process exits, and a disconnected terminal does not stop the process it started.
 
@@ -128,7 +128,8 @@ The top-level command groups follow the rc resource model:
 | `rcctl worktree` | Create, inspect, execute in, and delete independent native Git worktrees |
 | `rcctl env` | Prepare and commit reusable Workspace home environments |
 | `rcctl workspace` | Create persistent development machines and manage their mounts |
-| `rcctl agent` | Run, list, reconnect to, stop, and inspect persistent processes |
+| `rcctl run` / `rcctl exec` | Run commands in a new / existing Workspace |
+| `rcctl ps` / `attach` / `logs` / `stop` / `inspect` / `rm` | List and manage processes |
 
 ### Import credentials
 
@@ -148,7 +149,7 @@ The default resource name is `github-com`. Pass it when cloning a private reposi
 #   --credential-ref github-com
 ```
 
-To make an existing Codex login available to an Agent Process, import the local credential file:
+To make an existing Codex login available to an process, import the local credential file:
 
 ```sh
 rcctl -n development credentials import --type agent --agent codex --file "$HOME/.codex/auth.json"
@@ -188,21 +189,21 @@ rcctl -n development worktree list
 rcctl -n development worktree exec rc-readme -- git status --short
 ```
 
-The add command creates a child PVC through CSI cloning and initializes a native Git worktree on it. `worktree exec` is the lightweight path for short commands that need only the base Runner Image: it runs in a separate Job, does not allocate a Workspace home PVC, and holds the same exclusive write Lease as a Workspace mount. It intentionally does not provide Workspace Environment state, caches, credentials, process persistence, or an interactive terminal. Use `agent exec --temporary --worktree rc-readme -- COMMAND` when a command needs those Workspace capabilities. Advanced `git worktree add` modes are available through flags such as `--ref`, `--detach`, `--orphan`, `--no-checkout`, and `--lock`. Delete an unmounted Worktree and its owned PVC and bootstrap Job with `rcctl worktree rm rc-readme`.
+The add command creates a child PVC through CSI cloning and initializes a native Git worktree on it. `worktree exec` is the lightweight path for short commands that need only the base Runner Image: it runs in a separate Job, does not allocate a Workspace home PVC, and holds the same exclusive write Lease as a Workspace mount. It intentionally does not provide Workspace Environment state, caches, credentials, process persistence, or an interactive terminal. Use `run --rm --worktree rc-readme -- COMMAND` when a command needs those Workspace capabilities. Advanced `git worktree add` modes are available through flags such as `--ref`, `--detach`, `--orphan`, `--no-checkout`, and `--lock`. Delete an unmounted Worktree and its owned PVC and bootstrap Job with `rcctl worktree rm rc-readme`.
 
 ### Run a process
 
 The shortest isolated path is to explicitly request a temporary Workspace and a writable Worktree from an existing Repository:
 
 ```sh
-rcctl -n development agent run --temporary --repo rc --image ghcr.io/nekomeowww/rc/runner:latest --storage-class csi-hostpath-sc --agent-credential codex --cwd /workspace/rc -- codex
+rcctl -n development run -it --rm --repo rc --image ghcr.io/nekomeowww/rc/runner:latest --storage-class csi-hostpath-sc --agent-credential codex --cwd /workspace/rc -- codex
 ```
 
-The temporary Workspace and any Worktree created by `--repo` are deleted after
-the AgentProcess terminates. An existing Worktree selected with `--worktree` is
-never deleted by this cleanup. Without `--temporary`, rcctl uses the explicitly
-selected or configured default Workspace and reports an error when neither is
-available.
+`run` always creates a new Workspace. It retains that Workspace by default;
+`--rm` requests cleanup after all its processes terminate, with a five-minute
+grace period for reading results and logs. Generated Worktrees from `--repo`
+are owned by the new Workspace. Existing Worktrees selected with `--worktree`
+are never deleted by this cleanup. Use `--name` to choose the new Workspace name.
 
 For a named development machine, create the Workspace first and mount the Worktree explicitly:
 
@@ -211,7 +212,7 @@ rcctl -n development workspace create dev --image ghcr.io/nekomeowww/rc/runner:l
 rcctl -n development workspace mount worktree rc-readme --workspace dev --path rc
 rcctl -n development workspace default dev
 
-rcctl -n development agent run --workspace dev --agent-credential codex --cwd /workspace/rc -- codex
+rcctl -n development exec -it --agent-credential codex --cwd /workspace/rc dev -- codex
 ```
 
 #### Optimizations
@@ -237,32 +238,46 @@ The convenience flag sets two `Workspace.Spec.Env` defaults:
 receives the same URL without a trailing slash through its independent
 `COREPACK_NPM_REGISTRY` variable.
 
-The same flag is available on `agent run` and `agent exec`. With an existing
-Workspace, it overrides registry defaults only for that AgentProcess and does
-not modify the Workspace. With `--temporary`, the generated Workspace receives
+The same flag is available on `run` and `exec`. With an existing
+Workspace, it overrides registry defaults only for that WorkspaceExec and does
+not modify the Workspace. With `run`, the generated Workspace receives
 the defaults. Supplying either registry variable explicitly through `--env` or
 `--env-file` conflicts with `--npm-registry`. This convenience flag configures
 registry locations only; it does not provide registry tokens, usernames, or
 passwords. Configure authentication separately when the selected registry
 requires it.
 
-`agent run` attaches an interactive terminal. `agent exec` runs a non-terminal command and returns its exit code. Agent Processes are persistent resources, so you can inspect and reconnect to them independently of the original terminal:
+Both `run` and `exec WORKSPACE` wait for completion and return the command's
+exit code by default. Use `-it` for an interactive terminal or `-d` to detach.
+Each command creates a persistent `WorkspaceExec`, so you can inspect and
+reconnect independently of the original terminal. Put rcctl flags before the
+Workspace name for `exec`; everything after that name is command argv.
 
 ```sh
-rcctl -n development agent list
+rcctl -n development ps                    # Running processes in this namespace
+rcctl -n development ps -a                 # Include pending and completed processes
+rcctl -n development ps --workspace dev    # Filter by Workspace
 
-# Replace PROCESS_ID with a value printed by `agent list`:
-# rcctl -n development agent get PROCESS_ID
-# rcctl -n development agent logs PROCESS_ID
-# rcctl -n development agent resume PROCESS_ID
+# Replace PROCESS_ID with a value printed by `ps`:
+# rcctl -n development inspect PROCESS_ID
+# rcctl -n development logs PROCESS_ID
+# rcctl -n development attach PROCESS_ID
 ```
 
 List commands use compact, width-aware tables and shorten long values with an
 ellipsis. Pass `-o wide` for secondary columns, or `-o json`/`-o yaml` for the
-complete resource data. `agent get`, `workspace get`, `repo get`, and
+complete resource data. `inspect`, `workspace get`, `repo get`, and
 `worktree get` show an untruncated detail view of one resource.
 
 Use `rcctl --help` and `rcctl <command> --help` for the complete command surface.
+
+The execution API is now `workspaces.rc.ayaka.io/v1alpha1`, kind
+`WorkspaceExec`. This replaces `AgentProcess`; the old `rcctl agent` command
+group has been removed. Existing process records are not automatically migrated.
+Before upgrading an existing installation, use the old CLI/controller to stop
+and remove old process records after saving any needed logs. Upgrade the CRDs,
+controller, and CLI together. Do not relabel completed executions as new
+WorkspaceExec resources: recreating them requests a new command execution.
 
 ## Deploy a development build
 

@@ -132,9 +132,9 @@ rules:
 - apiGroups:
   - workspaces.rc.ayaka.io
   resources:
-  - agentprocesses
-  - agentprocesses/status
   - workspaceenvironments
+  - workspaceexecs
+  - workspaceexecs/status
   - workspaces
   verbs:
   - create
@@ -147,8 +147,8 @@ rules:
 - apiGroups:
   - workspaces.rc.ayaka.io
   resources:
-  - agentprocesses/finalizers
   - workspaceenvironments/finalizers
+  - workspaceexecs/finalizers
   - workspaces/finalizers
   verbs:
   - update

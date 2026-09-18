@@ -207,8 +207,8 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	cmd.Flags().StringVar(&options.image, "image", "", "Runner image for a blank Workspace")
 	cmd.Flags().StringVar(&options.storageClass, "storage-class", "", "StorageClass for a blank Workspace")
 	cmd.Flags().StringVar(&options.size, "size", "20Gi", "Home volume size for a blank Workspace")
-	cmd.Flags().StringArrayVar(&options.agentCredentials, "agent-credential", nil, "Ordered AgentCredential names available to Agent Processes; repeat")
-	cmd.Flags().StringArrayVar(&options.credentials, "credential", nil, "Credential names available to Agent Processes; repeat")
+	cmd.Flags().StringArrayVar(&options.agentCredentials, "agent-credential", nil, "Ordered AgentCredential names available to processes; repeat")
+	cmd.Flags().StringArrayVar(&options.credentials, "credential", nil, "Credential names available to processes; repeat")
 	cmd.Flags().StringVar(&options.defaultCwd, "cwd", "", "Default process working directory")
 	cmd.Flags().StringVar(&options.serviceAccount, "service-account", "", "Same-namespace ServiceAccount")
 	cmd.Flags().BoolVar(&options.noServiceAccount, "no-service-account", false, "Disable ServiceAccount token mounting")
@@ -1098,7 +1098,7 @@ func selectedWorkspace(ctx context.Context, kubeClient client.Client, namespace 
 }
 
 func stopForTopologyChange(ctx context.Context, clusterClient *cluster.Client, workspace *workspacesv1alpha1.Workspace, force bool) ([]string, error) {
-	processes := new(workspacesv1alpha1.AgentProcessList)
+	processes := new(workspacesv1alpha1.WorkspaceExecList)
 	if err := clusterClient.Kube.List(ctx, processes, client.InNamespace(workspace.Namespace)); err != nil {
 		return nil, err
 	}
@@ -1106,12 +1106,12 @@ func stopForTopologyChange(ctx context.Context, clusterClient *cluster.Client, w
 	processClient := &workspaceservice.ProcessClient{Kube: clusterClient.Kube, Runtime: clusterClient.Processes, Config: clusterClient.Config}
 	for index := range processes.Items {
 		process := &processes.Items[index]
-		if process.Spec.TargetRef.Kind != workspacesv1alpha1.AgentProcessTargetWorkspace || process.Spec.TargetRef.Name != workspace.Name || terminal(process.Status.Phase) {
+		if process.Spec.TargetRef.Kind != workspacesv1alpha1.WorkspaceExecTargetWorkspace || process.Spec.TargetRef.Name != workspace.Name || terminal(process.Status.Phase) {
 			continue
 		}
 		if !force {
 			slices.Sort(stopped)
-			return stopped, fmt.Errorf("workspace %q has active AgentProcess %q; use --force", workspace.Name, process.Name)
+			return stopped, fmt.Errorf("workspace %q has active WorkspaceExec %q; use --force", workspace.Name, process.Name)
 		}
 		if err := processClient.Stop(ctx, process); err != nil {
 			slices.Sort(stopped)
@@ -1190,7 +1190,7 @@ func finishTopologyChange(cmd *cobra.Command, kubeClient client.Client, result w
 
 func reportStoppedProcesses(cmd *cobra.Command, stopped []string) error {
 	for _, name := range stopped {
-		if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "agentprocess/%s stopped\n", name); err != nil {
+		if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "execution/%s stopped\n", name); err != nil {
 			return err
 		}
 	}
@@ -1204,10 +1204,10 @@ func topologyChangeFailure(cmd *cobra.Command, stopped []string, cause error) er
 	return cause
 }
 
-func terminal(phase workspacesv1alpha1.AgentProcessPhase) bool {
+func terminal(phase workspacesv1alpha1.WorkspaceExecPhase) bool {
 	switch phase {
-	case workspacesv1alpha1.AgentProcessPhaseSucceeded, workspacesv1alpha1.AgentProcessPhaseFailed,
-		workspacesv1alpha1.AgentProcessPhaseStopped, workspacesv1alpha1.AgentProcessPhaseLost:
+	case workspacesv1alpha1.WorkspaceExecPhaseSucceeded, workspacesv1alpha1.WorkspaceExecPhaseFailed,
+		workspacesv1alpha1.WorkspaceExecPhaseStopped, workspacesv1alpha1.WorkspaceExecPhaseLost:
 		return true
 	default:
 		return false

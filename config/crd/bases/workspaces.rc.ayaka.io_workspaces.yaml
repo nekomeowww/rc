@@ -1406,7 +1406,7 @@ spec:
                 default: Retain
                 description: |-
                   retentionPolicy controls whether the Workspace is retained after all of its
-                  Agent Processes exit. It defaults to Retain.
+                  processes exit. It defaults to Retain.
                 enum:
                 - Retain
                 - DeleteAfterProcessesExit

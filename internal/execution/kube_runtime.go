@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package agentprocess
+package execution
 
 import (
 	"bytes"
@@ -52,7 +52,7 @@ func NewKubeRuntime(executor PodExecutor) *KubeRuntime {
 func (runtime *KubeRuntime) Start(ctx context.Context, target Target, request StartRequest) (State, error) {
 	data, err := json.Marshal(request)
 	if err != nil {
-		return State{}, fmt.Errorf("encode Agent Process start request: %w", err)
+		return State{}, fmt.Errorf("encode process start request: %w", err)
 	}
 
 	return runtime.stateCommand(ctx, target, bridgeCommand(target, "start"), bytes.NewReader(data))

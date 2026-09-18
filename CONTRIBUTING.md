@@ -80,7 +80,7 @@ Keep it running in one terminal, then use another terminal for resources and
 
 ```sh
 go run ./cmd/rcctl --context kind-rc-dev -n default repo list
-kubectl get repositories,worktrees,workspaces,agentprocesses -A
+kubectl get repositories,worktrees,workspaces,workspaceexecs -A
 ```
 
 The setup commands derive a kubeconfig for the named Kind cluster before
@@ -200,7 +200,7 @@ while configuration APIs remain in the original API package:
 cmd/                         manager, rcctl, and rc-kube entry points
 api/v1alpha1/                Credential and AgentCredential APIs
 api/repositories/v1alpha1/   Repository, Worktree, and RepositoryExec APIs
-api/workspaces/v1alpha1/     Environment, Workspace, and AgentProcess APIs
+api/workspaces/v1alpha1/     Environment, Workspace, and WorkspaceExec APIs
 internal/controller/         reconciliation logic by API group
 internal/cli/rcctl/          rcctl command implementation
 internal/rckube/             in-Pod process supervisor

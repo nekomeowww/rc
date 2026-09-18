@@ -71,7 +71,7 @@ ARG LOBEHUB_CLI_VERSION=0.0.54
 LABEL org.opencontainers.image.source="https://github.com/nekomeowww/rc" \
     org.opencontainers.image.title="rc runner"
 
-# Preinstall Playwright Chromium dependencies because Workspace Agent Processes
+# Preinstall Playwright Chromium dependencies because Workspace processes
 # cannot elevate privileges to install system packages at runtime.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

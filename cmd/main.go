@@ -38,10 +38,10 @@ import (
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
-	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
 	"github.com/nekomeowww/rc/internal/controller"
 	repositoriescontroller "github.com/nekomeowww/rc/internal/controller/repositories"
 	workspacescontroller "github.com/nekomeowww/rc/internal/controller/workspaces"
+	processruntime "github.com/nekomeowww/rc/internal/execution"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -201,7 +201,7 @@ func main() {
 	}
 	podExecutor, err := processruntime.NewKubernetesPodExecutor(mgr.GetConfig())
 	if err != nil {
-		setupLog.Error(err, "Failed to create Agent Process Pod executor")
+		setupLog.Error(err, "Failed to create process Pod executor")
 		os.Exit(1)
 	}
 	processRuntime := processruntime.NewKubeRuntime(podExecutor)
@@ -268,12 +268,12 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "workspaces-workspace-retention")
 		os.Exit(1)
 	}
-	if err := (&workspacescontroller.AgentProcessReconciler{
+	if err := (&workspacescontroller.WorkspaceExecReconciler{
 		Client:  mgr.GetClient(),
 		Scheme:  mgr.GetScheme(),
 		Runtime: processRuntime,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "workspaces-agentprocess")
+		setupLog.Error(err, "Failed to create controller", "controller", "workspaces-workspaceexec")
 		os.Exit(1)
 	}
 	if err := (&repositoriescontroller.WorktreeExecReconciler{

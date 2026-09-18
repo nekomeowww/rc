@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
+	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/windows"

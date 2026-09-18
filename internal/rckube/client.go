@@ -25,7 +25,7 @@ import (
 	"io"
 	"net"
 
-	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
+	processruntime "github.com/nekomeowww/rc/internal/execution"
 )
 
 // Client talks to one rc-kube local endpoint.

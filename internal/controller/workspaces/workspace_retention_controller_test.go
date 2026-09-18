@@ -49,13 +49,13 @@ func TestTemporaryWorkspaceDeletionDoesNotDependOnRuntimeTopology(t *testing.T) 
 			},
 		},
 	}
-	process := &workspacesv1alpha1.AgentProcess{
+	process := &workspacesv1alpha1.WorkspaceExec{
 		ObjectMeta: metav1.ObjectMeta{Name: "finished", Namespace: workspace.Namespace},
-		Spec: workspacesv1alpha1.AgentProcessSpec{
-			TargetRef: workspacesv1alpha1.AgentProcessTargetReference{Kind: workspacesv1alpha1.AgentProcessTargetWorkspace, Name: workspace.Name},
+		Spec: workspacesv1alpha1.WorkspaceExecSpec{
+			TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: workspace.Name},
 			Command:   []string{testTrueValue},
 		},
-		Status: workspacesv1alpha1.AgentProcessStatus{Phase: workspacesv1alpha1.AgentProcessPhaseSucceeded, CompletedAt: &completedAt},
+		Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, CompletedAt: &completedAt},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, process).WithObjects(workspace, process).Build()
 	reconciler := &WorkspaceRetentionReconciler{Client: kubeClient}
@@ -81,13 +81,13 @@ func TestTemporaryWorkspaceWaitsDuringTerminalGracePeriod(t *testing.T) {
 			RetentionPolicy: workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit,
 		},
 	}
-	process := &workspacesv1alpha1.AgentProcess{
+	process := &workspacesv1alpha1.WorkspaceExec{
 		ObjectMeta: metav1.ObjectMeta{Name: "finished", Namespace: workspace.Namespace},
-		Spec: workspacesv1alpha1.AgentProcessSpec{
-			TargetRef: workspacesv1alpha1.AgentProcessTargetReference{Kind: workspacesv1alpha1.AgentProcessTargetWorkspace, Name: workspace.Name},
+		Spec: workspacesv1alpha1.WorkspaceExecSpec{
+			TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: workspace.Name},
 			Command:   []string{testTrueValue},
 		},
-		Status: workspacesv1alpha1.AgentProcessStatus{Phase: workspacesv1alpha1.AgentProcessPhaseSucceeded, CompletedAt: &completedAt},
+		Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, CompletedAt: &completedAt},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, process).WithObjects(workspace, process).Build()
 	reconciler := &WorkspaceRetentionReconciler{Client: kubeClient}
@@ -100,7 +100,7 @@ func TestTemporaryWorkspaceWaitsDuringTerminalGracePeriod(t *testing.T) {
 	assertions.Positive(result.RequeueAfter, "schedule cleanup after the terminal grace period")
 }
 
-func TestAbandonedTemporaryWorkspaceDeletesWithoutAgentProcess(t *testing.T) {
+func TestAbandonedTemporaryWorkspaceDeletesWithoutWorkspaceExec(t *testing.T) {
 	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
@@ -123,10 +123,10 @@ func TestAbandonedTemporaryWorkspaceDeletesWithoutAgentProcess(t *testing.T) {
 	requirements.NoError(err, "reconcile abandoned temporary Workspace")
 	persisted := new(workspacesv1alpha1.Workspace)
 	requirements.NoError(kubeClient.Get(ctx, client.ObjectKeyFromObject(workspace), persisted), "get deleting abandoned Workspace")
-	assertions.False(persisted.DeletionTimestamp.IsZero(), "request deletion without an AgentProcess")
+	assertions.False(persisted.DeletionTimestamp.IsZero(), "request deletion without an WorkspaceExec")
 }
 
-func TestNewTemporaryWorkspaceWaitsForAgentProcessCreation(t *testing.T) {
+func TestNewTemporaryWorkspaceWaitsForWorkspaceExecCreation(t *testing.T) {
 	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
@@ -149,6 +149,6 @@ func TestNewTemporaryWorkspaceWaitsForAgentProcessCreation(t *testing.T) {
 	requirements.NoError(err, "reconcile new temporary Workspace")
 	persisted := new(workspacesv1alpha1.Workspace)
 	requirements.NoError(kubeClient.Get(ctx, client.ObjectKeyFromObject(workspace), persisted), "get retained starting Workspace")
-	assertions.True(persisted.DeletionTimestamp.IsZero(), "retain Workspace while its AgentProcess is being created")
+	assertions.True(persisted.DeletionTimestamp.IsZero(), "retain Workspace while its WorkspaceExec is being created")
 	assertions.Positive(result.RequeueAfter, "schedule abandoned Workspace collection")
 }

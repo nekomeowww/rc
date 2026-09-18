@@ -37,7 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
-	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
+	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/rcplatform"
 )
 
@@ -45,7 +45,7 @@ const WorkspaceHomePath = "/home/agent"
 
 type ProcessStartRequest struct {
 	Namespace        string
-	Target           workspacesv1alpha1.AgentProcessTargetReference
+	Target           workspacesv1alpha1.WorkspaceExecTargetReference
 	Command          []string
 	WorkingDirectory string
 	TTY              bool
@@ -69,7 +69,7 @@ type ProcessExitError struct {
 }
 
 func (err *ProcessExitError) Error() string {
-	return fmt.Sprintf("AgentProcess %s exited with status %d", err.Process, err.Code)
+	return fmt.Sprintf("WorkspaceExec %s exited with status %d", err.Process, err.Code)
 }
 
 func (err *ProcessExitError) ExitCode() int {
@@ -78,22 +78,22 @@ func (err *ProcessExitError) ExitCode() int {
 
 type ProcessTerminationError struct {
 	Process string
-	Phase   workspacesv1alpha1.AgentProcessPhase
+	Phase   workspacesv1alpha1.WorkspaceExecPhase
 	Reason  string
 }
 
 func (err *ProcessTerminationError) Error() string {
 	if err.Reason != "" {
-		return fmt.Sprintf("AgentProcess %s ended in phase %s: %s", err.Process, err.Phase, err.Reason)
+		return fmt.Sprintf("WorkspaceExec %s ended in phase %s: %s", err.Process, err.Phase, err.Reason)
 	}
-	return fmt.Sprintf("AgentProcess %s ended in phase %s", err.Process, err.Phase)
+	return fmt.Sprintf("WorkspaceExec %s ended in phase %s", err.Process, err.Phase)
 }
 
 func (err *ProcessTerminationError) ExitCode() int { return 1 }
 
 // ResultError translates every non-success terminal state into a CLI error.
-func ResultError(process *workspacesv1alpha1.AgentProcess) error {
-	if process.Status.Phase == workspacesv1alpha1.AgentProcessPhaseSucceeded {
+func ResultError(process *workspacesv1alpha1.WorkspaceExec) error {
+	if process.Status.Phase == workspacesv1alpha1.WorkspaceExecPhaseSucceeded {
 		return nil
 	}
 	if process.Status.ExitCode != nil && *process.Status.ExitCode != 0 {
@@ -102,7 +102,7 @@ func ResultError(process *workspacesv1alpha1.AgentProcess) error {
 	return &ProcessTerminationError{Process: process.Name, Phase: process.Status.Phase, Reason: process.Status.TerminationReason}
 }
 
-func (processes *ProcessClient) Start(ctx context.Context, request ProcessStartRequest) (*workspacesv1alpha1.AgentProcess, error) {
+func (processes *ProcessClient) Start(ctx context.Context, request ProcessStartRequest) (*workspacesv1alpha1.WorkspaceExec, error) {
 	if len(request.Command) == 0 {
 		return nil, fmt.Errorf("command is required")
 	}
@@ -131,12 +131,12 @@ func (processes *ProcessClient) Start(ctx context.Context, request ProcessStartR
 			variables = append(variables, workspacesv1alpha1.ProcessEnvironmentVariable{Name: variable, Key: variable})
 		}
 	}
-	process := &workspacesv1alpha1.AgentProcess{
+	process := &workspacesv1alpha1.WorkspaceExec{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: request.Namespace},
-		Spec: workspacesv1alpha1.AgentProcessSpec{
+		Spec: workspacesv1alpha1.WorkspaceExecSpec{
 			TargetRef: request.Target, Command: append([]string(nil), request.Command...),
 			WorkingDirectory: request.WorkingDirectory, TTY: request.TTY,
-			DesiredState: workspacesv1alpha1.AgentProcessDesiredStateRunning,
+			DesiredState: workspacesv1alpha1.WorkspaceExecDesiredStateRunning,
 			AgentType:    request.AgentType, Env: variables,
 		},
 	}
@@ -154,10 +154,10 @@ func (processes *ProcessClient) Start(ctx context.Context, request ProcessStartR
 		return nil, err
 	}
 	if err := controllerutil.SetControllerReference(owner, process, processes.Kube.Scheme()); err != nil {
-		return nil, fmt.Errorf("set process target owner on AgentProcess: %w", err)
+		return nil, fmt.Errorf("set process target owner on WorkspaceExec: %w", err)
 	}
 	if err := processes.Kube.Create(ctx, process); err != nil {
-		return nil, fmt.Errorf("create AgentProcess: %w", err)
+		return nil, fmt.Errorf("create WorkspaceExec: %w", err)
 	}
 	if envSecretName != "" {
 		data := make(map[string][]byte, len(request.Environment))
@@ -170,39 +170,39 @@ func (processes *ProcessClient) Start(ctx context.Context, request ProcessStartR
 			Data:       data,
 		}
 		if err := controllerutil.SetControllerReference(process, secret, processes.Kube.Scheme()); err != nil {
-			return nil, fmt.Errorf("set AgentProcess owner on environment Secret: %w", err)
+			return nil, fmt.Errorf("set WorkspaceExec owner on environment Secret: %w", err)
 		}
 		if err := processes.Kube.Create(ctx, secret); err != nil {
-			return nil, fmt.Errorf("create AgentProcess environment Secret: %w", err)
+			return nil, fmt.Errorf("create WorkspaceExec environment Secret: %w", err)
 		}
 	}
 
 	return process, nil
 }
 
-func (processes *ProcessClient) processOwner(ctx context.Context, namespace string, target workspacesv1alpha1.AgentProcessTargetReference) (client.Object, error) {
+func (processes *ProcessClient) processOwner(ctx context.Context, namespace string, target workspacesv1alpha1.WorkspaceExecTargetReference) (client.Object, error) {
 	key := client.ObjectKey{Name: target.Name, Namespace: namespace}
 	switch target.Kind {
-	case workspacesv1alpha1.AgentProcessTargetWorkspace:
+	case workspacesv1alpha1.WorkspaceExecTargetWorkspace:
 		workspace := new(workspacesv1alpha1.Workspace)
 		if err := processes.Kube.Get(ctx, key, workspace); err != nil {
-			return nil, fmt.Errorf("get AgentProcess Workspace owner: %w", err)
+			return nil, fmt.Errorf("get WorkspaceExec Workspace owner: %w", err)
 		}
 		return workspace, nil
-	case workspacesv1alpha1.AgentProcessTargetWorkspaceEnvironment:
+	case workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment:
 		environment := new(workspacesv1alpha1.WorkspaceEnvironment)
 		if err := processes.Kube.Get(ctx, key, environment); err != nil {
-			return nil, fmt.Errorf("get AgentProcess WorkspaceEnvironment owner: %w", err)
+			return nil, fmt.Errorf("get WorkspaceExec WorkspaceEnvironment owner: %w", err)
 		}
 		return environment, nil
 	default:
-		return nil, fmt.Errorf("unsupported AgentProcess target kind %s", target.Kind)
+		return nil, fmt.Errorf("unsupported WorkspaceExec target kind %s", target.Kind)
 	}
 }
 
-func (processes *ProcessClient) WaitUntilAttachable(ctx context.Context, process *workspacesv1alpha1.AgentProcess) (*workspacesv1alpha1.AgentProcess, error) {
-	return processes.wait(ctx, process, func(current *workspacesv1alpha1.AgentProcess) (bool, error) {
-		if current.Status.Phase == workspacesv1alpha1.AgentProcessPhaseRunning {
+func (processes *ProcessClient) WaitUntilAttachable(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) (*workspacesv1alpha1.WorkspaceExec, error) {
+	return processes.wait(ctx, process, func(current *workspacesv1alpha1.WorkspaceExec) (bool, error) {
+		if current.Status.Phase == workspacesv1alpha1.WorkspaceExecPhaseRunning {
 			return true, nil
 		}
 		if processPhaseTerminal(current.Status.Phase) {
@@ -212,18 +212,18 @@ func (processes *ProcessClient) WaitUntilAttachable(ctx context.Context, process
 	})
 }
 
-func (processes *ProcessClient) WaitUntilTerminal(ctx context.Context, process *workspacesv1alpha1.AgentProcess) (*workspacesv1alpha1.AgentProcess, error) {
-	return processes.wait(ctx, process, func(current *workspacesv1alpha1.AgentProcess) (bool, error) {
+func (processes *ProcessClient) WaitUntilTerminal(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) (*workspacesv1alpha1.WorkspaceExec, error) {
+	return processes.wait(ctx, process, func(current *workspacesv1alpha1.WorkspaceExec) (bool, error) {
 		return processPhaseTerminal(current.Status.Phase), nil
 	})
 }
 
-func (processes *ProcessClient) wait(ctx context.Context, process *workspacesv1alpha1.AgentProcess, done func(*workspacesv1alpha1.AgentProcess) (bool, error)) (*workspacesv1alpha1.AgentProcess, error) {
-	var result *workspacesv1alpha1.AgentProcess
+func (processes *ProcessClient) wait(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec, done func(*workspacesv1alpha1.WorkspaceExec) (bool, error)) (*workspacesv1alpha1.WorkspaceExec, error) {
+	var result *workspacesv1alpha1.WorkspaceExec
 	err := wait.PollUntilContextCancel(ctx, 300*time.Millisecond, true, func(ctx context.Context) (bool, error) {
-		current := new(workspacesv1alpha1.AgentProcess)
+		current := new(workspacesv1alpha1.WorkspaceExec)
 		if err := processes.Kube.Get(ctx, client.ObjectKeyFromObject(process), current); err != nil {
-			return false, fmt.Errorf("get AgentProcess: %w", err)
+			return false, fmt.Errorf("get WorkspaceExec: %w", err)
 		}
 		complete, err := done(current)
 		if complete {
@@ -238,36 +238,36 @@ func (processes *ProcessClient) wait(ctx context.Context, process *workspacesv1a
 	return result, nil
 }
 
-func (processes *ProcessClient) Resolve(ctx context.Context, namespace string, idOrPrefix string) (*workspacesv1alpha1.AgentProcess, error) {
-	exact := new(workspacesv1alpha1.AgentProcess)
+func (processes *ProcessClient) Resolve(ctx context.Context, namespace string, idOrPrefix string) (*workspacesv1alpha1.WorkspaceExec, error) {
+	exact := new(workspacesv1alpha1.WorkspaceExec)
 	if err := processes.Kube.Get(ctx, types.NamespacedName{Name: idOrPrefix, Namespace: namespace}, exact); err == nil {
 		return exact, nil
 	} else if !apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("get AgentProcess %q: %w", idOrPrefix, err)
+		return nil, fmt.Errorf("get WorkspaceExec %q: %w", idOrPrefix, err)
 	}
-	list := new(workspacesv1alpha1.AgentProcessList)
+	list := new(workspacesv1alpha1.WorkspaceExecList)
 	if err := processes.Kube.List(ctx, list, client.InNamespace(namespace)); err != nil {
-		return nil, fmt.Errorf("list AgentProcesses: %w", err)
+		return nil, fmt.Errorf("list WorkspaceExecs: %w", err)
 	}
-	matches := make([]*workspacesv1alpha1.AgentProcess, 0, 1)
+	matches := make([]*workspacesv1alpha1.WorkspaceExec, 0, 1)
 	for index := range list.Items {
 		if strings.HasPrefix(list.Items[index].Name, idOrPrefix) {
 			matches = append(matches, &list.Items[index])
 		}
 	}
 	if len(matches) == 0 {
-		return nil, fmt.Errorf("agent process %q was not found in namespace %q", idOrPrefix, namespace)
+		return nil, fmt.Errorf("process %q was not found in namespace %q", idOrPrefix, namespace)
 	}
 	if len(matches) > 1 {
-		return nil, fmt.Errorf("agent process prefix %q is ambiguous", idOrPrefix)
+		return nil, fmt.Errorf("process prefix %q is ambiguous", idOrPrefix)
 	}
 
 	return matches[0], nil
 }
 
-func (processes *ProcessClient) Attach(ctx context.Context, process *workspacesv1alpha1.AgentProcess, input io.Reader, output io.Writer) error {
+func (processes *ProcessClient) Attach(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec, input io.Reader, output io.Writer) error {
 	if process.Status.RuntimePodName == "" {
-		return fmt.Errorf("agent process %s has no runtime Pod", process.Name)
+		return fmt.Errorf("process %s has no runtime Pod", process.Name)
 	}
 	pod := new(corev1.Pod)
 	if err := processes.Kube.Get(ctx, client.ObjectKey{Namespace: process.Namespace, Name: process.Status.RuntimePodName}, pod); err != nil {
@@ -291,7 +291,7 @@ func (processes *ProcessClient) Attach(ctx context.Context, process *workspacesv
 	return processes.Runtime.Attach(ctx, target, process.Name, clientID, input, output, process.Spec.TTY, rows, columns)
 }
 
-func (processes *ProcessClient) prepareLocalTerminal(ctx context.Context, target processruntime.Target, process *workspacesv1alpha1.AgentProcess, clientID string, input io.Reader) (uint16, uint16, func(), error) {
+func (processes *ProcessClient) prepareLocalTerminal(ctx context.Context, target processruntime.Target, process *workspacesv1alpha1.WorkspaceExec, clientID string, input io.Reader) (uint16, uint16, func(), error) {
 	inputFile, ok := input.(*os.File)
 	if !process.Spec.TTY || !ok || !term.IsTerminal(int(inputFile.Fd())) {
 		return 0, 0, func() {}, nil
@@ -336,20 +336,20 @@ func (processes *ProcessClient) prepareLocalTerminal(ctx context.Context, target
 	}, nil
 }
 
-func (processes *ProcessClient) Stop(ctx context.Context, process *workspacesv1alpha1.AgentProcess) error {
-	current := new(workspacesv1alpha1.AgentProcess)
+func (processes *ProcessClient) Stop(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) error {
+	current := new(workspacesv1alpha1.WorkspaceExec)
 	if err := processes.Kube.Get(ctx, client.ObjectKeyFromObject(process), current); err != nil {
-		return fmt.Errorf("re-fetch AgentProcess before stop: %w", err)
+		return fmt.Errorf("re-fetch WorkspaceExec before stop: %w", err)
 	}
-	current.Spec.DesiredState = workspacesv1alpha1.AgentProcessDesiredStateStopped
+	current.Spec.DesiredState = workspacesv1alpha1.WorkspaceExecDesiredStateStopped
 	if err := processes.Kube.Update(ctx, current); err != nil {
-		return fmt.Errorf("request AgentProcess stop: %w", err)
+		return fmt.Errorf("request WorkspaceExec stop: %w", err)
 	}
 
 	return nil
 }
 
-func (processes *ProcessClient) Logs(ctx context.Context, process *workspacesv1alpha1.AgentProcess, output io.Writer) error {
+func (processes *ProcessClient) Logs(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec, output io.Writer) error {
 	if process.Status.RuntimePodName != "" {
 		pod := new(corev1.Pod)
 		key := types.NamespacedName{Name: process.Status.RuntimePodName, Namespace: process.Namespace}
@@ -381,13 +381,13 @@ func (processes *ProcessClient) Logs(ctx context.Context, process *workspacesv1a
 		Image:    volume.image, HomeClaim: volume.claim, ProcessID: process.Name,
 	})
 	if err != nil {
-		return fmt.Errorf("build AgentProcess log helper Pod: %w", err)
+		return fmt.Errorf("build WorkspaceExec log helper Pod: %w", err)
 	}
 	if err := controllerutil.SetControllerReference(process, helper, processes.Kube.Scheme()); err != nil {
-		return fmt.Errorf("set AgentProcess owner on log helper Pod: %w", err)
+		return fmt.Errorf("set WorkspaceExec owner on log helper Pod: %w", err)
 	}
 	if err := processes.Kube.Create(ctx, helper); err != nil {
-		return fmt.Errorf("create AgentProcess log helper Pod: %w", err)
+		return fmt.Errorf("create WorkspaceExec log helper Pod: %w", err)
 	}
 	defer func() { _ = processes.Kube.Delete(context.Background(), helper) }()
 	if err := wait.PollUntilContextCancel(ctx, 300*time.Millisecond, true, func(ctx context.Context) (bool, error) {
@@ -397,7 +397,7 @@ func (processes *ProcessClient) Logs(ctx context.Context, process *workspacesv1a
 		}
 		return current.Status.Phase == corev1.PodRunning || current.Status.Phase == corev1.PodSucceeded || current.Status.Phase == corev1.PodFailed, nil
 	}); err != nil {
-		return fmt.Errorf("wait for AgentProcess log helper Pod: %w", err)
+		return fmt.Errorf("wait for WorkspaceExec log helper Pod: %w", err)
 	}
 	clientset, err := kubernetes.NewForConfig(processes.Config)
 	if err != nil {
@@ -405,7 +405,7 @@ func (processes *ProcessClient) Logs(ctx context.Context, process *workspacesv1a
 	}
 	stream, err := clientset.CoreV1().Pods(process.Namespace).GetLogs(helper.Name, &corev1.PodLogOptions{Container: "reader"}).Stream(ctx)
 	if err != nil {
-		return fmt.Errorf("stream AgentProcess log helper output: %w", err)
+		return fmt.Errorf("stream WorkspaceExec log helper output: %w", err)
 	}
 	defer func() { _ = stream.Close() }()
 	_, err = io.Copy(output, stream)
@@ -418,27 +418,27 @@ type transcriptVolume struct {
 	runtime      rcplatform.Runtime
 }
 
-func (processes *ProcessClient) logVolume(ctx context.Context, process *workspacesv1alpha1.AgentProcess) (transcriptVolume, error) {
+func (processes *ProcessClient) logVolume(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) (transcriptVolume, error) {
 	switch process.Spec.TargetRef.Kind {
-	case workspacesv1alpha1.AgentProcessTargetWorkspace:
+	case workspacesv1alpha1.WorkspaceExecTargetWorkspace:
 		workspace := new(workspacesv1alpha1.Workspace)
 		key := types.NamespacedName{Name: process.Spec.TargetRef.Name, Namespace: process.Namespace}
 		if err := processes.Kube.Get(ctx, key, workspace); err != nil {
-			return transcriptVolume{}, fmt.Errorf("get AgentProcess Workspace for logs: %w", err)
+			return transcriptVolume{}, fmt.Errorf("get WorkspaceExec Workspace for logs: %w", err)
 		}
 		platform, err := rcplatform.Resolve(rcplatform.Target{OS: workspace.Spec.OS, Placement: rcplatform.Placement{
 			NodeSelector: workspace.Spec.NodeSelector, Tolerations: workspace.Spec.Tolerations,
 			Affinity: workspace.Spec.Affinity, RuntimeClassName: workspace.Spec.RuntimeClassName,
 		}})
 		if err != nil {
-			return transcriptVolume{}, fmt.Errorf("resolve AgentProcess Workspace log platform: %w", err)
+			return transcriptVolume{}, fmt.Errorf("resolve WorkspaceExec Workspace log platform: %w", err)
 		}
 		return transcriptVolume{claim: workspace.Status.HomeVolumeClaimName, image: workspace.Status.RuntimeImage, runtime: platform}, nil
-	case workspacesv1alpha1.AgentProcessTargetWorkspaceEnvironment:
+	case workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment:
 		environment := new(workspacesv1alpha1.WorkspaceEnvironment)
 		key := types.NamespacedName{Name: process.Spec.TargetRef.Name, Namespace: process.Namespace}
 		if err := processes.Kube.Get(ctx, key, environment); err != nil {
-			return transcriptVolume{}, fmt.Errorf("get AgentProcess WorkspaceEnvironment for logs: %w", err)
+			return transcriptVolume{}, fmt.Errorf("get WorkspaceExec WorkspaceEnvironment for logs: %w", err)
 		}
 		claimName := environment.Status.DraftVolumeClaimName
 		if claimName == "" {
@@ -448,18 +448,18 @@ func (processes *ProcessClient) logVolume(ctx context.Context, process *workspac
 			NodeSelector: environment.Spec.NodeSelector, Tolerations: environment.Spec.Tolerations,
 		}})
 		if err != nil {
-			return transcriptVolume{}, fmt.Errorf("resolve AgentProcess WorkspaceEnvironment log platform: %w", err)
+			return transcriptVolume{}, fmt.Errorf("resolve WorkspaceExec WorkspaceEnvironment log platform: %w", err)
 		}
 		return transcriptVolume{claim: claimName, image: environment.Spec.Image, runtime: platform}, nil
 	default:
-		return transcriptVolume{}, fmt.Errorf("agent process %s has unsupported target kind %s", process.Name, process.Spec.TargetRef.Kind)
+		return transcriptVolume{}, fmt.Errorf("process %s has unsupported target kind %s", process.Name, process.Spec.TargetRef.Kind)
 	}
 }
 
-func processPhaseTerminal(phase workspacesv1alpha1.AgentProcessPhase) bool {
+func processPhaseTerminal(phase workspacesv1alpha1.WorkspaceExecPhase) bool {
 	switch phase {
-	case workspacesv1alpha1.AgentProcessPhaseSucceeded, workspacesv1alpha1.AgentProcessPhaseFailed,
-		workspacesv1alpha1.AgentProcessPhaseStopped, workspacesv1alpha1.AgentProcessPhaseLost:
+	case workspacesv1alpha1.WorkspaceExecPhaseSucceeded, workspacesv1alpha1.WorkspaceExecPhaseFailed,
+		workspacesv1alpha1.WorkspaceExecPhaseStopped, workspacesv1alpha1.WorkspaceExecPhaseLost:
 		return true
 	default:
 		return false

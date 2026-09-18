@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package agents
+package executions
 
 import (
 	"context"
@@ -36,26 +36,26 @@ import (
 
 const testAgentCommand = "codex"
 const testTaskArgument = "task"
-const testWorkspaceFlag = "--workspace"
+const testNameFlag = "--name"
 const testDevelopmentName = "dev"
 const testEnvironmentValue = "value"
 
 func TestRunCommandStopsParsingRcctlFlagsAtCommand(t *testing.T) {
 	command := newRunCommand(kubeconfig.NewFlags(), true)
-	require.NoError(t, command.ParseFlags([]string{testWorkspaceFlag, testDevelopmentName, testAgentCommand, "--dangerously-bypass-approvals-and-sandbox", testTaskArgument}))
-	require.Equal(t, testDevelopmentName, command.Flag("workspace").Value.String())
+	require.NoError(t, command.ParseFlags([]string{testNameFlag, testDevelopmentName, testAgentCommand, "--dangerously-bypass-approvals-and-sandbox", testTaskArgument}))
+	require.Equal(t, testDevelopmentName, command.Flag("name").Value.String())
 	require.Equal(t, []string{testAgentCommand, "--dangerously-bypass-approvals-and-sandbox", testTaskArgument}, command.Flags().Args())
 }
 
 func TestRunCommandAcceptsOptionalSeparator(t *testing.T) {
 	command := newRunCommand(kubeconfig.NewFlags(), true)
-	require.NoError(t, command.ParseFlags([]string{testWorkspaceFlag, testDevelopmentName, "--", testAgentCommand, testTaskArgument}))
+	require.NoError(t, command.ParseFlags([]string{testNameFlag, testDevelopmentName, "--", testAgentCommand, testTaskArgument}))
 	require.Equal(t, []string{testAgentCommand, testTaskArgument}, command.Flags().Args())
 }
 
 func TestRunCommandAcceptsDetachFlag(t *testing.T) {
 	command := newRunCommand(kubeconfig.NewFlags(), true)
-	require.NoError(t, command.ParseFlags([]string{"-d", testWorkspaceFlag, testDevelopmentName, "--", testAgentCommand, testTaskArgument}))
+	require.NoError(t, command.ParseFlags([]string{"-d", testNameFlag, testDevelopmentName, "--", testAgentCommand, testTaskArgument}))
 
 	detach := command.Flag("detach")
 	require.NotNil(t, detach)
@@ -63,10 +63,10 @@ func TestRunCommandAcceptsDetachFlag(t *testing.T) {
 	assert.Equal(t, "true", detach.Value.String())
 }
 
-func TestExecCommandDoesNotAcceptDetachFlag(t *testing.T) {
+func TestExecCommandAcceptsDetachFlag(t *testing.T) {
 	command := newRunCommand(kubeconfig.NewFlags(), false)
-	err := command.ParseFlags([]string{"--detach", "--", testAgentCommand, testTaskArgument})
-	require.Error(t, err)
+	err := command.ParseFlags([]string{"--detach", testDevelopmentName, "--", testAgentCommand, testTaskArgument})
+	require.NoError(t, err)
 }
 
 func TestRunAndExecCommandsExposeNPMRegistry(t *testing.T) {
@@ -91,8 +91,8 @@ func TestNPMRegistryRoutingMatchesWorkspaceLifetime(t *testing.T) {
 		routeNPMRegistryEnvironment(false, request, processEnvironment, registry)
 
 		assert.Empty(t, request.Env, "do not mutate an existing Workspace")
-		assert.Equal(t, "https://registry.example.com/", processEnvironment[workspaceservice.NPMRegistryEnvironmentName], "set npm for this AgentProcess")
-		assert.Equal(t, "https://registry.example.com", processEnvironment[workspaceservice.CorepackRegistryEnvironmentName], "set Corepack for this AgentProcess")
+		assert.Equal(t, "https://registry.example.com/", processEnvironment[workspaceservice.NPMRegistryEnvironmentName], "set npm for this WorkspaceExec")
+		assert.Equal(t, "https://registry.example.com", processEnvironment[workspaceservice.CorepackRegistryEnvironmentName], "set Corepack for this WorkspaceExec")
 	})
 	t.Run("TemporaryWorkspace", func(t *testing.T) {
 		request := new(workspaceservice.RunRequest)
@@ -124,63 +124,82 @@ func TestNPMRegistryRoutingWithoutFlagLeavesEnvironmentUnchanged(t *testing.T) {
 	assert.Equal(t, map[string]string{workspaceservice.NPMRegistryEnvironmentName: "caller-value"}, processEnvironment, "preserve process environment when the flag is absent")
 }
 
-func TestTemporaryFlagPromisesAutomaticWorkspaceCleanup(t *testing.T) {
+func TestRunCleanupIsExplicit(t *testing.T) {
 	t.Parallel()
-	command := newRunCommand(kubeconfig.NewFlags(), false)
-	temporary := command.Flag("temporary")
-	require.NotNil(t, temporary, "exec exposes temporary Workspace mode")
-	assert.Contains(t, temporary.Usage, "delete", "document automatic cleanup as part of the flag contract")
-	assert.Contains(t, temporary.Usage, "AgentProcess terminates", "define the cleanup point")
+	command := newRunCommand(kubeconfig.NewFlags(), true)
+	remove := command.Flag("rm")
+	require.NotNil(t, remove)
+	assert.Equal(t, "false", remove.DefValue, "retain a new Workspace by default")
+	assert.Nil(t, command.Flag("temporary"))
+	assert.Nil(t, command.Flag("workspace"), "run always creates a new Workspace")
 }
 
-func TestTemporaryWorkspaceConfigurationRequiresTemporaryFlag(t *testing.T) {
+func TestExecRejectsWorkspaceCreationFlags(t *testing.T) {
 	t.Parallel()
-	command := newRunCommand(kubeconfig.NewFlags(), false)
-	command.SetArgs([]string{"--image", "workspace:test", testAgentCommand})
-
-	err := command.Execute()
-
-	require.EqualError(t, err, "--image requires --temporary")
+	for _, flag := range []string{"image", "size", "storage-class", "rm", "name", "temporary"} {
+		t.Run(flag, func(t *testing.T) {
+			t.Parallel()
+			command := newRunCommand(kubeconfig.NewFlags(), false)
+			err := command.ParseFlags([]string{"--" + flag, "value"})
+			require.Error(t, err, "exec cannot provision a Workspace")
+		})
+	}
 }
 
-func TestAgentListItemsFiltersAndSortsOldestFirst(t *testing.T) {
+func TestExecPreservesCommandArguments(t *testing.T) {
+	t.Parallel()
+	command := newRunCommand(kubeconfig.NewFlags(), false)
+	require.NoError(t, command.ParseFlags([]string{"-it", testDevelopmentName, "--", "sh", "-c", "echo hello"}))
+	assert.Equal(t, []string{testDevelopmentName, "--", "sh", "-c", "echo hello"}, command.Flags().Args())
+	assert.Equal(t, "true", command.Flag("interactive").Value.String())
+	assert.Equal(t, "true", command.Flag("tty").Value.String())
+}
+
+func TestExecRejectsMissingCommandBeforeConnecting(t *testing.T) {
+	t.Parallel()
+	command := newRunCommand(kubeconfig.NewFlags(), false)
+	command.SetArgs([]string{testDevelopmentName, "--"})
+	require.EqualError(t, command.Execute(), "exec requires WORKSPACE and COMMAND")
+}
+
+func TestProcessListItemsFiltersAndSortsOldestFirst(t *testing.T) {
 	t.Parallel()
 	oldest := metav1.NewTime(time.Date(2026, time.September, 1, 1, 0, 0, 0, time.UTC))
 	newest := metav1.NewTime(oldest.Add(2 * time.Minute))
-	processes := []workspacesv1alpha1.AgentProcess{
+	processes := []workspacesv1alpha1.WorkspaceExec{
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "codex-new", Namespace: testDevelopmentName, CreationTimestamp: newest},
-			Spec: workspacesv1alpha1.AgentProcessSpec{
-				TargetRef: workspacesv1alpha1.AgentProcessTargetReference{Name: "other"}, AgentType: testAgentCommand,
+			Spec: workspacesv1alpha1.WorkspaceExecSpec{
+				TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Name: "other"}, AgentType: testAgentCommand,
 			},
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "process-old", Namespace: testDevelopmentName, CreationTimestamp: oldest},
-			Spec: workspacesv1alpha1.AgentProcessSpec{
-				TargetRef: workspacesv1alpha1.AgentProcessTargetReference{Name: testDevelopmentName}, AgentType: testAgentCommand,
+			Spec: workspacesv1alpha1.WorkspaceExecSpec{
+				TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Name: testDevelopmentName}, AgentType: testAgentCommand,
 			},
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "process-filtered", Namespace: testDevelopmentName, CreationTimestamp: oldest},
-			Spec: workspacesv1alpha1.AgentProcessSpec{
-				TargetRef: workspacesv1alpha1.AgentProcessTargetReference{Name: testDevelopmentName}, AgentType: "shell",
+			Spec: workspacesv1alpha1.WorkspaceExecSpec{
+				TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Name: testDevelopmentName}, AgentType: "shell",
 			},
 		},
 	}
 
-	items := agentListItems(processes, listOptions{agent: testAgentCommand})
+	items := processListItems(processes, listOptions{agent: testAgentCommand, all: true})
 
 	require.Len(t, items, 2, "retain only the selected agent type")
 	assert.Equal(t, "process-old", items[0].Name, "put the oldest process first despite its name prefix")
 	assert.Equal(t, "codex-new", items[1].Name, "put the newest process last")
 }
 
-func TestAgentListAndGetCommandsExposeOutputFormats(t *testing.T) {
+func TestProcessListAndGetCommandsExposeOutputFormats(t *testing.T) {
 	t.Parallel()
 	listCommand := newListCommand(kubeconfig.NewFlags())
-	getCommand := newGetCommand(kubeconfig.NewFlags())
+	getCommand := newInspectCommand(kubeconfig.NewFlags())
 
-	assert.Contains(t, listCommand.Aliases, "ls", "offer the conventional list alias")
+	assert.Equal(t, "ps", listCommand.Name())
 	require.NotNil(t, listCommand.Flag("output"), "list accepts an output format")
 	require.NotNil(t, getCommand.Flag("output"), "get accepts a structured output format")
 	require.NoError(t, getCommand.Args(getCommand, []string{"process-id"}), "get accepts exactly one process ID")
@@ -229,4 +248,31 @@ func TestSelectAgentCredentialsUsesExplicitCredentialForOrdinaryCommand(t *testi
 	assert.Equal(t, []string{testAgentCommand}, names, "grant the explicitly selected credential to the Workspace")
 	assert.Equal(t, testAgentCommand, selected, "attach the explicit credential to an ordinary process")
 	assert.Equal(t, string(configsv1alpha1.AgentTypeCodex), selectedType, "derive process configuration from the credential")
+}
+
+func TestProcessListFiltersPhaseAndWorkspace(t *testing.T) {
+	t.Parallel()
+	processes := []workspacesv1alpha1.WorkspaceExec{
+		{ObjectMeta: metav1.ObjectMeta{Name: "running"}, Spec: workspacesv1alpha1.WorkspaceExecSpec{TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: testDevelopmentName}}, Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseRunning}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "completed"}, Spec: workspacesv1alpha1.WorkspaceExecSpec{TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: testDevelopmentName}}, Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "environment"}, Spec: workspacesv1alpha1.WorkspaceExecSpec{TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment, Name: testDevelopmentName}}, Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseRunning}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "pending"}, Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhasePending}},
+	}
+	cases := map[string]struct {
+		options listOptions
+		want    []workspacesv1alpha1.WorkspaceExec
+	}{
+		"RunningAcrossTargets": {listOptions{}, []workspacesv1alpha1.WorkspaceExec{processes[2], processes[0]}},
+		"All":                  {listOptions{all: true}, []workspacesv1alpha1.WorkspaceExec{processes[1], processes[2], processes[3], processes[0]}},
+		"Workspace":            {listOptions{workspace: testDevelopmentName}, []workspacesv1alpha1.WorkspaceExec{processes[0]}},
+		"WorkspaceAll":         {listOptions{workspace: testDevelopmentName, all: true}, []workspacesv1alpha1.WorkspaceExec{processes[1], processes[0]}},
+		"ExplicitPhase":        {listOptions{phase: "succeeded"}, []workspacesv1alpha1.WorkspaceExec{processes[1]}},
+		"IDPrefix":             {listOptions{all: true, idPrefix: "pend"}, []workspacesv1alpha1.WorkspaceExec{processes[3]}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, processListItems(processes, tc.options))
+		})
+	}
 }

@@ -29,7 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
+	processruntime "github.com/nekomeowww/rc/internal/execution"
 )
 
 const (
@@ -146,7 +146,7 @@ func TestSupervisorRecordsMissingExecutableAsTerminalCommandFailure(t *testing.T
 	assertions.Equal(failed, duplicate, "do not retry a terminal command failure")
 	var transcript bytes.Buffer
 	requirements.NoError(supervisor.Logs(request.ID, &transcript), "read failed command transcript")
-	assertions.Contains(transcript.String(), "could not start", "make the failure visible through AgentProcess logs")
+	assertions.Contains(transcript.String(), "could not start", "make the failure visible through WorkspaceExec logs")
 }
 
 func TestSupervisorBoundsPersistentTranscript(t *testing.T) {

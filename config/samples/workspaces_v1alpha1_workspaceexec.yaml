@@ -1,10 +1,10 @@
 apiVersion: workspaces.rc.ayaka.io/v1alpha1
-kind: AgentProcess
+kind: WorkspaceExec
 metadata:
   labels:
     app.kubernetes.io/name: rc
     app.kubernetes.io/managed-by: kustomize
-  name: agentprocess-sample
+  name: workspaceexec-sample
 spec:
   targetRef:
     kind: Workspace

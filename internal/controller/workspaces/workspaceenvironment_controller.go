@@ -49,7 +49,7 @@ type WorkspaceEnvironmentReconciler struct {
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaceenvironments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaceenvironments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaceenvironments/finalizers,verbs=update
-// +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=agentprocesses,verbs=get;list;watch
+// +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaceexecs,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;delete
@@ -159,7 +159,7 @@ func (r *WorkspaceEnvironmentReconciler) reconcileEditorLifecycle(ctx context.Co
 			return ctrl.Result{}, true, err
 		}
 		if active {
-			return ctrl.Result{}, true, r.setEnvironmentDraftCondition(ctx, client.ObjectKeyFromObject(environment), "RuntimeChangeBlocked", "Environment editor runtime changed while Agent Processes are active")
+			return ctrl.Result{}, true, r.setEnvironmentDraftCondition(ctx, client.ObjectKeyFromObject(environment), "RuntimeChangeBlocked", "Environment editor runtime changed while processes are active")
 		}
 		if err := r.Delete(ctx, editor); err != nil {
 			return ctrl.Result{}, true, fmt.Errorf("replace Environment editor Pod: %w", err)
@@ -169,17 +169,17 @@ func (r *WorkspaceEnvironmentReconciler) reconcileEditorLifecycle(ctx context.Co
 	if environment.Spec.EditorIdleTimeout == nil || environment.Spec.EditorIdleTimeout.Duration == 0 {
 		return ctrl.Result{}, false, nil
 	}
-	processes := new(workspacesv1alpha1.AgentProcessList)
+	processes := new(workspacesv1alpha1.WorkspaceExecList)
 	if err := r.List(ctx, processes, client.InNamespace(environment.Namespace)); err != nil {
 		return ctrl.Result{}, true, fmt.Errorf("list Environment editor processes: %w", err)
 	}
 	var lastCompletion *metav1.Time
 	for index := range processes.Items {
 		process := &processes.Items[index]
-		if process.Spec.TargetRef.Kind != workspacesv1alpha1.AgentProcessTargetWorkspaceEnvironment || process.Spec.TargetRef.Name != environment.Name {
+		if process.Spec.TargetRef.Kind != workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment || process.Spec.TargetRef.Name != environment.Name {
 			continue
 		}
-		if !agentProcessTerminal(process.Status.Phase) {
+		if !executionTerminal(process.Status.Phase) {
 			return ctrl.Result{}, false, nil
 		}
 		if process.Status.CompletedAt != nil && (lastCompletion == nil || process.Status.CompletedAt.After(lastCompletion.Time)) {
@@ -201,13 +201,13 @@ func (r *WorkspaceEnvironmentReconciler) reconcileEditorLifecycle(ctx context.Co
 }
 
 func (r *WorkspaceEnvironmentReconciler) environmentHasActiveProcess(ctx context.Context, environment *workspacesv1alpha1.WorkspaceEnvironment) (bool, error) {
-	processes := new(workspacesv1alpha1.AgentProcessList)
+	processes := new(workspacesv1alpha1.WorkspaceExecList)
 	if err := r.List(ctx, processes, client.InNamespace(environment.Namespace)); err != nil {
 		return false, fmt.Errorf("list Environment editor processes: %w", err)
 	}
 	for index := range processes.Items {
 		process := &processes.Items[index]
-		if process.Spec.TargetRef.Kind == workspacesv1alpha1.AgentProcessTargetWorkspaceEnvironment && process.Spec.TargetRef.Name == environment.Name && !agentProcessTerminal(process.Status.Phase) {
+		if process.Spec.TargetRef.Kind == workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment && process.Spec.TargetRef.Name == environment.Name && !executionTerminal(process.Status.Phase) {
 			return true, nil
 		}
 	}
@@ -221,14 +221,14 @@ func (r *WorkspaceEnvironmentReconciler) reconcileEnvironmentCommit(ctx context.
 	if environment.Status.DraftVolumeClaimName == "" {
 		return true, r.setEnvironmentDraftCondition(ctx, client.ObjectKeyFromObject(environment), "NoDraft", "Environment has no draft to commit")
 	}
-	processes := new(workspacesv1alpha1.AgentProcessList)
+	processes := new(workspacesv1alpha1.WorkspaceExecList)
 	if err := r.List(ctx, processes, client.InNamespace(environment.Namespace)); err != nil {
-		return true, fmt.Errorf("list Environment draft Agent Processes: %w", err)
+		return true, fmt.Errorf("list Environment draft processes: %w", err)
 	}
 	for index := range processes.Items {
 		process := &processes.Items[index]
-		if process.Spec.TargetRef.Kind == workspacesv1alpha1.AgentProcessTargetWorkspaceEnvironment && process.Spec.TargetRef.Name == environment.Name && !agentProcessTerminal(process.Status.Phase) {
-			return true, r.setEnvironmentDraftCondition(ctx, client.ObjectKeyFromObject(environment), "ActiveProcesses", "Environment draft cannot commit while Agent Processes are active")
+		if process.Spec.TargetRef.Kind == workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment && process.Spec.TargetRef.Name == environment.Name && !executionTerminal(process.Status.Phase) {
+			return true, r.setEnvironmentDraftCondition(ctx, client.ObjectKeyFromObject(environment), "ActiveProcesses", "Environment draft cannot commit while processes are active")
 		}
 	}
 	if environment.Status.EditorPodName != "" {
@@ -422,14 +422,14 @@ func (r *WorkspaceEnvironmentReconciler) SetupWithManager(mgr ctrl.Manager) erro
 		For(&workspacesv1alpha1.WorkspaceEnvironment{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&corev1.Pod{}).
-		Watches(&workspacesv1alpha1.AgentProcess{}, handler.EnqueueRequestsFromMapFunc(environmentForProcess)).
+		Watches(&workspacesv1alpha1.WorkspaceExec{}, handler.EnqueueRequestsFromMapFunc(environmentForProcess)).
 		Named("workspaces-workspaceenvironment").
 		Complete(r)
 }
 
 func environmentForProcess(_ context.Context, object client.Object) []reconcile.Request {
-	process, ok := object.(*workspacesv1alpha1.AgentProcess)
-	if !ok || process.Spec.TargetRef.Kind != workspacesv1alpha1.AgentProcessTargetWorkspaceEnvironment {
+	process, ok := object.(*workspacesv1alpha1.WorkspaceExec)
+	if !ok || process.Spec.TargetRef.Kind != workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment {
 		return nil
 	}
 

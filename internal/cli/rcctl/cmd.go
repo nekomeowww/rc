@@ -22,7 +22,7 @@ func NewCommand() *cobra.Command {
 	root.AddGroup(&cobra.Group{ID: command.WorktreesGroup, Title: "Worktree Commands:"})
 	root.AddGroup(&cobra.Group{ID: command.EnvironmentsGroup, Title: "Environment Commands:"})
 	root.AddGroup(&cobra.Group{ID: command.WorkspacesGroup, Title: "Workspace Commands:"})
-	root.AddGroup(&cobra.Group{ID: command.AgentsGroup, Title: "Agent Process Commands:"})
+	root.AddGroup(&cobra.Group{ID: command.ExecutionsGroup, Title: "Execution Commands:"})
 	kubeconfigFlags.AddFlags(root.PersistentFlags())
 	commands.Register(root, kubeconfigFlags)
 	return root

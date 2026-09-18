@@ -276,7 +276,7 @@ func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 		},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(workspace, environment, worktree, &workspacesv1alpha1.AgentProcess{}, &corev1.PersistentVolumeClaim{}, &corev1.Pod{}).
+		WithStatusSubresource(workspace, environment, worktree, &workspacesv1alpha1.WorkspaceExec{}, &corev1.PersistentVolumeClaim{}, &corev1.Pod{}).
 		WithObjects(environment, worktree, workspace).
 		Build()
 	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme, RunnerImage: "ghcr.io/example/rc/runner:test"}
@@ -308,7 +308,7 @@ func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 	assertions.Equal([]string{runtimeContainerName, "serve"}, pod.Spec.Containers[0].Command, "run the supervisor")
 	assertions.Equal("rc-workspace", pod.Spec.ServiceAccountName, "inject default namespaced ServiceAccount")
 	assertions.Equal(workspaceRuntimePolicyVersion, pod.Annotations[workspaceRuntimePolicyAnnotation], "record the restricted runtime policy")
-	assertions.False(*pod.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation, "prevent Agent Processes from gaining root")
+	assertions.False(*pod.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation, "prevent processes from gaining root")
 	requirements.NotNil(pod.Spec.Containers[0].SecurityContext.Capabilities, "runtime container declares capabilities")
 	assertions.Equal([]corev1.Capability{"ALL"}, pod.Spec.Containers[0].SecurityContext.Capabilities.Drop, "drop every runtime capability")
 	assertions.Empty(pod.Spec.InitContainers, "normal Workspace does not inject sudoers")
@@ -324,7 +324,7 @@ func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 	requirements.NoError(kubeClient.Get(ctx, types.NamespacedName{Name: "rc-workspace", Namespace: workspace.Namespace}, serviceAccount), "get shared ServiceAccount")
 	role := new(rbacv1.Role)
 	requirements.NoError(kubeClient.Get(ctx, types.NamespacedName{Name: "rc-workspace", Namespace: workspace.Namespace}, role), "get shared Role")
-	assertions.Contains(role.Rules[0].Resources, "agentprocesses", "nested rcctl can manage process resources")
+	assertions.Contains(role.Rules[0].Resources, "workspaceexecs", "nested rcctl can manage process resources")
 	leases := new(coordinationv1.LeaseList)
 	requirements.NoError(kubeClient.List(ctx, leases, client.InNamespace(workspace.Namespace)), "list Worktree write Leases")
 	requirements.Len(leases.Items, 1, "claim each writable Worktree atomically")
@@ -339,16 +339,16 @@ func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 	ready := meta.FindStatusCondition(persisted.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady)
 	requirements.NotNil(ready, "publish Ready condition")
 	assertions.Equal(metav1.ConditionFalse, ready.Status, "pending Pod is not ready")
-	activeProcess := &workspacesv1alpha1.AgentProcess{
+	activeProcess := &workspacesv1alpha1.WorkspaceExec{
 		ObjectMeta: metav1.ObjectMeta{Name: "active", Namespace: workspace.Namespace},
-		Spec: workspacesv1alpha1.AgentProcessSpec{
-			TargetRef: workspacesv1alpha1.AgentProcessTargetReference{Kind: workspacesv1alpha1.AgentProcessTargetWorkspace, Name: workspace.Name},
+		Spec: workspacesv1alpha1.WorkspaceExecSpec{
+			TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: workspace.Name},
 			Command:   []string{"sleep", "60"},
 		},
-		Status: workspacesv1alpha1.AgentProcessStatus{Phase: workspacesv1alpha1.AgentProcessPhaseRunning},
+		Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseRunning},
 	}
-	requirements.NoError(kubeClient.Create(ctx, activeProcess), "create active Agent Process")
-	requirements.NoError(kubeClient.Status().Update(ctx, activeProcess), "mark Agent Process running")
+	requirements.NoError(kubeClient.Create(ctx, activeProcess), "create active process")
+	requirements.NoError(kubeClient.Status().Update(ctx, activeProcess), "mark process running")
 	secondWorktree := worktree.DeepCopy()
 	secondWorktree.Name = "rc-other"
 	secondWorktree.UID = types.UID("second-worktree-uid")
@@ -369,7 +369,7 @@ func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 	requirements.NoError(kubeClient.Get(ctx, key, currentWorkspace), "get Workspace to revert topology")
 	currentWorkspace.Spec.Mounts = originalMounts
 	requirements.NoError(kubeClient.Update(ctx, currentWorkspace), "revert blocked topology edit")
-	requirements.NoError(kubeClient.Delete(ctx, activeProcess), "remove active Agent Process")
+	requirements.NoError(kubeClient.Delete(ctx, activeProcess), "remove active process")
 	foreignHolder := "another-workspace-uid"
 	leases.Items[0].Spec.HolderIdentity = &foreignHolder
 	requirements.NoError(kubeClient.Update(ctx, &leases.Items[0]), "simulate Worktree Lease loss")
@@ -401,10 +401,10 @@ func TestWorkspaceSuspendsAfterIdleTimeout(t *testing.T) {
 		}}},
 	}
 	home := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: workspace.Name, Namespace: workspace.Namespace, OwnerReferences: []metav1.OwnerReference{{UID: workspace.UID, Controller: boolPointer(true)}}}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
-	process := &workspacesv1alpha1.AgentProcess{
+	process := &workspacesv1alpha1.WorkspaceExec{
 		ObjectMeta: metav1.ObjectMeta{Name: "codex-finished", Namespace: workspace.Namespace},
-		Spec:       workspacesv1alpha1.AgentProcessSpec{TargetRef: workspacesv1alpha1.AgentProcessTargetReference{Kind: workspacesv1alpha1.AgentProcessTargetWorkspace, Name: workspace.Name}, Command: []string{testTrueValue}},
-		Status:     workspacesv1alpha1.AgentProcessStatus{Phase: workspacesv1alpha1.AgentProcessPhaseSucceeded, CompletedAt: &now},
+		Spec:       workspacesv1alpha1.WorkspaceExecSpec{TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: workspace.Name}, Command: []string{testTrueValue}},
+		Status:     workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, CompletedAt: &now},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, process, home).WithObjects(workspace, home, process).Build()
 	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme}
@@ -456,7 +456,7 @@ func TestWorkspaceNeverMutatesUnownedRuntimePod(t *testing.T) {
 				Name: workspace.Name, Namespace: workspace.Namespace, UID: types.UID("foreign-pod-uid"),
 			}}
 			kubeClient := fake.NewClientBuilder().WithScheme(scheme).
-				WithStatusSubresource(workspace, home, foreignPod, &workspacesv1alpha1.AgentProcess{}).
+				WithStatusSubresource(workspace, home, foreignPod, &workspacesv1alpha1.WorkspaceExec{}).
 				WithObjects(workspace, home, foreignPod).
 				Build()
 			reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme}
@@ -492,7 +492,7 @@ func TestWorkspaceDeletionLeavesUnownedSameNamePod(t *testing.T) {
 		Name: workspace.Name, Namespace: workspace.Namespace, UID: types.UID("foreign-pod-uid"),
 	}}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(workspace, foreignPod, &workspacesv1alpha1.AgentProcess{}).
+		WithStatusSubresource(workspace, foreignPod, &workspacesv1alpha1.WorkspaceExec{}).
 		WithObjects(workspace, foreignPod).
 		Build()
 	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme}

@@ -27,7 +27,7 @@ PipeWire session. Applications should not start a separate desktop session.
 
 Before starting, make sure that:
 
-- rc is deployed and can create Workspaces and AgentProcesses;
+- rc is deployed and can create Workspaces and WorkspaceExecs;
 - the cluster provides GPU drivers and the `nvidia.com/gpu` resource;
 - a runner image containing Wayland, AUV, and `rc-kube` is available;
 - nodes trust the registry certificate and the Workspace ServiceAccount has
@@ -108,10 +108,10 @@ Node.js packages, Electron, and other dependencies that do not require root can
 be installed under `/home/agent`. This directory is stored on the Workspace
 volume and survives runtime restarts.
 
-For example, install Electron with an AgentProcess:
+For example, install Electron with an WorkspaceExec:
 
 ```sh
-rcctl agent exec --workspace gui-workspace -- \
+rcctl exec gui-workspace -- \
   bash -lc '
     set -eu
     mkdir -p /home/agent/apps/my-electron-app
@@ -143,7 +143,7 @@ USER 1000:1000
 ```
 
 The derived image must retain the runner's `rc-kube` wrapper, s6 services, and
-Wayland environment. Start the GUI application through an AgentProcess rather
+Wayland environment. Start the GUI application through an WorkspaceExec rather
 than making it the Workspace container's main process.
 
 ## Step 3: Start the GUI application
@@ -151,14 +151,14 @@ than making it the Workspace container's main process.
 A native Wayland application can be started directly:
 
 ```sh
-rcctl agent run --detach --workspace gui-workspace -- \
+rcctl exec --detach gui-workspace -- \
   /opt/gui-app/bin/my-app
 ```
 
 For Electron, use the rendering flags validated with this runtime:
 
 ```sh
-rcctl agent run --detach --workspace gui-workspace -- \
+rcctl exec --detach gui-workspace -- \
   bash -lc '
     cd /home/agent/apps/my-electron-app
     exec ./node_modules/.bin/electron \
@@ -176,13 +176,13 @@ rcctl agent run --detach --workspace gui-workspace -- \
 manage it with:
 
 ```sh
-rcctl agent list --workspace gui-workspace
-rcctl agent logs <process-id>
-rcctl agent stop <process-id>
+rcctl ps --workspace gui-workspace
+rcctl logs <process-id>
+rcctl stop <process-id>
 ```
 
-rc retains AgentProcess execution history. Reusing the same process identity
-does not execute the application again; create a new AgentProcess when starting
+rc retains WorkspaceExec execution history. Reusing the same process identity
+does not execute the application again; create a new WorkspaceExec when starting
 an updated application.
 
 ## Step 4: Capture the display with AUV
@@ -190,14 +190,14 @@ an updated application.
 List the virtual displays:
 
 ```sh
-rcctl agent exec --workspace gui-workspace -- \
+rcctl exec gui-workspace -- \
   auv invoke display.list --json
 ```
 
 The default runtime exposes one 1280x720 virtual display. Capture it with:
 
 ```sh
-rcctl agent exec --workspace gui-workspace -- \
+rcctl exec gui-workspace -- \
   auv invoke display.capture \
     --store-root /home/agent/auv-runs \
     --json
@@ -227,7 +227,7 @@ an image.
 Stop one application with:
 
 ```sh
-rcctl agent stop <process-id>
+rcctl stop <process-id>
 ```
 
 When the GPU is no longer needed, stop the Workspace:

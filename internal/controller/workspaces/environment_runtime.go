@@ -32,7 +32,7 @@ import (
 	"github.com/nekomeowww/rc/internal/rcplatform"
 )
 
-func (r *AgentProcessReconciler) resolveEnvironmentProcessTarget(ctx context.Context, process *workspacesv1alpha1.AgentProcess) (*resolvedProcessTarget, string, string, error) {
+func (r *WorkspaceExecReconciler) resolveEnvironmentProcessTarget(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) (*resolvedProcessTarget, string, string, error) {
 	environment := new(workspacesv1alpha1.WorkspaceEnvironment)
 	key := types.NamespacedName{Name: process.Spec.TargetRef.Name, Namespace: process.Namespace}
 	if err := r.Get(ctx, key, environment); err != nil {
@@ -118,7 +118,7 @@ func (r *AgentProcessReconciler) resolveEnvironmentProcessTarget(ctx context.Con
 	}, "", "", nil
 }
 
-func (r *AgentProcessReconciler) ensureEnvironmentEditor(ctx context.Context, environment *workspacesv1alpha1.WorkspaceEnvironment, draft *corev1.PersistentVolumeClaim, platform rcplatform.Runtime) (*corev1.Pod, string, string, error) {
+func (r *WorkspaceExecReconciler) ensureEnvironmentEditor(ctx context.Context, environment *workspacesv1alpha1.WorkspaceEnvironment, draft *corev1.PersistentVolumeClaim, platform rcplatform.Runtime) (*corev1.Pod, string, string, error) {
 	editorName := environment.Name + "-editor"
 	editor := new(corev1.Pod)
 	key := types.NamespacedName{Name: editorName, Namespace: environment.Namespace}
@@ -169,7 +169,7 @@ func environmentEditorPod(environment *workspacesv1alpha1.WorkspaceEnvironment, 
 	})
 }
 
-func (r *AgentProcessReconciler) setEnvironmentDraftStatus(ctx context.Context, key types.NamespacedName, draftName string, editorName string, status metav1.ConditionStatus, reason string, message string) error {
+func (r *WorkspaceExecReconciler) setEnvironmentDraftStatus(ctx context.Context, key types.NamespacedName, draftName string, editorName string, status metav1.ConditionStatus, reason string, message string) error {
 	current := new(workspacesv1alpha1.WorkspaceEnvironment)
 	if err := r.Get(ctx, key, current); err != nil {
 		return fmt.Errorf("re-fetch WorkspaceEnvironment before draft status update: %w", err)
@@ -187,7 +187,7 @@ func (r *AgentProcessReconciler) setEnvironmentDraftStatus(ctx context.Context, 
 	return nil
 }
 
-func (r *AgentProcessReconciler) resolveProcessOnlyEnvironment(ctx context.Context, process *workspacesv1alpha1.AgentProcess) (map[string]string, error) {
+func (r *WorkspaceExecReconciler) resolveProcessOnlyEnvironment(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) (map[string]string, error) {
 	values := make(map[string]string, len(process.Spec.Env))
 	if process.Spec.EnvSecretRef == nil {
 		return values, nil
@@ -195,7 +195,7 @@ func (r *AgentProcessReconciler) resolveProcessOnlyEnvironment(ctx context.Conte
 	secret := new(corev1.Secret)
 	key := types.NamespacedName{Name: process.Spec.EnvSecretRef.Name, Namespace: process.Namespace}
 	if err := r.Get(ctx, key, secret); err != nil {
-		return nil, fmt.Errorf("get Agent Process environment Secret: %w", err)
+		return nil, fmt.Errorf("get process environment Secret: %w", err)
 	}
 	for _, variable := range process.Spec.Env {
 		secretKey := variable.Key
@@ -204,7 +204,7 @@ func (r *AgentProcessReconciler) resolveProcessOnlyEnvironment(ctx context.Conte
 		}
 		value, ok := secret.Data[secretKey]
 		if !ok {
-			return nil, fmt.Errorf("agent process environment Secret %s has no key %s", secret.Name, secretKey)
+			return nil, fmt.Errorf("process environment Secret %s has no key %s", secret.Name, secretKey)
 		}
 		values[variable.Name] = string(value)
 	}
@@ -212,7 +212,7 @@ func (r *AgentProcessReconciler) resolveProcessOnlyEnvironment(ctx context.Conte
 	return values, nil
 }
 
-func (r *AgentProcessReconciler) resolveEnvironmentProcessCredentials(ctx context.Context, environment *workspacesv1alpha1.WorkspaceEnvironment, process *workspacesv1alpha1.AgentProcess) (*rcplatform.AgentProfile, map[string][]byte, error) {
+func (r *WorkspaceExecReconciler) resolveEnvironmentProcessCredentials(ctx context.Context, environment *workspacesv1alpha1.WorkspaceEnvironment, process *workspacesv1alpha1.WorkspaceExec) (*rcplatform.AgentProfile, map[string][]byte, error) {
 	files := make(map[string][]byte)
 	var agentProfile *rcplatform.AgentProfile
 	if process.Spec.AgentType != "" {

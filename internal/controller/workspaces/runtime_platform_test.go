@@ -14,7 +14,7 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
-	processruntime "github.com/nekomeowww/rc/internal/agentprocess"
+	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/lifecycle"
 	"github.com/nekomeowww/rc/internal/rcplatform"
 )
@@ -186,11 +186,11 @@ func TestWindowsEnvironmentEditor(t *testing.T) {
 
 func TestWindowsProcessRequestIsLogical(t *testing.T) {
 	t.Parallel()
-	process := &workspacesv1alpha1.AgentProcess{ObjectMeta: metav1.ObjectMeta{Name: "electron"}, Spec: workspacesv1alpha1.AgentProcessSpec{Command: []string{"electron.exe", "main.cjs"}}}
+	process := &workspacesv1alpha1.WorkspaceExec{ObjectMeta: metav1.ObjectMeta{Name: "electron"}, Spec: workspacesv1alpha1.WorkspaceExecSpec{Command: []string{"electron.exe", "main.cjs"}}}
 	platform, err := rcplatform.Resolve(rcplatform.Target{OS: corev1.Windows})
 	require.NoError(t, err)
 	target := &resolvedProcessTarget{platform: platform, runtime: processruntime.Target{Executable: testWindowsExecutable, Endpoint: testWindowsEndpoint}, defaultDirectory: rcplatform.WorkspaceDirectory}
-	request, err := (&AgentProcessReconciler{}).processStartRequest(context.Background(), process, target)
+	request, err := (&WorkspaceExecReconciler{}).processStartRequest(context.Background(), process, target)
 	require.NoError(t, err)
 	assert.Empty(t, request.WorkingDirectory)
 	assert.Equal(t, processruntime.DefaultDirectoryWorkspace, request.DefaultDirectory)

@@ -271,7 +271,6 @@ func TestSSHCredentialProjectsNativeConfiguration(t *testing.T) {
 		credentials: files, sshConfigFragments: projection.sshConfigFragments,
 	})
 	require.NoError(t, err)
-	assert.Empty(t, request.SSHConfigPath, "let rc-kube derive the native SSH config path")
 	assert.Equal(t, projection.sshConfigFragments, request.SSHConfigFragments)
 }
 

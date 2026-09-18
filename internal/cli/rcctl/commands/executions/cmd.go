@@ -61,7 +61,6 @@ type runOptions struct {
 	worktrees        []string
 	agentCredentials []string
 	credentials      []string
-	legacyGeneric    []string
 	environmentVars  []string
 	environmentFiles []string
 	noPassthrough    bool
@@ -147,8 +146,6 @@ func addRunFlags(cmd *cobra.Command, options *runOptions) {
 	cmd.Flags().StringArrayVar(&options.worktrees, "worktree", nil, "Worktree requirement or new Workspace mount; repeat")
 	cmd.Flags().StringArrayVar(&options.agentCredentials, "agent-credential", nil, "Ordered AgentCredential names; repeat")
 	cmd.Flags().StringArrayVar(&options.credentials, "credential", nil, "Credential names to project into the process; repeat")
-	cmd.Flags().StringArrayVar(&options.legacyGeneric, "dangerously-include-credentials", nil, "Deprecated alias for --credential; repeat")
-	_ = cmd.Flags().MarkDeprecated("dangerously-include-credentials", "use --credential")
 	cmd.Flags().StringArrayVar(&options.environmentVars, "env", nil, "Explicit NAME or NAME=value; repeat")
 	cmd.Flags().StringArrayVar(&options.environmentFiles, "env-file", nil, "Read environment values from a file; repeat")
 	cmd.Flags().BoolVar(&options.noPassthrough, "no-env-passthrough", false, "Disable caller environment pass-through")
@@ -225,7 +222,7 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 		Environment: options.environment, DefaultEnvironment: defaults.Environment,
 		Repositories: repositories, Worktrees: worktrees,
 	}
-	credentialRefs := append(append([]string(nil), options.credentials...), options.legacyGeneric...)
+	credentialRefs := options.credentials
 	credentialNames, agentCredential, selectedAgentType, err := selectAgentCredentials(
 		cmd.Context(), clusterClient.Kube, namespace, agentType, options.agentCredentials, options.createWorkspace,
 	)

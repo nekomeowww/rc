@@ -276,3 +276,14 @@ func TestProcessListFiltersPhaseAndWorkspace(t *testing.T) {
 		})
 	}
 }
+
+func TestExecutionCommandsRejectRemovedCredentialAlias(t *testing.T) {
+	t.Parallel()
+	for _, createWorkspace := range []bool{true, false} {
+		cmd := newRunCommand(kubeconfig.NewFlags(), createWorkspace)
+		err := cmd.ParseFlags([]string{"--dangerously-include-credentials", "credential"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown flag")
+		require.NotNil(t, cmd.Flag("credential"))
+	}
+}

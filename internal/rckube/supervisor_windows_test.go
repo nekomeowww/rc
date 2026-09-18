@@ -113,12 +113,13 @@ func TestWindowsEnvironmentOverridesAreCaseInsensitive(t *testing.T) {
 func TestWindowsAgentCredentialLifetime(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
-	agentHome := filepath.Join(t.TempDir(), "agent")
+	home := t.TempDir()
+	agentHome := filepath.Join(home, ".rc", "agents", "codex", "default")
 	marker := filepath.Join(t.TempDir(), "credential-read")
-	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
+	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond, WithRoots(home, t.TempDir(), t.TempDir()))
 	t.Cleanup(supervisor.Shutdown)
 	request := processruntime.StartRequest{
-		ID: "credential", UID: "credential-uid", AgentHome: agentHome,
+		ID: "credential", UID: "credential-uid", Agent: &processruntime.AgentRef{Type: "codex"},
 		CredentialFiles: map[string][]byte{"agent/auth.json": []byte(`{"test":"fixture"}`)},
 		Command:         []string{"powershell.exe", "-NoProfile", "-Command", "Copy-Item (Join-Path $env:RC_TEST_AGENT_HOME 'auth.json') $env:RC_TEST_MARKER; Start-Sleep -Seconds 60"},
 		Environment:     map[string]string{"RC_TEST_AGENT_HOME": agentHome, "RC_TEST_MARKER": marker},

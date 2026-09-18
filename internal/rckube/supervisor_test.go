@@ -48,7 +48,7 @@ func TestSupervisorRunsCommandOnceAndPersistsTranscript(t *testing.T) {
 	supervisor := NewSupervisor(stateDirectory, 100*time.Millisecond)
 	request := processruntime.StartRequest{
 		ID: "process-01", UID: "uid-01", Command: []string{"sh", "-c", "printf 'supervised output'; exit 7"},
-		WorkingDirectory: t.TempDir(), TranscriptPath: filepath.Join(stateDirectory, "process-01", "transcript.log"),
+		WorkingDirectory: t.TempDir(),
 	}
 
 	started, err := supervisor.Start(t.Context(), request)
@@ -111,14 +111,14 @@ func TestWriteCredentialFilesRejectsParentTraversal(t *testing.T) {
 func TestSupervisorDoesNotConsumeIdentityWhenRequestFailsBeforeLaunch(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
-	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
-	request := processruntime.StartRequest{
-		ID: "retryable", UID: testProcessUID, Command: []string{testTrueCommand},
-		RuntimeDirectory: filepath.Join(t.TempDir(), "wrong-process-id"),
-	}
+	runtimeRoot := t.TempDir()
+	blocked := filepath.Join(runtimeRoot, "processes")
+	requirements.NoError(os.WriteFile(blocked, nil, 0o600))
+	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond, WithRoots(t.TempDir(), t.TempDir(), runtimeRoot))
+	request := processruntime.StartRequest{ID: "retryable", UID: testProcessUID, Command: []string{testTrueCommand}}
 	_, err := supervisor.Start(t.Context(), request)
 	requirements.Error(err, "report pre-launch failure")
-	request.RuntimeDirectory = filepath.Join(t.TempDir(), request.ID)
+	requirements.NoError(os.Remove(blocked))
 	_, err = supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "retry same identity after no child was launched")
 }
@@ -131,7 +131,6 @@ func TestSupervisorRecordsMissingExecutableAsTerminalCommandFailure(t *testing.T
 	supervisor := NewSupervisor(stateDirectory, 100*time.Millisecond)
 	request := processruntime.StartRequest{
 		ID: "missing-command", UID: testProcessUID, Command: []string{"/definitely/missing/command"},
-		TranscriptPath: filepath.Join(stateDirectory, "missing-command", "transcript.log"),
 	}
 
 	failed, err := supervisor.Start(t.Context(), request)
@@ -169,13 +168,14 @@ func TestSupervisorKeepsCredentialsOutOfPersistentState(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
 	stateDirectory := t.TempDir()
-	runtimeDirectory := filepath.Join(t.TempDir(), "credential-scope")
-	credentialsRoot := t.TempDir()
-	supervisor := NewSupervisor(stateDirectory, 100*time.Millisecond)
+	runtimeRoot := t.TempDir()
+	runtimeDirectory := filepath.Join(runtimeRoot, "processes", "credential-scope")
+	credentialsRoot := filepath.Join(runtimeRoot, "credentials")
+	supervisor := NewSupervisor(stateDirectory, 100*time.Millisecond, WithRoots(t.TempDir(), t.TempDir(), runtimeRoot))
 	request := processruntime.StartRequest{
 		ID: "credential-scope", UID: testProcessUID, Command: []string{"sh", "-c", "cat \"$RC_CREDENTIALS_DIR/github/token\""},
-		Environment: map[string]string{testCredentialsVariable: credentialsRoot}, RuntimeDirectory: runtimeDirectory,
-		CredentialsRoot: credentialsRoot, CredentialFiles: map[string][]byte{testGitHubCredentialPath: []byte("secret")},
+		Environment:       map[string]string{testCredentialsVariable: credentialsRoot},
+		ExposeCredentials: true, CredentialFiles: map[string][]byte{testGitHubCredentialPath: []byte("secret")},
 	}
 	_, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "start credential consumer")
@@ -199,12 +199,11 @@ func TestSupervisorProjectsGenericCredentialsWithPrivatePermissions(t *testing.T
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	runtimeRoot := t.TempDir()
-	runtimeDirectory := filepath.Join(runtimeRoot, "private-credentials")
 	credentialsRoot := filepath.Join(runtimeRoot, "credentials")
-	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
+	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond, WithRoots(t.TempDir(), t.TempDir(), runtimeRoot))
 	request := processruntime.StartRequest{
 		ID: "private-credentials", UID: testProcessUID, Command: []string{"sh", "-c", "sleep 30"},
-		RuntimeDirectory: runtimeDirectory, CredentialsRoot: credentialsRoot,
+		ExposeCredentials: true,
 		CredentialFiles: map[string][]byte{
 			"credentials/github/id":           []byte("private-key"),
 			"credentials/github/nested/token": []byte("nested-secret"),
@@ -240,13 +239,13 @@ func TestSupervisorProjectsSSHConfigAndPreservesUserConfiguration(t *testing.T) 
 	t.Parallel()
 	requirements := require.New(t)
 	runtimeRoot := t.TempDir()
-	runtimeDirectory := filepath.Join(runtimeRoot, "ssh-config")
 	credentialsRoot := filepath.Join(runtimeRoot, "credentials")
-	sshDirectory := filepath.Join(t.TempDir(), ".ssh")
+	home := t.TempDir()
+	sshDirectory := filepath.Join(home, ".ssh")
 	sshConfigPath := filepath.Join(sshDirectory, "config")
 	requirements.NoError(os.MkdirAll(sshDirectory, 0o700), "create SSH directory")
 	requirements.NoError(os.WriteFile(sshConfigPath, []byte("Host existing\n  User existing\n"), 0o600), "create user SSH config")
-	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
+	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond, WithRoots(home, t.TempDir(), runtimeRoot))
 	request := processruntime.StartRequest{
 		ID: "ssh-config", UID: testProcessUID,
 		Command: []string{"sh", "-c", "cat \"$SSH_CONFIG\"; cat \"$SSH_FRAGMENT\"; cat \"$RC_CREDENTIALS_DIR/github/id\""},
@@ -255,13 +254,11 @@ func TestSupervisorProjectsSSHConfigAndPreservesUserConfiguration(t *testing.T) 
 			"SSH_CONFIG":            sshConfigPath,
 			"SSH_FRAGMENT":          sshConfigPath + ".d/rc-github.conf",
 		},
-		RuntimeDirectory: runtimeDirectory,
-		CredentialsRoot:  credentialsRoot,
+		ExposeCredentials: true,
 		CredentialFiles: map[string][]byte{
 			"credentials/github/id":          []byte("private-key"),
 			"credentials/github/known_hosts": []byte("github.com ssh-ed25519 host-key"),
 		},
-		SSHConfigPath: sshConfigPath,
 		SSHConfigFragments: map[string]string{
 			"github": "Host github.com\n  IdentityFile ${identityFile}\n  UserKnownHostsFile ${knownHostsFile}\n",
 		},
@@ -296,13 +293,13 @@ func TestSupervisorProjectsWritableCredentialFileForProcessLifetime(t *testing.T
 	requirements := require.New(t)
 	stateDirectory := t.TempDir()
 	runtimeRoot := t.TempDir()
-	runtimeDirectory := filepath.Join(runtimeRoot, "credential-consumer")
+	runtimeDirectory := filepath.Join(runtimeRoot, "processes", "credential-consumer")
 	mountPath := filepath.Join(t.TempDir(), ".tool", "credentials.json")
-	supervisor := NewSupervisor(stateDirectory, 100*time.Millisecond)
+	supervisor := NewSupervisor(stateDirectory, 100*time.Millisecond, WithRoots(t.TempDir(), t.TempDir(), runtimeRoot))
 	request := processruntime.StartRequest{
 		ID: "credential-consumer", UID: testProcessUID,
-		Command:     []string{"sh", "-c", "cat \"$CREDENTIAL_FILE\"; printf rotated > \"$CREDENTIAL_FILE\""},
-		Environment: map[string]string{"CREDENTIAL_FILE": mountPath}, RuntimeDirectory: runtimeDirectory,
+		Command:          []string{"sh", "-c", "cat \"$CREDENTIAL_FILE\"; printf rotated > \"$CREDENTIAL_FILE\""},
+		Environment:      map[string]string{"CREDENTIAL_FILE": mountPath},
 		CredentialFiles:  map[string][]byte{testCredentialDataPath: []byte("portable")},
 		CredentialMounts: []processruntime.CredentialMount{{Source: testCredentialDataPath, Target: mountPath}},
 	}
@@ -327,10 +324,11 @@ func TestSupervisorDoesNotReplaceExistingCredentialMountTarget(t *testing.T) {
 	requirements := require.New(t)
 	mountPath := filepath.Join(t.TempDir(), "credentials.json")
 	requirements.NoError(os.WriteFile(mountPath, []byte("user-data"), 0o600), "create existing target")
-	runtimeDirectory := filepath.Join(t.TempDir(), "credential-conflict")
-	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
+	runtimeRoot := t.TempDir()
+	runtimeDirectory := filepath.Join(runtimeRoot, "processes", "credential-conflict")
+	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond, WithRoots(t.TempDir(), t.TempDir(), runtimeRoot))
 	request := processruntime.StartRequest{
-		ID: "credential-conflict", UID: testProcessUID, Command: []string{testTrueCommand}, RuntimeDirectory: runtimeDirectory,
+		ID: "credential-conflict", UID: testProcessUID, Command: []string{testTrueCommand},
 		CredentialFiles:  map[string][]byte{testCredentialDataPath: []byte("credential")},
 		CredentialMounts: []processruntime.CredentialMount{{Source: testCredentialDataPath, Target: mountPath}},
 	}
@@ -352,18 +350,18 @@ func TestSharedCredentialProjectionSurvivesAnotherProcessExit(t *testing.T) {
 	stateDirectory := t.TempDir()
 	runtimeRoot := t.TempDir()
 	credentialsRoot := filepath.Join(runtimeRoot, "credentials")
-	supervisor := NewSupervisor(stateDirectory, 100*time.Millisecond)
+	supervisor := NewSupervisor(stateDirectory, 100*time.Millisecond, WithRoots(t.TempDir(), t.TempDir(), runtimeRoot))
 	t.Cleanup(supervisor.Shutdown)
 	credentialFiles := map[string][]byte{testGitHubCredentialPath: []byte("secret")}
 	first := processruntime.StartRequest{
 		ID: "first", UID: "first-uid", Command: []string{"sh", "-c", "read -r proceed; cat \"$RC_CREDENTIALS_DIR/github/token\""},
-		Environment: map[string]string{testCredentialsVariable: credentialsRoot}, RuntimeDirectory: filepath.Join(runtimeRoot, "first"),
-		CredentialsRoot: credentialsRoot, CredentialFiles: credentialFiles,
+		Environment:       map[string]string{testCredentialsVariable: credentialsRoot},
+		ExposeCredentials: true, CredentialFiles: credentialFiles,
 	}
 	second := processruntime.StartRequest{
 		ID: "second", UID: "second-uid", Command: []string{testTrueCommand},
-		Environment: map[string]string{testCredentialsVariable: credentialsRoot}, RuntimeDirectory: filepath.Join(runtimeRoot, "second"),
-		CredentialsRoot: credentialsRoot, CredentialFiles: credentialFiles,
+		Environment:       map[string]string{testCredentialsVariable: credentialsRoot},
+		ExposeCredentials: true, CredentialFiles: credentialFiles,
 	}
 	_, err := supervisor.Start(t.Context(), first)
 	requirements.NoError(err, "start first credential consumer")

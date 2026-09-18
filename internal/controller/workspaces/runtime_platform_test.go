@@ -194,6 +194,4 @@ func TestWindowsProcessRequestIsLogical(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, request.WorkingDirectory)
 	assert.Equal(t, processruntime.DefaultDirectoryWorkspace, request.DefaultDirectory)
-	assert.Empty(t, request.RuntimeDirectory)
-	assert.Empty(t, request.TranscriptPath)
 }

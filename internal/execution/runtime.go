@@ -56,26 +56,18 @@ type AgentRef struct {
 
 // StartRequest is the versioned process contract sent to rc-kube.
 type StartRequest struct {
-	ID                string            `json:"id"`
-	UID               string            `json:"uid"`
-	Command           []string          `json:"command"`
-	WorkingDirectory  string            `json:"workingDirectory"`
-	DefaultDirectory  DefaultDirectory  `json:"defaultDirectory,omitempty"`
-	TTY               bool              `json:"tty"`
-	Environment       map[string]string `json:"environment,omitempty"`
-	Agent             *AgentRef         `json:"agent,omitempty"`
-	ExposeCredentials bool              `json:"exposeCredentials,omitempty"`
-	// Legacy clients can still set this while rc-kube derives it from Agent.
-	AgentHome        string            `json:"agentHome,omitempty"`
-	CredentialFiles  map[string][]byte `json:"credentialFiles,omitempty"`
-	CredentialMounts []CredentialMount `json:"credentialMounts,omitempty"`
-	// Legacy clients can still set this while rc-kube derives it from its native home.
-	SSHConfigPath      string            `json:"sshConfigPath,omitempty"`
+	ID                 string            `json:"id"`
+	UID                string            `json:"uid"`
+	Command            []string          `json:"command"`
+	WorkingDirectory   string            `json:"workingDirectory"`
+	DefaultDirectory   DefaultDirectory  `json:"defaultDirectory,omitempty"`
+	TTY                bool              `json:"tty"`
+	Environment        map[string]string `json:"environment,omitempty"`
+	Agent              *AgentRef         `json:"agent,omitempty"`
+	ExposeCredentials  bool              `json:"exposeCredentials,omitempty"`
+	CredentialFiles    map[string][]byte `json:"credentialFiles,omitempty"`
+	CredentialMounts   []CredentialMount `json:"credentialMounts,omitempty"`
 	SSHConfigFragments map[string]string `json:"sshConfigFragments,omitempty"`
-	// Legacy clients can still set these while rc-kube derives them from its native roots.
-	RuntimeDirectory string `json:"runtimeDirectory,omitempty"`
-	CredentialsRoot  string `json:"credentialsRoot,omitempty"`
-	TranscriptPath   string `json:"transcriptPath,omitempty"`
 }
 
 // State is the supervisor's observable process state.

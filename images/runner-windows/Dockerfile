@@ -53,7 +53,7 @@ LABEL org.opencontainers.image.source="https://github.com/nekomeowww/rc" `
 WORKDIR C:\workspace
 
 ENTRYPOINT ["powershell.exe", "-NoLogo", "-NoProfile", `
-    "-WorkspaceExecPolicy", "Bypass", "-File", "C:\\rc\\entrypoint.ps1"]
+    "-ExecutionPolicy", "Bypass", "-File", "C:\\rc\\entrypoint.ps1"]
 CMD ["rc-kube.exe", "serve"]
 
 FROM runner AS codex

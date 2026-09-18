@@ -31,8 +31,8 @@ Stage assets on a Windows machine into the ignored `assets/` directory using
 application source and user profiles do not belong in the build context.
 `prepare-ci-assets.ps1` downloads the public Node, Python, CMake, Visual Studio
 Build Tools, and Visual C++ inputs and uses the Git and font files installed on
-a GitHub-hosted Windows runner. It is used by pull-request image validation and
-tagged releases.
+a GitHub-hosted Windows runner. It is used by tagged releases. Pull-request tests compile the Windows
+binaries and run Go tests without building container images.
 
 The release inputs are:
 

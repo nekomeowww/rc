@@ -19,6 +19,7 @@ package rckube
 import (
 	"bytes"
 	"context"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,8 +30,12 @@ import (
 
 func TestLifecycleCommandRunsEncodedActions(t *testing.T) {
 	t.Parallel()
+	argv := []string{"printf", "initialized"}
+	if runtime.GOOS == "windows" {
+		argv = []string{"cmd.exe", "/c", "echo|set /p=initialized"}
+	}
 	encoded, err := lifecycle.Encode([]lifecycle.Action{{
-		Command: []string{"printf", "initialized"}, WorkingDirectory: t.TempDir(),
+		Command: argv, WorkingDirectory: t.TempDir(),
 	}})
 	require.NoError(t, err)
 	output := new(bytes.Buffer)

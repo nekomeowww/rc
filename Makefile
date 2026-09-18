@@ -64,8 +64,12 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: manifests generate fmt vet setup-envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+test: ## Run ordinary tests without Kubernetes binaries or a cluster.
+	go test ./... -coverprofile cover.out
+
+.PHONY: test-integration
+test-integration: manifests generate fmt vet setup-envtest ## Run controller integration tests with envtest.
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test -tags=integration ./internal/controller/... -coverprofile cover-integration.out
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
@@ -147,12 +151,12 @@ lint: golangci-lint ## Run golangci-lint linter
 	# Keep formatters out of the goanalysis runner: goimports currently fails
 	# there with Go 1.26, while golangci-lint's dedicated fmt command is stable.
 	"$(GOLANGCI_LINT)" fmt --enable gofmt,goimports --diff
-	"$(GOLANGCI_LINT)" run
+	"$(GOLANGCI_LINT)" run --build-tags=integration
 
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 	"$(GOLANGCI_LINT)" fmt --enable gofmt,goimports
-	"$(GOLANGCI_LINT)" run --fix
+	"$(GOLANGCI_LINT)" run --build-tags=integration --fix
 
 .PHONY: lint-config
 lint-config: golangci-lint ## Verify golangci-lint linter configuration

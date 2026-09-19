@@ -17,7 +17,9 @@ Use rc as a Kubernetes-backed development runtime. Treat Repository mirrors, wri
 ## Select the execution shape
 
 - Use `repo exec` or `worktree exec` only for short, non-interactive work.
-- Use `run/run --rm` for a bounded isolated task whose home and generated Worktree may be removed after completion.
+- Use `rcctl exec [flags] WORKSPACE -- COMMAND` for an existing Workspace. The positional Workspace is required even when `workspace default` is configured; put rcctl flags before it.
+- Use `rcctl run [flags] -- COMMAND` to create a new Workspace. It is retained by default; add `--name` for a stable name or `--rm` for a bounded isolated task whose home and generated Worktree should be cleaned up after all executions terminate. Referenced user-created Worktrees are not owned by this cleanup.
+- `env default` supplies the Environment for new Workspace creation with `run`; it does not select or replace the target of `exec`.
 - Default to reusing a suitable named Workspace for the same project and trust boundary. One Workspace is designed to mount multiple Worktrees and run multiple WorkspaceExecs concurrently, so mount the project's additional branches there and start each agent, server, watcher, or command as a separate process.
 - A Repository is the shared mirror, not a writable checkout. Write in a Worktree. A read-write Worktree has one Workspace/WorktreeExec owner at a time.
 - Create another Workspace only when isolation or incompatible requirements justify it: a different trust/credential boundary, OS/image/ServiceAccount, compute or node placement, independent lifecycle, exclusive Worktree ownership, or processes that cannot share the Pod's resources or network namespace (for example, conflicting fixed ports). Mount changes replace the shared Workspace Pod; account for active processes first.
@@ -28,7 +30,8 @@ Use rc as a Kubernetes-backed development runtime. Treat Repository mirrors, wri
 - Workspace credential references are an allowlist; select required process credentials explicitly on every WorkspaceExec. Do not put secrets in images, Environment snapshots, command arguments, source, or logs.
 - A Workspace is one trust boundary: its processes share a Pod, home, mounts, network identity, and effective access. Use a separate Workspace for untrusted work or a different secret set.
 - rc normally injects the same-namespace `rc-workspace` ServiceAccount into a Workspace. It permits rc and related Kubernetes operations in that namespace, so software launched in a Workspace or WorkspaceExec can programmatically use `rcctl` to manage same-namespace rc resources. It does not grant unrelated cluster-wide privileges. Use `--no-service-account` or an explicitly chosen same-namespace ServiceAccount only when requested.
-- WorkspaceExecs are supervised and at-most-once. Use rc's detach, resume, log, and stop lifecycle rather than `nohup`, `tmux`, or application daemon modes.
+- The execution CR is `WorkspaceExec` (`workspaceexecs.workspaces.rc.ayaka.io`). Execution commands live at the CLI root; there is no `agent` or `workspace exec` command group. AgentCredentials and their `--agent-credential` flag remain separate from execution naming.
+- WorkspaceExecs are supervised and at-most-once. Client disconnect does not stop them. Runtime loss marks live executions `Lost`; rc does not automatically rerun them. Use rc's detach, attach, logs, and stop lifecycle rather than `nohup`, `tmux`, or application daemon modes.
 
 ## Basic command patterns
 
@@ -45,6 +48,8 @@ rcctl -n <namespace> worktree list
 rcctl -n <namespace> workspace list
 rcctl -n <namespace> ps -o wide
 ```
+
+`ps` lists running executions in the selected namespace. Add `--workspace <workspace>` to filter them, `-a` to include pending/completed records, or `-A` to span permitted namespaces. Use `workspace list` for Workspaces.
 
 ### Import Git credentials
 
@@ -142,12 +147,26 @@ long-lived processes whenever possible.
 
 ```sh
 rcctl -n <namespace> exec --cwd /workspace/<mount> <workspace> -- <command> <args...>
+rcctl -n <namespace> exec -it --agent-credential codex --cwd /workspace/<mount> <workspace> -- codex
 rcctl -n <namespace> exec -d --cwd /workspace/<mount> <workspace> -- <server-or-watcher> <args...>
 rcctl -n <namespace> run --rm --environment <environment> -- <bounded-command> <args...>
 ```
 
-Use `ps`, `logs <process-id>`, `attach <process-id>`, and
-`stop <process-id>` for the lifecycle of detached or interactive work.
+Foreground execution waits for completion. Add `-it` to forward input and allocate
+a terminal, or `-d` to start detached.
+
+```sh
+rcctl -n <namespace> ps -a --workspace <workspace> -o wide
+rcctl -n <namespace> inspect <execution-id>
+rcctl -n <namespace> logs <execution-id>
+rcctl -n <namespace> attach <execution-id>
+rcctl -n <namespace> stop <execution-id>
+rcctl -n <namespace> rm <completed-execution-id>
+```
+
+`attach` reconnects to the same live execution; it does not rerun a completed or
+Lost command. `rm` deletes a completed execution record. Deleting the Workspace
+is a separate operation through `workspace delete`.
 
 ## pnpm caches in Linux Workspaces
 

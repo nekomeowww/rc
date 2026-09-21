@@ -35,6 +35,27 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Require macOS signing credentials
+        shell: bash
+        env:
+          MACOS_SIGN_P12: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE }}
+          MACOS_SIGN_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in MACOS_SIGN_P12 MACOS_SIGN_PASSWORD MACOS_NOTARY_KEY MACOS_NOTARY_KEY_ID MACOS_NOTARY_ISSUER_ID; do
+            if [[ -z "${!name}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing required macOS signing credentials: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
@@ -50,6 +71,11 @@ jobs:
           CONTROLLER_IMAGE: ghcr.io/${{ github.repository }}/controller
           RUNNER_IMAGE: ghcr.io/${{ github.repository }}/runner
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MACOS_SIGN_P12: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE }}
+          MACOS_SIGN_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
 
       - name: Preserve the generated Homebrew cask
         uses: actions/upload-artifact@v4

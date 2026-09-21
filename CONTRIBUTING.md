@@ -219,6 +219,27 @@ succeed, publishes the draft GitHub Release, and then commits the cask to the
 tap. The tap update is serialized across releases. A missing cross-repository
 credential fails before the draft release becomes public.
 
+## Release signing
+
+Stable releases sign and notarize the macOS `rcctl` binaries before GoReleaser
+creates their archives, checksums, and release metadata. Configure these GitHub
+Actions secrets before publishing a release:
+
+- `APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE`: Base64-encoded Developer ID
+  Application `.p12` certificate.
+- `APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD`: Password for the
+  `.p12` certificate.
+- `MACOS_NOTARY_KEY`: Base64-encoded App Store Connect API key (`.p8`).
+- `MACOS_NOTARY_KEY_ID`: Key ID for the App Store Connect API key.
+- `MACOS_NOTARY_ISSUER_ID`: Issuer ID shown on the App Store Connect
+  Integrations page. This is not the Apple Developer Team ID.
+
+GoReleaser uses its cross-platform macOS notarization support, so the release
+job remains on Linux. Apple ID credentials (`APPLE_ID`, `APPLE_TEAM_ID`, and
+`APPLE_APP_SPECIFIC_PASSWORD`) used by native `notarytool` workflows are not
+used by this release path. The release fails before building if any required
+signing credential is missing.
+
 ## Project layout
 
 rc uses Kubebuilder's multi-group layout for Repository and Workspace APIs,

@@ -88,6 +88,7 @@ RUN apt-get update \
         fonts-tlwg-loma-otf \
         fonts-unifont \
         fonts-wqy-zenhei \
+        gh \
         git \
         git-lfs \
         gzip \
@@ -137,6 +138,7 @@ RUN apt-get update \
     && test "$(lobehub --version)" = "${LOBEHUB_CLI_VERSION}" \
     && rm -rf /tmp/lobehub \
     && npm cache clean --force \
+    && gh --version \
     && rm -rf /var/lib/apt/lists/* \
     && usermod --login agent --home /home/agent --move-home --shell /bin/bash node \
     && groupmod --new-name agent node \

@@ -106,6 +106,24 @@ Use `git@github.com:<owner>/<repository>.git` with `--credential-ref github-ssh`
 for an SSH Repository clone, and explicitly select `--credential github-ssh`
 on each WorkspaceExec that needs authenticated Git operations.
 
+The `config` field is required for automatic SSH configuration in Workspace
+processes. Without it, rc exposes `id` and `known_hosts` below
+`$RC_CREDENTIALS_DIR/github-ssh`, but OpenSSH does not select those files.
+Repository clone Jobs select these files explicitly and can succeed with the
+same Credential even when a Workspace `git push` fails.
+
+For an existing Credential, inspect its non-secret `spec.sshPrivateKey.config`
+before use. Do not infer configuration from a successful Repository clone.
+Supply a host-specific fragment such as the example above, or select the
+projected files explicitly for one command:
+
+```sh
+rcctl -n <namespace> exec --credential github-ssh <workspace> -- sh -c 'GIT_SSH_COMMAND="ssh -i $RC_CREDENTIALS_DIR/github-ssh/id -o UserKnownHostsFile=$RC_CREDENTIALS_DIR/github-ssh/known_hosts -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes" git ls-remote git@github.com:<owner>/<repository>.git HEAD'
+```
+
+The command uses port 22. For port 443, use the fragment above and matching
+trusted host keys. Never disable host-key verification to repair configuration.
+
 ### Import Codex auth credential
 
 To make the local Codex login selectable by Codex WorkspaceExecs, import its

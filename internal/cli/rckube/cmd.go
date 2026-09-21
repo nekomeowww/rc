@@ -78,6 +78,9 @@ func newServeCommand() *cobra.Command {
 		Short: "Run the Workspace process supervisor",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
+			if err := ensureContainerInit(); err != nil {
+				return err
+			}
 			if err := os.MkdirAll(rcnative.Current().Workspace, 0o755); err != nil {
 				return err
 			}

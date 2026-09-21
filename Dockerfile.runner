@@ -123,6 +123,7 @@ RUN apt-get update \
         ripgrep \
         sudo \
         tar \
+        tini \
         unzip \
         wget \
         xfonts-scalable \

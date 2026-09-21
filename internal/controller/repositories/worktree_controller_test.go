@@ -229,6 +229,24 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 		Expect(persisted.Status.VolumeClaimName).To(Equal(worktreeName))
 		Expect(persisted.Status.WorktreePath).To(Equal(worktreePath(worktree)))
+
+		// Kubernetes deletes the completed bootstrap Job after its TTL. The
+		// Worktree Ready condition is the durable record that initialization
+		// succeeded, so reconciliation must not run git worktree add again.
+		Expect(k8sClient.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
+		Eventually(func() bool {
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: worktreeBootstrapJobName(worktree), Namespace: testNamespace}, new(batchv1.Job))
+			return apierrors.IsNotFound(err)
+		}).Should(BeTrue())
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		recreatedJob := new(batchv1.Job)
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: worktreeBootstrapJobName(worktree), Namespace: testNamespace}, recreatedJob))).To(BeTrue())
+		Expect(k8sClient.Get(ctx, key, persisted)).To(Succeed())
+		ready = meta.FindStatusCondition(persisted.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 	})
 
 	It("creates a native Git worktree that remains usable at the runtime mount path", func() {

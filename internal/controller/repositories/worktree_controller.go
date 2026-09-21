@@ -161,6 +161,11 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err := r.labelWorktreePods(ctx, worktree, claim.Name); err != nil {
 		return ctrl.Result{}, err
 	}
+	if ready := meta.FindStatusCondition(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady); ready != nil &&
+		ready.Status == metav1.ConditionTrue && ready.ObservedGeneration == worktree.Generation &&
+		worktree.Status.ObservedGeneration == worktree.Generation {
+		return ctrl.Result{}, nil
+	}
 	if reusesRepositoryRoot(worktree) {
 		legacyJob := new(batchv1.Job)
 		legacyKey := types.NamespacedName{Name: worktreeBootstrapJobName(worktree), Namespace: worktree.Namespace}

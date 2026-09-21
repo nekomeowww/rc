@@ -29,8 +29,8 @@ const (
 	// runtime initializes their Git branch.
 	WorktreeConditionVolumeReady = "VolumeReady"
 
-	// WorktreeConditionReady reports whether the child volume and its native
-	// Git worktree are ready for a workload to mount.
+	// WorktreeConditionReady reports whether the child volume and its isolated
+	// Git checkout are ready for a workload to mount.
 	WorktreeConditionReady = "Ready"
 )
 
@@ -55,9 +55,9 @@ type WorktreeStorageSpec struct {
 	AccessModes []corev1.PersistentVolumeAccessMode `json:"accessModes,omitempty"`
 }
 
-// WorktreeSpec defines one independent child volume and the native Git
-// worktree that is created inside it.
-// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable; recreate the Worktree to change its source or Git add options"
+// WorktreeSpec defines one independent child volume and the Git checkout that
+// is initialized in its cloned Repository root.
+// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable; recreate the Worktree to change its source or Git checkout options"
 // +kubebuilder:validation:XValidation:rule="!(has(self.branch) && has(self.resetBranch))",message="branch and resetBranch are mutually exclusive"
 // +kubebuilder:validation:XValidation:rule="!has(self.lockReason) || (has(self.lock) && self.lock)",message="lockReason requires lock=true"
 type WorktreeSpec struct {
@@ -78,13 +78,13 @@ type WorktreeSpec struct {
 	// +optional
 	ResetBranch string `json:"resetBranch,omitempty"`
 
-	// ref is the commit-ish checked out by the new worktree.
+	// ref is the commit-ish selected for the isolated checkout.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=1024
 	// +optional
 	Ref string `json:"ref,omitempty"`
 
-	// detach creates a detached HEAD worktree.
+	// detach creates a detached HEAD checkout.
 	// +optional
 	Detach bool `json:"detach,omitempty"`
 
@@ -92,15 +92,16 @@ type WorktreeSpec struct {
 	// +optional
 	Orphan bool `json:"orphan,omitempty"`
 
-	// noCheckout creates the worktree metadata without populating files.
+	// noCheckout initializes Git metadata without populating files.
 	// +optional
 	NoCheckout bool `json:"noCheckout,omitempty"`
 
-	// lock keeps the native Git worktree locked after creation.
+	// lock records Git worktree lock intent. An isolated checkout root cannot be
+	// pruned as linked-worktree metadata, so it needs no additional Git lock.
 	// +optional
 	Lock bool `json:"lock,omitempty"`
 
-	// lockReason records why the native Git worktree is locked.
+	// lockReason records why lock intent was requested.
 	// +kubebuilder:validation:MaxLength=1024
 	// +optional
 	LockReason string `json:"lockReason,omitempty"`
@@ -127,13 +128,13 @@ type WorktreeStatus struct {
 	// +optional
 	VolumeClaimName string `json:"volumeClaimName,omitempty"`
 
-	// worktreePath is the path inside the child PVC containing the native Git
-	// worktree.
+	// worktreePath is the path inside the child PVC containing the isolated Git
+	// checkout.
 	// +optional
 	WorktreePath string `json:"worktreePath,omitempty"`
 
-	// jobName is the bootstrap Job that ran git worktree add. It is empty when a
-	// Temporary Workspace runtime initializes the cloned Repository root.
+	// jobName is the bootstrap Job that initialized the cloned Repository root.
+	// It is empty when a Temporary Workspace runtime performs initialization.
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 

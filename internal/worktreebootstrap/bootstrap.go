@@ -41,14 +41,13 @@ const (
 )
 
 // VolumeRootMountPath returns the stable container path for a Worktree child
-// volume. Both bootstrap Jobs and Workspace runtimes must mount the volume at
-// this path because native Git worktree metadata stores absolute paths.
+// volume.
 func VolumeRootMountPath(name string) string {
 	return path.Join(volumeRootMountPath, name)
 }
 
-// NativeWorktreeMountPath returns the native linked-worktree path inside its
-// stable child-volume root.
+// NativeWorktreeMountPath returns the linked-worktree path used by Worktrees
+// created before rc initialized isolated checkouts in the child-volume root.
 func NativeWorktreeMountPath(name string) string {
 	return path.Join(VolumeRootMountPath(name), "worktree", name)
 }

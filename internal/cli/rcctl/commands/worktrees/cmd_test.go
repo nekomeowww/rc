@@ -66,7 +66,7 @@ func TestWorktreeListRowsReportStatusAndSortByName(t *testing.T) {
 	assertions.True(rows[1].ready, "report Ready=True")
 	assertions.Equal("zeta", rows[1].repository, "report the source Repository")
 	assertions.Equal("zeta-main", rows[1].volume, "report the child PVC")
-	assertions.Equal("/repository/worktree", rows[1].path, "report the native worktree path")
+	assertions.Equal("/repository/worktree", rows[1].path, "report the recorded checkout path")
 }
 
 func TestWorktreeListReturnsKubernetesAPIError(t *testing.T) {

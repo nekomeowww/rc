@@ -353,7 +353,7 @@ func NewCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:     "worktree",
 		Aliases: []string{"worktrees"},
-		Short:   "Manage independent Git worktrees",
+		Short:   "Manage independent Git checkouts",
 		GroupID: command.WorktreesGroup,
 	}
 }
@@ -362,7 +362,7 @@ func newAddCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	options := new(addOptions)
 	cmd := &cobra.Command{
 		Use:   "add",
-		Short: "Create a child PVC and native Git worktree",
+		Short: "Create a child PVC and isolated Git checkout",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runAdd(cmd, kubeconfigFlags, *options)
@@ -374,15 +374,15 @@ func newAddCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	flags.StringVarP(&options.branch, "branch", "b", "", "Create a new local branch")
 	flags.StringVarP(&options.resetBranch, "reset-branch", "B", "", "Create or reset a local branch")
 	flags.StringVar(&options.ref, "ref", "", "Commit-ish to check out")
-	flags.BoolVarP(&options.detach, "detach", "d", false, "Create a detached HEAD worktree")
+	flags.BoolVarP(&options.detach, "detach", "d", false, "Create a detached HEAD checkout")
 	flags.BoolVar(&options.orphan, "orphan", false, "Create an unborn branch")
-	flags.BoolVar(&options.noCheckout, "no-checkout", false, "Create worktree metadata without checking out files")
-	flags.BoolVar(&options.lock, "lock", false, "Keep the new Git worktree locked")
-	flags.StringVar(&options.lockReason, "reason", "", "Reason for locking the Git worktree")
+	flags.BoolVar(&options.noCheckout, "no-checkout", false, "Initialize Git metadata without checking out files")
+	flags.BoolVar(&options.lock, "lock", false, "Record lock intent for the isolated checkout")
+	flags.StringVar(&options.lockReason, "reason", "", "Reason for the recorded lock intent")
 	flags.StringVar(&options.storageClass, "storage-class", "", "Override the Repository StorageClass")
 	flags.StringVar(&options.size, "size", "", "Override the child PVC size")
 	flags.StringSliceVar(&options.accessModes, "access-mode", nil, "Override child PVC access modes (repeat or comma-separate)")
-	flags.BoolVar(&options.wait, "wait", true, "Wait for the PVC clone and Git worktree bootstrap")
+	flags.BoolVar(&options.wait, "wait", true, "Wait for the PVC clone and Git checkout bootstrap")
 	_ = cmd.MarkFlagRequired("repo")
 	return cmd
 }

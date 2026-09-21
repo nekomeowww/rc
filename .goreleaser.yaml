@@ -21,7 +21,8 @@ builds:
       - arm64
 
 archives:
-  - ids:
+  - id: rcctl
+    ids:
       - rcctl
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
@@ -34,6 +35,21 @@ archives:
 
 checksum:
   name_template: checksums.txt
+
+homebrew_casks:
+  - name: rcctl
+    ids:
+      - rcctl
+    binaries:
+      - rcctl
+    homepage: https://github.com/nekomeowww/rc
+    description: Manage persistent Kubernetes-backed development workspaces for coding agents
+    url:
+      template: https://github.com/nekomeowww/rc/releases/download/{{ .Tag }}/{{ .ArtifactName }}
+    skip_upload: true
+    repository:
+      owner: nekomeowww
+      name: homebrew-rc
 
 changelog:
   sort: asc

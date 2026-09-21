@@ -202,6 +202,23 @@ make lint-fix
 make test
 ```
 
+## Release Homebrew cask
+
+Stable releases publish the `rcctl` cask to
+[`nekomeowww/homebrew-rc`](https://github.com/nekomeowww/homebrew-rc). Before
+the first release with Homebrew support:
+
+1. Create a fine-grained GitHub personal access token with read and write
+   `Contents` permission for that repository.
+2. Add the token to this repository as the Actions secret
+   `HOMEBREW_TAP_GITHUB_TOKEN`.
+
+GoReleaser creates `Casks/rcctl.rb` from the macOS and Linux release archives.
+The workflow preserves it as an artifact, waits for every release image to
+succeed, publishes the draft GitHub Release, and then commits the cask to the
+tap. The tap update is serialized across releases. A missing cross-repository
+credential fails before the draft release becomes public.
+
 ## Project layout
 
 rc uses Kubebuilder's multi-group layout for Repository and Workspace APIs,

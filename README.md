@@ -71,7 +71,18 @@ Your production StorageClass must support CSI PVC cloning. The local Kind setup 
 
 ### Install rcctl
 
-Download a binary archive for Linux, macOS, or Windows from [GitHub Releases](https://github.com/nekomeowww/rc/releases), or install it from source with Go:
+On macOS or Linux, install the latest release from the Homebrew tap:
+
+```sh
+brew install --cask nekomeowww/rc/rcctl
+```
+
+Homebrew adds `nekomeowww/rc` automatically when the fully qualified cask name
+is used. Each stable rc release updates the cask.
+
+Alternatively, download a binary archive for Linux, macOS, or Windows from
+[GitHub Releases](https://github.com/nekomeowww/rc/releases), or install it from
+source with Go:
 
 ```sh
 go install github.com/nekomeowww/rc/cmd/rcctl@latest

@@ -22,6 +22,21 @@ import (
 // Mode distinguishes mounts from clones: CSI requires an unused clone source.
 type Mode string
 
+// Admission describes the reservation after a successful Acquire call.
+// Only Admitted permits creation of a Job, Pod, or clone PVC.
+type Admission int
+
+const (
+	// NotReserved means this token has no reservation on the requested Repository.
+	NotReserved Admission = iota
+	// Reserved blocks incompatible callers while existing consumers stop.
+	// The owner must retry admission or release after its consumers stop.
+	Reserved
+	// Admitted holds the reservation and permits creation of the consumer.
+	// The owner keeps it until that consumer stops or its clone PVC is Bound.
+	Admitted
+)
+
 const (
 	Write           Mode = "write"
 	Mount           Mode = "mount"
@@ -74,11 +89,12 @@ func state(lease *coordinationv1.Lease) (reservation, error) {
 	return result, nil
 }
 
-// Acquire admits compatible consumers. When ready is required, readiness is
-// re-read without the manager cache after admission, before creating a consumer.
-// A changed spec or status invalidates the captured Repository state. In
-// particular, an old bootstrap result cannot overwrite a newer sync result.
-func (g Gate) Acquire(ctx context.Context, repository *repositories.Repository, token string, mode Mode, ready bool) (bool, error) {
+// Acquire reserves parent access before checking existing consumers. Reserved
+// retains the reservation across retries without permission to create a consumer.
+// Readiness and captured Repository state are checked outside the manager cache.
+// On error, admission is unknown: an API write can succeed without a response.
+// The owner must retry or Release after its consumers stop, even on error.
+func (g Gate) Acquire(ctx context.Context, repository *repositories.Repository, token string, mode Mode, ready bool) (Admission, error) {
 	acquired := false
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		acquired = false
@@ -126,18 +142,22 @@ func (g Gate) Acquire(ctx context.Context, repository *repositories.Repository, 
 		return nil
 	})
 	if err != nil || !acquired {
-		return false, err
+		return NotReserved, err
 	}
 	current := new(repositories.Repository)
 	if err := g.reader().Get(ctx, client.ObjectKeyFromObject(repository), current); err != nil {
-		return false, err
+		return Reserved, err
 	}
 	condition := meta.FindStatusCondition(current.Status.Conditions, repositories.RepositoryConditionStorageReady)
 	if current.UID != repository.UID || current.Generation != repository.Generation || !equality.Semantic.DeepEqual(current.Status, repository.Status) || !current.DeletionTimestamp.IsZero() ||
 		(ready && (current.Status.ObservedGeneration != current.Generation || condition == nil || condition.Status != metav1.ConditionTrue || condition.ObservedGeneration != current.Generation || current.Status.VolumeClaimName == "")) {
-		return false, g.Release(ctx, repository.Namespace, token)
+		return NotReserved, g.Release(ctx, repository.Namespace, token)
 	}
-	return g.consumersStopped(ctx, repository, mode)
+	stopped, err := g.consumersStopped(ctx, repository, mode)
+	if err != nil || !stopped {
+		return Reserved, err
+	}
+	return Admitted, nil
 }
 
 // consumersStopped protects admission across upgrades and observes consumers

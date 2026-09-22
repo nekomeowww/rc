@@ -141,11 +141,11 @@ func (r *RepositoryExecReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
-	acquired, err := (repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}).Acquire(ctx, repository, token, repositoryaccess.Write, true)
+	admission, err := (repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}).Acquire(ctx, repository, token, repositoryaccess.Write, true)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if !acquired {
+	if admission != repositoryaccess.Admitted {
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, r.setSucceeded(ctx, exec, metav1.ConditionUnknown, "WaitingForRepository", "Repository is in use", "")
 	}
 

@@ -41,13 +41,16 @@ func TestSyncAdvancesParentAndPreservesDirtyChild(t *testing.T) {
 	first := git(remote, "rev-parse", "HEAD")
 	synchronize := func() {
 		t.Helper()
-		// Substitute only the container mount path; execute the production fetch,
+		// Substitute the mount and termination-log paths; execute the production fetch,
 		// ref resolution, reset, clean, and submodule policy against real Git.
-		script := strings.ReplaceAll(repositoryBootstrapScript, "/repository", parent)
+		script := strings.NewReplacer("/repository", parent, "/dev/termination-log", filepath.Join(directory, "commit")).Replace(repositoryCheckoutScript)
 		command := exec.CommandContext(t.Context(), "sh", "-ceu", script, "repository-sync", remote, "refs/heads/main", "none", "none", "0")
 		command.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+filepath.Join(directory, "gitconfig"), "GIT_CONFIG_NOSYSTEM=1")
 		output, err := command.CombinedOutput()
 		require.NoError(t, err, string(output))
+		commit, err := os.ReadFile(filepath.Join(directory, "commit"))
+		require.NoError(t, err)
+		require.Equal(t, git(parent, "rev-parse", "HEAD"), strings.TrimSpace(string(commit)))
 	}
 	synchronize()
 	git(directory, "clone", parent, child)

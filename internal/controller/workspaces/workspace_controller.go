@@ -153,6 +153,12 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}
 
+	// Release claims before dependency checks. A missing dependency must not keep
+	// a reservation after the runtime Pod is gone. The API reader verifies absence.
+	if err := r.releaseClaims(ctx, workspace); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	resolved, reason, message, err := r.resolveWorkspaceBase(ctx, workspace)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -262,10 +268,9 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		} else if !errors.IsNotFound(err) {
 			return ctrl.Result{}, fmt.Errorf("get suspended Workspace runtime Pod: %w", err)
 		}
-		if err := r.releaseWriteClaims(ctx, workspace, nil); err != nil {
+		if err := r.releaseClaims(ctx, workspace); err != nil {
 			return ctrl.Result{}, err
 		}
-
 		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Suspended", "Workspace runtime is suspended")
 	}
 
@@ -278,7 +283,9 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	pod := new(corev1.Pod)
 	err = reader.Get(ctx, req.NamespacedName, pod)
 	if errors.IsNotFound(err) {
-		if err := r.releaseWriteClaims(ctx, workspace, resolved.writeClaims); err != nil {
+		// The Pod can disappear after the initial cleanup check. Release its old
+		// claims before acquiring the current mounts for a replacement Pod.
+		if err := r.releaseClaims(ctx, workspace); err != nil {
 			return ctrl.Result{}, err
 		}
 		acquired, claimMessage, err := r.acquireWriteClaims(ctx, workspace, resolved.writeClaims)
@@ -291,9 +298,6 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 		gate := repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}
 		token := repositoryaccess.Token("workspace", workspace)
-		if err := gate.Release(ctx, workspace.Namespace, token); err != nil {
-			return ctrl.Result{}, err
-		}
 		for _, mount := range workspace.Spec.Mounts {
 			if mount.RepositoryRef == nil {
 				continue
@@ -302,11 +306,11 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			if err := r.Get(ctx, client.ObjectKey{Namespace: workspace.Namespace, Name: mount.RepositoryRef.Name}, repository); err != nil {
 				return ctrl.Result{}, err
 			}
-			acquired, err := gate.Acquire(ctx, repository, token, repositoryaccess.Mount, true)
+			admission, err := gate.Acquire(ctx, repository, token, repositoryaccess.Mount, true)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
-			if !acquired {
+			if admission != repositoryaccess.Admitted {
 				if err := gate.Release(ctx, workspace.Namespace, token); err != nil {
 					return ctrl.Result{}, err
 				}
@@ -433,7 +437,7 @@ func (r *WorkspaceReconciler) finalizeWorkspace(ctx context.Context, workspace *
 	} else if !errors.IsNotFound(err) {
 		return ctrl.Result{}, fmt.Errorf("get runtime Pod while finalizing Workspace: %w", err)
 	}
-	if err := r.releaseWriteClaims(ctx, workspace, nil); err != nil {
+	if err := r.releaseClaims(ctx, workspace); err != nil {
 		return ctrl.Result{}, err
 	}
 	controllerutil.RemoveFinalizer(workspace, workspaceFinalizer)
@@ -483,7 +487,9 @@ func (r *WorkspaceReconciler) acquireWriteClaims(ctx context.Context, workspace 
 	return true, "", nil
 }
 
-func (r *WorkspaceReconciler) releaseWriteClaims(ctx context.Context, workspace *workspacesv1alpha1.Workspace, keep []workspaceWriteClaim) error {
+// releaseClaims keeps reservations while a runtime Pod exists. Once it is absent,
+// the Workspace releases both parent mounts and Worktree write claims.
+func (r *WorkspaceReconciler) releaseClaims(ctx context.Context, workspace *workspacesv1alpha1.Workspace) error {
 	reader := r.APIReader
 	if reader == nil {
 		reader = r.Client
@@ -498,19 +504,12 @@ func (r *WorkspaceReconciler) releaseWriteClaims(ctx context.Context, workspace 
 		return err
 	}
 
-	kept := make(map[string]struct{}, len(keep))
-	for _, claim := range keep {
-		kept[claim.leaseName] = struct{}{}
-	}
 	leases := new(coordinationv1.LeaseList)
 	if err := r.List(ctx, leases, client.InNamespace(workspace.Namespace), client.MatchingLabels{worktreeclaim.HolderLabel: workspace.Name}); err != nil {
 		return fmt.Errorf("list Workspace Worktree write Leases: %w", err)
 	}
 	for index := range leases.Items {
 		lease := &leases.Items[index]
-		if _, exists := kept[lease.Name]; exists {
-			continue
-		}
 		if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != string(workspace.UID) {
 			continue
 		}

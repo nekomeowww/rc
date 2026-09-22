@@ -118,25 +118,22 @@ func (r *RepositorySyncReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, r.setResult(ctx, request, metav1.ConditionUnknown, "RepositoryNotReady", "Waiting for Repository bootstrap", nil)
 	}
 	gate := repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}
-	acquired, err := gate.Acquire(ctx, repository, token, repositoryaccess.Write, false)
+	admission, err := gate.Acquire(ctx, repository, token, repositoryaccess.Write, false)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if !acquired {
+	if admission != repositoryaccess.Admitted {
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, r.setResult(ctx, request, metav1.ConditionUnknown, "WaitingForRepository", "Waiting for parent writers, mounts, or clones", nil)
 	}
-	bootstrap := RepositoryReconciler{Client: r.Client, APIReader: r.APIReader, Scheme: r.Scheme, RunnerImage: r.RunnerImage}
-	credential, err := bootstrap.repositoryCredential(ctx, repository)
+	credential, err := repositoryCredential(ctx, r.Client, repository)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return ctrl.Result{}, r.setResult(ctx, request, metav1.ConditionFalse, "CredentialNotFound", "Referenced Credential does not exist", nil)
 		}
 		return ctrl.Result{}, err
 	}
-	job = repositoryBootstrapJob(repository, r.RunnerImage, credential)
-	job.Name = request.Name
-	// Retain the Job until the result has been recorded, even across controller outages.
-	job.Spec.Template.Spec.Containers[0].Args[1] += "\ngit -C /repository rev-parse --verify HEAD > /dev/termination-log\n"
+	// Retain the Job until the result is recorded, even across controller outages.
+	job = repositoryCheckoutJob(repository, request.Name, r.RunnerImage, credential)
 	if err := controllerutil.SetControllerReference(request, job, r.Scheme); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -202,7 +199,7 @@ func (r *RepositorySyncReconciler) complete(ctx context.Context, request *reposi
 				continue
 			}
 			for _, container := range pod.Status.ContainerStatuses {
-				if end := container.State.Terminated; container.Name == job.Spec.Template.Spec.Containers[0].Name && end != nil && end.ExitCode == 0 {
+				if end := container.State.Terminated; container.Name == repositoryCheckoutContainer && end != nil && end.ExitCode == 0 {
 					commit := strings.TrimSpace(end.Message)
 					if resolvedCommitPattern.MatchString(commit) {
 						request.Status.Commit = commit
@@ -243,11 +240,10 @@ func (r *RepositorySyncReconciler) setParent(ctx context.Context, request *repos
 	}
 	captured := repository.DeepCopy()
 	captured.Generation = request.Status.RepositoryGeneration
-	bootstrap := RepositoryReconciler{Client: r.Client, APIReader: r.APIReader}
 	if status != metav1.ConditionTrue {
 		completed = nil
 	}
-	return bootstrap.setStorageReady(ctx, captured, status, reason, message, repository.Status.VolumeClaimName, completed)
+	return setRepositoryStorageReady(ctx, r.Client, captured, status, reason, message, repository.Status.VolumeClaimName, completed)
 }
 
 func (r *RepositorySyncReconciler) setResult(ctx context.Context, request *repositoriesv1alpha1.RepositorySync, status metav1.ConditionStatus, reason, message string, completed *metav1.Time) error {

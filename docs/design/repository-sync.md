@@ -35,6 +35,11 @@ fetch, merge, or rebase when their owners want to update them.
 A Lease per Repository holds persistent access reservations. Atomic
 `resourceVersion` updates serialize admission across controllers. Reservations
 have no timeout because expiry cannot stop a Pod that still uses the volume.
+Admission distinguishes no reservation, a reservation waiting for consumers to
+stop, and permission to create a consumer. API errors require retry or cleanup
+because a failed response does not prove that a reservation write failed.
+Workspace cleanup checks for an absent Pod before dependency readiness checks.
+An unavailable dependency cannot retain a stopped Workspace's reservations.
 
 | Consumer | Reservation | Release condition |
 | --- | --- | --- |
@@ -77,8 +82,8 @@ cancels an in-flight storage operation.
 
 - `internal/repositoryaccess`: atomic admission and consumer checks.
 - `internal/controller/repositories/repositorysync_controller.go`: request lifecycle and durable results.
-- `internal/controller/repositories/repository_controller.go`: shared Git and Credential handling.
-- `internal/controller/repositories/repository_operation.go`: Job and Pod cleanup ordering.
+- `internal/controller/repositories/repository_checkout.go`: shared Git, Credential handling, and commit reporting.
+- `internal/controller/repositories/repository_operation.go`: guarded parent status updates and Job/Pod cleanup ordering.
 - `internal/repositories/sync.go`: request submission and waiting.
 
 Tests cover competing writers, pending clones, stale readiness, informer delay,

@@ -61,7 +61,7 @@ func TestSyncRetainsResultAndBlocksExecAndClones(t *testing.T) {
 	gate := repositoryaccess.Gate{Client: c}
 	admitted, err := gate.Acquire(t.Context(), repository, "new-clone", repositoryaccess.Clone, true)
 	require.NoError(t, err)
-	require.False(t, admitted)
+	require.Equal(t, repositoryaccess.NotReserved, admitted)
 	exec := &repositoriesv1alpha1.RepositoryExec{ObjectMeta: metav1.ObjectMeta{Name: "other-command", Namespace: repository.Namespace, UID: "other-command"}, Spec: repositoriesv1alpha1.RepositoryExecSpec{RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: repository.Name}, Command: []string{"git", "status"}}}
 	require.NoError(t, c.Create(t.Context(), exec))
 	executor := RepositoryExecReconciler{Client: c, Scheme: c.Scheme(), RunnerImage: syncTestRunnerImage}
@@ -88,7 +88,7 @@ func TestSyncRetainsResultAndBlocksExecAndClones(t *testing.T) {
 	require.NotNil(t, repository.Status.LastUpdatedAt)
 	admitted, err = gate.Acquire(t.Context(), repository, "new-clone", repositoryaccess.Clone, true)
 	require.NoError(t, err)
-	require.True(t, admitted)
+	require.Equal(t, repositoryaccess.Admitted, admitted)
 	require.NoError(t, c.Delete(t.Context(), job))
 	reconcileSync(t, c, request)
 	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(request), request))
@@ -102,7 +102,7 @@ func TestSyncWaitsForAdmittedCloneAndRetryUsesNewRequest(t *testing.T) {
 	gate := repositoryaccess.Gate{Client: c}
 	acquired, err := gate.Acquire(t.Context(), repository, "pending-clone", repositoryaccess.Clone, true)
 	require.NoError(t, err)
-	require.True(t, acquired)
+	require.Equal(t, repositoryaccess.Admitted, acquired)
 	reconcileSync(t, c, request)
 	jobs := new(batchv1.JobList)
 	require.NoError(t, c.List(t.Context(), jobs))

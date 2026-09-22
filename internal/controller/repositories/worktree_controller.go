@@ -121,11 +121,11 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	err = r.Get(ctx, claimKey, claim)
 	if errors.IsNotFound(err) {
 		gate := repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}
-		acquired, err := gate.Acquire(ctx, repository, repositoryaccess.Token("clone", worktree), repositoryaccess.Clone, true)
+		admission, err := gate.Acquire(ctx, repository, repositoryaccess.Token("clone", worktree), repositoryaccess.Clone, true)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		if !acquired {
+		if admission != repositoryaccess.Admitted {
 			return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionUnknown, "RepositoryNotReady", "Repository is busy or not ready for cloning", "", repository.Status.VolumeClaimName, worktreePath)
 		}
 		claim = worktreeVolumeClaim(worktree, repository.Status.VolumeClaimName, storageClassName, size, accessModes)

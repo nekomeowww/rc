@@ -69,8 +69,8 @@ rcctl -n <namespace> credentials import --type github --name github-com
 For SSH Git remotes, create an `SSHPrivateKey` Credential from a private-key
 Secret and a verified `known_hosts` file. `rcctl credentials import` does not
 yet import this credential type directly. Obtain GitHub host keys from a
-trusted, independently verified source; for GitHub SSH over port 443 the
-`known_hosts` entry must cover `[ssh.github.com]:443`.
+trusted, independently verified source. This example uses `github.com` on
+port 22, with a matching `github.com` entry in `known_hosts`.
 
 ```sh
 kubectl -n <namespace> create secret generic <github-ssh-secret> --from-file=ssh-privatekey=<private-key-file> --from-file=known_hosts=<verified-known-hosts-file>
@@ -94,35 +94,73 @@ spec:
       key: known_hosts
     config: |
       Host github.com
-        HostName ssh.github.com
-        Port 443
+        HostName github.com
         User git
         IdentityFile ${identityFile}
         UserKnownHostsFile ${knownHostsFile}
         IdentitiesOnly yes
+        StrictHostKeyChecking yes
 ```
 
 Use `git@github.com:<owner>/<repository>.git` with `--credential-ref github-ssh`
 for an SSH Repository clone, and explicitly select `--credential github-ssh`
 on each WorkspaceExec that needs authenticated Git operations.
 
-The `config` field is required for automatic SSH configuration in Workspace
-processes. Without it, rc exposes `id` and `known_hosts` below
-`$RC_CREDENTIALS_DIR/github-ssh`, but OpenSSH does not select those files.
-Repository clone Jobs select these files explicitly and can succeed with the
-same Credential even when a Workspace `git push` fails.
+The `config` field supplies automatic SSH configuration for Workspace processes.
+rc replaces its placeholders and includes a managed fragment from `~/.ssh/config`.
+Without `config`, rc projects the files, but OpenSSH does not select them.
+Repository clone Jobs select the files directly and do not read this fragment.
+Successful Repository authentication does not prove that Workspace SSH is configured.
 
-For an existing Credential, inspect its non-secret `spec.sshPrivateKey.config`
-before use. Do not infer configuration from a successful Repository clone.
-Supply a host-specific fragment such as the example above, or select the
-projected files explicitly for one command:
+Before you reuse a Credential, inspect its non-secret configuration:
 
 ```sh
-rcctl -n <namespace> exec --credential github-ssh <workspace> -- sh -c 'GIT_SSH_COMMAND="ssh -i $RC_CREDENTIALS_DIR/github-ssh/id -o UserKnownHostsFile=$RC_CREDENTIALS_DIR/github-ssh/known_hosts -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes" git ls-remote git@github.com:<owner>/<repository>.git HEAD'
+kubectl -n <namespace> get credential github-ssh -o jsonpath='{.spec.sshPrivateKey.config}'
 ```
 
-The command uses port 22. For port 443, use the fragment above and matching
-trusted host keys. Never disable host-key verification to repair configuration.
+If the fragment is missing or incorrect, update the Credential manifest before use.
+Preserve its Secret references and literal placeholders.
+For a shared Credential, check its consumers before you change host matching.
+Use a separate Credential when the required configuration conflicts with existing consumers.
+Keep host-key verification enabled.
+
+Add the Credential to the Workspace credential allowlist within the authorized task scope.
+Select it on each WorkspaceExec that needs Git authentication.
+Verify the configuration with an ordinary Git command against the intended private repository:
+
+```sh
+rcctl -n <namespace> exec --credential github-ssh <workspace> -- git ls-remote git@github.com:<owner>/<repository>.git HEAD
+```
+
+Correct the Credential configuration instead of bypassing it with a command that hardcodes projected key paths.
+The verification command must use the automatic SSH configuration.
+
+For GitHub SSH over port 443, set `HostName ssh.github.com` and `Port 443` in the fragment.
+Use trusted keys for `[ssh.github.com]:443`.
+For Repository clone, use `ssh://git@ssh.github.com:443/<owner>/<repository>.git` because the Job does not read the fragment.
+
+#### Multiple SSH keys
+
+Create one Credential per key. For different identities on the same server, give each fragment a distinct `Host` alias.
+Keep `HostName github.com` for GitHub on port 22.
+Each fragment uses the same placeholders, which rc resolves to that Credential's files.
+
+| Credential | Fragment `Host` | Workspace Git remote |
+| --- | --- | --- |
+| `github-personal` | `github-personal` | `git@github-personal:<owner>/<repository>.git` |
+| `github-work` | `github-work` | `git@github-work:<owner>/<repository>.git` |
+| `github-bot` | `github-bot` | `git@github-bot:<owner>/<repository>.git` |
+| `github-deploy` | `github-deploy` | `git@github-deploy:<owner>/<repository>.git` |
+
+Select the required credentials with repeated `--credential` flags.
+Use the matching alias in each Workspace Git remote.
+For Repository clone, use the real hostname and select the key with `--credential-ref`.
+The clone Job does not load Workspace aliases.
+
+Do not map different identities to the same `Host` pattern.
+OpenSSH accumulates matching `IdentityFile` entries, even with `IdentitiesOnly yes`.
+It does not select a GitHub identity from the repository path.
+Workspace processes share SSH configuration, so aliases must also remain distinct across concurrent processes.
 
 ### Import Codex auth credential
 

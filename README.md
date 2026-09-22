@@ -49,6 +49,15 @@ The install manifest configures the controller and Linux runner. Select the
 experimental Windows runner explicitly on a Windows Workspace or through the
 manager's `--windows-runner-image` flag.
 
+When `rc-kube serve` starts as Linux PID 1, it starts itself under Tini. Tini
+reaps orphaned descendants while rc-kube keeps ownership of direct command
+exit statuses. The Linux runner includes `tini`; custom images that run
+`rc-kube serve` as PID 1 must provide it on `PATH`. Existing init systems and
+Windows/macOS runtimes do not use this wrapper.
+
+Run `bash hack/test-runner-reaping.sh <runner-image>` to check orphan cleanup,
+command exit status, and supervisor shutdown in an isolated Docker container.
+
 Releases also publish `openai-codex-cli` (Linux amd64/arm64) and
 `openai-codex-cli-windows` (Windows amd64) under the same GHCR namespace.
 These derived images use `rc-<rc-version>` and `<codex-version>-rc.<rc-version>`

@@ -69,8 +69,8 @@ rcctl -n <namespace> credentials import --type github --name github-com
 For SSH Git remotes, create an `SSHPrivateKey` Credential from a private-key
 Secret and a verified `known_hosts` file. `rcctl credentials import` does not
 yet import this credential type directly. Obtain GitHub host keys from a
-trusted, independently verified source; for GitHub SSH over port 443 the
-`known_hosts` entry must cover `[ssh.github.com]:443`.
+trusted, independently verified source. This example uses `ssh.github.com:443`.
+The `known_hosts` entry must cover `[ssh.github.com]:443`.
 
 ```sh
 kubectl -n <namespace> create secret generic <github-ssh-secret> --from-file=ssh-privatekey=<private-key-file> --from-file=known_hosts=<verified-known-hosts-file>
@@ -102,9 +102,40 @@ spec:
         IdentitiesOnly yes
 ```
 
-Use `git@github.com:<owner>/<repository>.git` with `--credential-ref github-ssh`
-for an SSH Repository clone, and explicitly select `--credential github-ssh`
-on each WorkspaceExec that needs authenticated Git operations.
+Workspace processes use `config` through rc-managed SSH fragments.
+Repository clone Jobs do not read it. For clone, use
+`ssh://git@ssh.github.com:443/<owner>/<repository>.git` with `--credential-ref github-ssh`.
+
+Before reuse, inspect the Credential configuration:
+
+```sh
+kubectl -n <namespace> get credential github-ssh -o jsonpath='{.spec.sshPrivateKey.config}'
+```
+
+If configuration is missing or incorrect, correct the manifest without changing its Secret references.
+For shared credentials, check existing consumers before changing host matching.
+Add the Credential to the Workspace allowlist and select it on each execution.
+Verify access to the intended private repository with ordinary Git:
+
+```sh
+rcctl -n <namespace> exec --credential github-ssh <workspace> -- git ls-remote git@github.com:<owner>/<repository>.git HEAD
+```
+
+#### Multiple SSH keys
+
+Use one Credential per key and a distinct `Host` alias per identity.
+Keep `HostName ssh.github.com`, `Port 443`, and the placeholders in each fragment.
+
+| Credential | Fragment `Host` | Workspace Git remote |
+| --- | --- | --- |
+| `github-personal` | `github-personal` | `git@github-personal:<owner>/<repository>.git` |
+| `github-work` | `github-work` | `git@github-work:<owner>/<repository>.git` |
+| `github-bot` | `github-bot` | `git@github-bot:<owner>/<repository>.git` |
+| `github-deploy` | `github-deploy` | `git@github-deploy:<owner>/<repository>.git` |
+
+Select credentials with repeated `--credential` flags and use the matching alias in each Workspace remote.
+Keep aliases distinct across concurrent processes because they share SSH configuration.
+Matching `IdentityFile` entries accumulate, so one shared `Host` pattern cannot select different identities by repository path.
 
 ### Import Codex auth credential
 

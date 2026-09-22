@@ -12,7 +12,7 @@ The project consists of three programs:
 > rc is under active development. Its APIs are currently `v1alpha1` and may
 > change between releases.
 
-## Why worktree-native?
+## Why Worktrees?
 
 rc models a remote Git repository and a writable checkout separately:
 
@@ -21,7 +21,7 @@ Git remote -> Repository parent PVC -> Worktree child PVC -> Workspace
                                                         \-> WorkspaceExec
 ```
 
-A `Repository` is the synchronized, authoritative mirror of a Git remote. A `Worktree` is an independent CSI clone of that Repository volume initialized with native `git worktree add` semantics. A `Workspace` mounts one or more Worktrees together with a persistent home directory, and can run multiple concurrent `WorkspaceExec` resources.
+A `Repository` is the synchronized, authoritative mirror of a Git remote. A `Worktree` is an independent CSI clone of that Repository volume. rc initializes the requested branch or ref directly in the cloned Repository root, without downloading the remote or materializing a second linked worktree. A `Workspace` mounts one or more Worktrees together with a persistent home directory, and can run multiple concurrent `WorkspaceExec` resources.
 
 This gives each task an ordinary Git branch and working tree without repeatedly downloading the same remote. Worktrees remain inspectable after a process exits, and a disconnected terminal does not stop the process it started.
 
@@ -136,7 +136,7 @@ The top-level command groups follow the rc resource model:
 | --- | --- |
 | `rcctl credentials` | Import Git, agent, and process credentials |
 | `rcctl repo` | Clone, inspect, execute commands in, and delete Repository mirrors |
-| `rcctl worktree` | Create, inspect, execute in, and delete independent native Git worktrees |
+| `rcctl worktree` | Create, inspect, execute in, and delete independent Git checkouts |
 | `rcctl env` | Prepare and commit reusable Workspace home environments |
 | `rcctl workspace` | Create persistent development machines and manage their mounts |
 | `rcctl run` / `rcctl exec` | Run commands in a new / existing Workspace |
@@ -200,7 +200,7 @@ rcctl -n development worktree list
 rcctl -n development worktree exec rc-readme -- git status --short
 ```
 
-The add command creates a child PVC through CSI cloning and initializes a native Git worktree on it. `worktree exec` is the lightweight path for short commands that need only the base Runner Image: it runs in a separate Job, does not allocate a Workspace home PVC, and holds the same exclusive write Lease as a Workspace mount. It intentionally does not provide Workspace Environment state, caches, credentials, process persistence, or an interactive terminal. Use `run --rm --worktree rc-readme -- COMMAND` when a command needs those Workspace capabilities. Advanced `git worktree add` modes are available through flags such as `--ref`, `--detach`, `--orphan`, `--no-checkout`, and `--lock`. Delete an unmounted Worktree and its owned PVC and bootstrap Job with `rcctl worktree rm rc-readme`.
+The add command creates a child PVC through CSI cloning and initializes the requested Git checkout in the clone root. `worktree exec` is the lightweight path for short commands that need only the base Runner Image: it runs in a separate Job, does not allocate a Workspace home PVC, and holds the same exclusive write Lease as a Workspace mount. It intentionally does not provide Workspace Environment state, caches, credentials, process persistence, or an interactive terminal. Use `run --rm --worktree rc-readme -- COMMAND` when a command needs those Workspace capabilities. Checkout modes remain available through flags such as `--ref`, `--detach`, `--orphan`, and `--no-checkout`. `--lock` and `--reason` record their requested intent, but no Git lock is required because the clone root has no linked-worktree metadata to prune. Delete an unmounted Worktree and its owned PVC and bootstrap Job with `rcctl worktree rm rc-readme`.
 
 ### Run a process
 

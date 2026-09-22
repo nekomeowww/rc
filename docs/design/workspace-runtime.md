@@ -256,8 +256,9 @@ on a unique `rc/<workspace>/<mount>` branch. It remains an ordinary Worktree
 resource and is not deleted automatically when its creating process finishes.
 Because its PVC is already an isolated CSI clone with a complete working tree,
 the generated Worktree reuses the clone root and creates only the unique branch;
-it does not create a second nested checkout. Explicitly created Worktrees retain
-native `git worktree add` behavior and its advanced flags.
+it does not create a second nested checkout. Explicitly created Worktrees use
+the same clone-root model and apply their requested branch or ref in a bootstrap
+Job before they become ready.
 
 One Worktree may be mounted read-write by only one running Workspace at a time.
 Processes inside that Workspace may use it concurrently. Multiple Workspaces

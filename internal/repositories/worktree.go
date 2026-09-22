@@ -19,8 +19,8 @@ import (
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 )
 
-// WorktreeAddRequest describes one independent child volume and native Git
-// worktree request.
+// WorktreeAddRequest describes one independent child volume and Git checkout
+// request.
 type WorktreeAddRequest struct {
 	Namespace    string
 	Repository   string
@@ -87,7 +87,7 @@ func (c *WorktreeClient) Start(ctx context.Context, request WorktreeAddRequest) 
 	return worktree, nil
 }
 
-// Wait waits for the native worktree bootstrap to complete.
+// Wait waits for the isolated checkout bootstrap to complete.
 func (c *WorktreeClient) Wait(ctx context.Context, worktree *repositoriesv1alpha1.Worktree, output io.Writer) error {
 	var result *repositoriesv1alpha1.Worktree
 

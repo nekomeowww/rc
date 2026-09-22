@@ -26,9 +26,9 @@ _Avoid_: Repository Run
 
 **Worktree**:
 An independent child PVC cloned from a Repository parent PVC. The child owns a
-complete Git repository and contains a native Git worktree created with
-`git worktree add`; its reflog, stash, refs, and working files are independent
-from the parent.
+complete Git repository. rc initializes the requested branch or ref directly
+in the cloned Repository root; its reflog, stash, refs, and working files are
+independent from the parent.
 
 **Worktree Exec**:
 A user-requested execution of an arbitrary command against a Worktree child

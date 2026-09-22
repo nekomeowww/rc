@@ -127,7 +127,7 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(action.Command[2]).NotTo(ContainSubstring("worktree add"))
 	})
 
-	It("clones the Repository PVC and creates a native Git worktree Job", func() {
+	It("clones the Repository PVC and checks out the requested branch in its root", func() {
 		ctx := context.Background()
 		const (
 			repositoryName = "worktree-parent"
@@ -194,13 +194,14 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: worktreeBootstrapJobName(worktree), Namespace: testNamespace}, job)).To(Succeed())
 		container := job.Spec.Template.Spec.Containers[0]
 		Expect(container.Image).To(Equal(runnerImage))
-		Expect(container.Args).To(ContainElement(gitWorktreeSubcommand))
-		Expect(container.Args).To(ContainElement("add"))
+		Expect(container.Args).To(ContainElement(gitCheckoutSubcommand))
 		Expect(container.Args).To(ContainElement("-b"))
 		Expect(container.Args).To(ContainElement("feature/worktree"))
-		Expect(container.Args).To(ContainElement("/mnt/rc/worktrees/worktree-child/worktree/worktree-child"))
+		Expect(container.Args).NotTo(ContainElement("worktree"))
+		Expect(container.Args).NotTo(ContainElement("add"))
 		Expect(container.Args[1]).To(ContainSubstring("checkout.workers=8"))
 		Expect(container.WorkingDir).To(Equal("/mnt/rc/worktrees/worktree-child"))
+		Expect(job.Annotations[worktreePathAnnotation]).To(Equal(workerMountPath))
 		Expect(container.VolumeMounts).To(ConsistOf(corev1.VolumeMount{Name: workerVolumeName, MountPath: "/mnt/rc/worktrees/worktree-child"}))
 		Expect(job.Spec.Template.Spec.SecurityContext.RunAsUser).To(HaveValue(Equal(int64(1000))))
 		Expect(job.Spec.Template.Spec.SecurityContext.RunAsGroup).To(HaveValue(Equal(int64(1000))))
@@ -228,11 +229,11 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(ready).NotTo(BeNil())
 		Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 		Expect(persisted.Status.VolumeClaimName).To(Equal(worktreeName))
-		Expect(persisted.Status.WorktreePath).To(Equal(worktreePath(worktree)))
+		Expect(persisted.Status.WorktreePath).To(Equal(workerMountPath))
 
 		// Kubernetes deletes the completed bootstrap Job after its TTL. The
 		// Worktree Ready condition is the durable record that initialization
-		// succeeded, so reconciliation must not run git worktree add again.
+		// succeeded, so reconciliation must not run Git checkout again.
 		Expect(k8sClient.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
 		Eventually(func() bool {
 			err := k8sClient.Get(ctx, types.NamespacedName{Name: worktreeBootstrapJobName(worktree), Namespace: testNamespace}, new(batchv1.Job))
@@ -249,42 +250,93 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 	})
 
-	It("creates a native Git worktree that remains usable at the runtime mount path", func() {
+	It("checks out a detached commit in the cloned Repository root", func() {
 		// ROOT CAUSE:
 		//
-		// The bootstrap Job previously created the linked worktree below
-		// /repository, but Workspace Pods mounted only that linked-worktree
-		// subdirectory. Its .git file therefore referenced an absolute metadata
-		// path that did not exist in the Workspace container. Creating the worktree
-		// below the same stable volume root mounted by the runtime keeps both sides
-		// of Git's native worktree link reachable.
+		// A CSI clone already contains an independent complete Git repository.
+		// Creating a linked worktree inside that clone materialized the repository
+		// a second time on network storage. Checking out the requested commit in the
+		// clone root preserves volume isolation without the duplicate working tree.
 		temporaryDirectory := GinkgoT().TempDir()
 		stableRoot := filepath.Join(temporaryDirectory, "stable-root")
-		stableTarget := filepath.Join(stableRoot, "worktree", "portable")
 
 		runGitCommand(temporaryDirectory, "init", stableRoot)
 		runGitCommand(stableRoot, "config", "user.name", "RC Test")
 		runGitCommand(stableRoot, "config", "user.email", "rc@example.invalid")
 		Expect(os.WriteFile(filepath.Join(stableRoot, "README.md"), []byte("portable worktree\n"), 0o600)).To(Succeed())
 		runGitCommand(stableRoot, "add", "README.md")
-		runGitCommand(stableRoot, "commit", "-m", "initial")
+		runGitCommand(stableRoot, "-c", "commit.gpgsign=false", "commit", "-m", "initial")
+		target := strings.TrimSpace(runGitCommandOutput(stableRoot, "rev-parse", "HEAD"))
+		Expect(os.WriteFile(filepath.Join(stableRoot, "README.md"), []byte("new parent state\n"), 0o600)).To(Succeed())
+		runGitCommand(stableRoot, "-c", "commit.gpgsign=false", "commit", "-am", "parent advanced")
 
 		testHome := filepath.Join(temporaryDirectory, "home")
 		Expect(os.Mkdir(testHome, 0o700)).To(Succeed())
-		command := exec.Command("sh", "-ceu", worktreeBootstrapScript, "worktree-bootstrap", "worktree", "add", "-b", "portable", stableTarget)
+		command := exec.Command("sh", "-ceu", worktreeBootstrapScript, "worktree-bootstrap", "false", gitCheckoutSubcommand, "--detach", target)
 		command.Dir = stableRoot
 		command.Env = append(os.Environ(), "HOME="+testHome)
 		output, err := command.CombinedOutput()
 		Expect(err).NotTo(HaveOccurred(), string(output))
-		gitDirectory, err := os.ReadFile(filepath.Join(stableTarget, ".git"))
+		gitInfo, err := os.Stat(filepath.Join(stableRoot, ".git"))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(strings.TrimSpace(string(gitDirectory))).To(ContainSubstring(stableRoot))
+		Expect(gitInfo.IsDir()).To(BeTrue())
+		Expect(strings.TrimSpace(runGitCommandOutput(stableRoot, "rev-parse", "HEAD"))).To(Equal(target))
+		Expect(filepath.Join(stableRoot, "worktree")).NotTo(BeADirectory())
 
 		status := exec.Command("git", "status", "--short")
-		status.Dir = stableTarget
+		status.Dir = stableRoot
 		status.Env = append(os.Environ(), "HOME="+testHome)
 		output, err = status.CombinedOutput()
 		Expect(err).NotTo(HaveOccurred(), string(output))
+	})
+
+	It("keeps no-checkout mode without creating a linked worktree", func() {
+		temporaryDirectory := GinkgoT().TempDir()
+		repositoryRoot := filepath.Join(temporaryDirectory, "repository")
+		runGitCommand(temporaryDirectory, "init", repositoryRoot)
+		runGitCommand(repositoryRoot, "config", "user.name", "RC Test")
+		runGitCommand(repositoryRoot, "config", "user.email", "rc@example.invalid")
+		Expect(os.WriteFile(filepath.Join(repositoryRoot, "README.md"), []byte("no checkout\n"), 0o600)).To(Succeed())
+		runGitCommand(repositoryRoot, "add", "README.md")
+		runGitCommand(repositoryRoot, "-c", "commit.gpgsign=false", "commit", "-m", "initial")
+
+		testHome := filepath.Join(temporaryDirectory, "home")
+		Expect(os.Mkdir(testHome, 0o700)).To(Succeed())
+		command := exec.Command("sh", "-ceu", worktreeBootstrapScript, "worktree-bootstrap", "true", gitCheckoutSubcommand, "-b", "isolated")
+		command.Dir = repositoryRoot
+		command.Env = append(os.Environ(), "HOME="+testHome)
+		output, err := command.CombinedOutput()
+		Expect(err).NotTo(HaveOccurred(), string(output))
+
+		entries, err := os.ReadDir(repositoryRoot)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(entries).To(HaveLen(1))
+		Expect(entries[0].Name()).To(Equal(".git"))
+		Expect(strings.TrimSpace(runGitCommandOutput(repositoryRoot, "status", "--short"))).To(Equal("D  README.md"))
+	})
+
+	It("accepts an unborn HEAD for orphan checkouts", func() {
+		temporaryDirectory := GinkgoT().TempDir()
+		repositoryRoot := filepath.Join(temporaryDirectory, "repository")
+		runGitCommand(temporaryDirectory, "init", repositoryRoot)
+		runGitCommand(repositoryRoot, "config", "user.name", "RC Test")
+		runGitCommand(repositoryRoot, "config", "user.email", "rc@example.invalid")
+		Expect(os.WriteFile(filepath.Join(repositoryRoot, "README.md"), []byte("orphan\n"), 0o600)).To(Succeed())
+		runGitCommand(repositoryRoot, "add", "README.md")
+		runGitCommand(repositoryRoot, "-c", "commit.gpgsign=false", "commit", "-m", "initial")
+
+		testHome := filepath.Join(temporaryDirectory, "home")
+		Expect(os.Mkdir(testHome, 0o700)).To(Succeed())
+		command := exec.Command("sh", "-ceu", worktreeBootstrapScript, "worktree-bootstrap", "false", gitCheckoutSubcommand, "--orphan", "isolated", "HEAD")
+		command.Dir = repositoryRoot
+		command.Env = append(os.Environ(), "HOME="+testHome)
+		output, err := command.CombinedOutput()
+		Expect(err).NotTo(HaveOccurred(), string(output))
+		Expect(strings.TrimSpace(runGitCommandOutput(repositoryRoot, "symbolic-ref", "HEAD"))).To(Equal("refs/heads/isolated"))
+
+		head := exec.Command("git", "rev-parse", "--verify", "HEAD")
+		head.Dir = repositoryRoot
+		Expect(head.Run()).NotTo(Succeed())
 	})
 
 	It("keeps deletion protected while a Workspace references the Worktree", func() {
@@ -440,6 +492,15 @@ func runGitCommand(directory string, arguments ...string) {
 	command.Dir = directory
 	output, err := command.CombinedOutput()
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), string(output))
+}
+
+func runGitCommandOutput(directory string, arguments ...string) string {
+	command := exec.Command("git", arguments...)
+	command.Dir = directory
+	output, err := command.CombinedOutput()
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), string(output))
+
+	return string(output)
 }
 
 func metav1Object(name string) metav1.ObjectMeta {

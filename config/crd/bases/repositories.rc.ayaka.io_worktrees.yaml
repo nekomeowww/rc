@@ -60,24 +60,26 @@ spec:
                 minLength: 1
                 type: string
               detach:
-                description: detach creates a detached HEAD worktree.
+                description: detach creates a detached HEAD checkout.
                 type: boolean
               lock:
-                description: lock keeps the native Git worktree locked after creation.
+                description: |-
+                  lock records Git worktree lock intent. An isolated checkout root cannot be
+                  pruned as linked-worktree metadata, so it needs no additional Git lock.
                 type: boolean
               lockReason:
-                description: lockReason records why the native Git worktree is locked.
+                description: lockReason records why lock intent was requested.
                 maxLength: 1024
                 type: string
               noCheckout:
-                description: noCheckout creates the worktree metadata without populating
+                description: noCheckout initializes Git metadata without populating
                   files.
                 type: boolean
               orphan:
                 description: orphan creates an unborn branch.
                 type: boolean
               ref:
-                description: ref is the commit-ish checked out by the new worktree.
+                description: ref is the commit-ish selected for the isolated checkout.
                 maxLength: 1024
                 minLength: 1
                 type: string
@@ -130,7 +132,7 @@ spec:
             type: object
             x-kubernetes-validations:
             - message: spec is immutable; recreate the Worktree to change its source
-                or Git add options
+                or Git checkout options
               rule: self == oldSelf
             - message: branch and resetBranch are mutually exclusive
               rule: '!(has(self.branch) && has(self.resetBranch))'
@@ -202,8 +204,8 @@ spec:
                 x-kubernetes-list-type: map
               jobName:
                 description: |-
-                  jobName is the bootstrap Job that ran git worktree add. It is empty when a
-                  Temporary Workspace runtime initializes the cloned Repository root.
+                  jobName is the bootstrap Job that initialized the cloned Repository root.
+                  It is empty when a Temporary Workspace runtime performs initialization.
                 type: string
               observedGeneration:
                 description: |-
@@ -223,8 +225,8 @@ spec:
                 type: string
               worktreePath:
                 description: |-
-                  worktreePath is the path inside the child PVC containing the native Git
-                  worktree.
+                  worktreePath is the path inside the child PVC containing the isolated Git
+                  checkout.
                 type: string
             type: object
         required:

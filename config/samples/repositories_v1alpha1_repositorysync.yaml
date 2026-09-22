@@ -1,0 +1,7 @@
+apiVersion: repositories.rc.ayaka.io/v1alpha1
+kind: RepositorySync
+metadata:
+  name: repository-sync-sample
+spec:
+  repositoryRef:
+    name: repository-sample

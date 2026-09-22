@@ -394,6 +394,7 @@ var _ = Describe("Worktree Controller", func() {
 
 	It("completes protected deletion after acquiring the exclusive Lease", func() {
 		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
 		Expect(repositoriesv1alpha1.AddToScheme(scheme)).To(Succeed())
 		Expect(workspacesv1alpha1.AddToScheme(scheme)).To(Succeed())
 		Expect(coordinationv1.AddToScheme(scheme)).To(Succeed())

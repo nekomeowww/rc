@@ -26,7 +26,7 @@ Use rc as a Kubernetes-backed development runtime. Treat Repository mirrors, wri
 
 ## Credentials, access, and processes
 
-- Scope Git clone credentials to the Repository clone operation. An imported GitHub CLI credential does not authenticate `gh` or Git inside a Workspace.
+- Scope Git credentials to Repository clone and sync operations. An imported GitHub CLI credential does not authenticate `gh` or Git inside a Workspace.
 - Workspace credential references are an allowlist; select required process credentials explicitly on every WorkspaceExec. Do not put secrets in images, Environment snapshots, command arguments, source, or logs.
 - A Workspace is one trust boundary: its processes share a Pod, home, mounts, network identity, and effective access. Use a separate Workspace for untrusted work or a different secret set.
 - rc normally injects the same-namespace `rc-workspace` ServiceAccount into a Workspace. It permits rc and related Kubernetes operations in that namespace, so software launched in a Workspace or WorkspaceExec can programmatically use `rcctl` to manage same-namespace rc resources. It does not grant unrelated cluster-wide privileges. Use `--no-service-account` or an explicitly chosen same-namespace ServiceAccount only when requested.
@@ -160,6 +160,20 @@ rcctl -n <namespace> repo clone <git-url> --name <repository> --storage-class <c
 rcctl -n <namespace> workspace create <workspace> --environment <environment> --cwd /workspace/<mount>
 rcctl -n <namespace> workspace mount repo <repository> --workspace <workspace> --name <mount> --path <mount>
 ```
+
+### Update the parent Repository
+
+Before creating a Worktree that needs current remote code:
+
+```sh
+rcctl -n <namespace> repo sync <repository>
+```
+
+Sync fetches and resets the parent using its configured ref and Credential. It
+removes untracked parent files and leaves existing Worktrees unchanged. It waits
+for parent writers, pending clones, and direct Repository mounts. Suspend direct
+parent mounts first. Workspaces mounted on independent Worktrees can keep running.
+Use `--wait=false` to submit without waiting; the command prints the request name.
 
 ### Add a parallel branch to the same Workspace
 

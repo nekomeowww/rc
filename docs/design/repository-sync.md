@@ -1,99 +1,84 @@
 # Explicit Repository sync
 
-Status: proposal. This document describes missing behavior, not an available command.
+Status: implemented by `rcctl repo sync NAME`.
 
-## Current behavior
+## Operation and result
 
-Inspection at `c64b463` found no `rcctl repo sync` command.
-The registered commands are `clone`, `exec`, `get`, `list`, and `delete`.
+Sync fetches the configured remote and resets the parent checkout to the configured
+ref or remote default branch. It removes untracked files and applies the configured
+submodule policy. It uses the same Credential projection as bootstrap. Arbitrary
+`repo exec` commands do not receive those credentials.
 
-The Repository controller already contains the Git synchronization procedure.
-It fetches the configured remote and checks out the configured full ref or remote
-default branch. It resets the parent checkout and removes untracked files,
-as implemented in `repositoryBootstrapScript` in the Repository controller.
+Each command creates an immutable `RepositorySync` request. `--wait` defaults to
+true and prints the resolved commit. `--wait=false` prints the request name.
+`kubectl get repositorysync NAME -o yaml` shows the Job, captured Repository UID
+and generation, commit, completion time, and `Succeeded` condition.
 
-The controller names the bootstrap Job after the Repository generation.
-Once that generation is ready, it returns without fetching again. Neither
-elapsed time nor a remote commit changes the Kubernetes spec generation.
-Deleting the completed Job is not a sync mechanism: the ready fast path
-intentionally preserves the ready state after Job cleanup.
+The controller retains the Job until it records the terminal result. Successful
+requests advance Repository `lastUpdatedAt`. Terminal results survive Job cleanup.
+Waiters observe their own request. An earlier Repository Ready condition cannot
+complete a new request. Concurrent requests compete for admission without FIFO
+ordering or coalescing. Each admitted request performs its own fetch.
 
-`status.lastUpdatedAt` already records successful bootstrap completion.
-`repo get` and `repo list` expose this timestamp and the configured ref.
-They do not expose the resolved commit or the refs available in the mirror.
+Existing Worktree volumes, branches, and dirty files remain unchanged. A Worktree
+created after sync clones the updated parent. Existing Worktrees use ordinary Git
+fetch, merge, or rebase when their owners want to update them.
 
-`repo exec` is an explicit escape hatch for exact commands. It does not mount
-Repository credentials into arbitrary programs, and it does not update the
-Repository synchronization timestamp. A public `git fetch` can work through
-this path, but a private sync needs credential handling and checkout policy.
+## Parent access
 
-## Proposed operation
+A Lease per Repository holds persistent access reservations. Atomic
+`resourceVersion` updates serialize admission across controllers. Reservations
+have no timeout because expiry cannot stop a Pod that still uses the volume.
 
-Use `sync` because the operation fetches remote objects and resets the parent
-checkout to the configured ref. `fetch` alone does not describe the checkout change.
-
-Add `rcctl repo sync NAME`, with `--wait` enabled by default. It submits an
-explicit synchronization request and waits for that request's terminal result.
-It reuses the configured remote, ref, submodule policy, and Credential.
-It does not alter existing Worktree volumes or branches.
-
-The command must state that synchronization resets the shared parent mirror.
-Worktree creation can follow a successful sync to obtain current source.
-Existing Worktrees need their own fetch/rebase workflow.
-
-## Required coordination
-
-An extra spec token alone is insufficient. It can start a new bootstrap Job
-while another operation still writes the same parent volume.
-
-The synchronization implementation must coordinate these consumers:
-
-| Consumer | Access | Required behavior during sync |
+| Consumer | Reservation | Release condition |
 | --- | --- | --- |
-| Bootstrap or sync Job | Parent writer | One active writer; no overlapping generations |
-| RepositoryExec | Parent writer | Wait behind the same writer reservation |
-| New Worktree CSI clone | Parent reader | Do not begin against an in-progress reset |
-| Pending CSI clone | Parent reader | Establish when source capture is complete before allowing reset |
-| Workspace Repository mount | Persistent parent reader | Account for active mounts before modifying the mirror |
-| Existing Worktree | Independent child volume | Continue without content changes |
+| Bootstrap, sync, or RepositoryExec | Exclusive writer | Result recorded and consumer stopped |
+| New Worktree clone | Shared clone reader | Child PVC is Bound |
+| Direct Workspace Repository mount | Shared mounted reader | Workspace Pod is absent |
+| Existing Worktree | None on parent | Independent child volume |
 
-Use a shared ownership protocol for the writer reservation and clone admission.
-A list-then-create check in separate reconcilers does not provide exclusion.
-Document the CSI assumptions before selecting the reader-release condition.
-Reject unsupported storage behavior instead of assuming that every clone is
-an instantaneous filesystem snapshot.
+Clone readers and mounted readers cannot overlap. Kubernetes requires an unused
+clone source. A Bound CSI clone is a usable independent volume; pending claims
+retain their source reservations. See [CSI volume cloning](https://kubernetes.io/docs/concepts/storage/volume-pvc-datasource/).
+The StorageClass must support CSI cloning and provision the child without a
+consumer Pod, as required by the existing Worktree bootstrap flow.
 
-The Worktree controller currently tests `StorageReady=True` without checking
-its observed generation. A sync implementation must close that stale-status
-window and coordinate already admitted readers, not only strengthen the check.
+Admission rechecks Repository generation and status through the API. Job-loss and
+Pod-removal checks also bypass the informer cache. An informer delay does not
+prove that a recently created consumer disappeared. Existing Pods and pending
+clones are checked before admitting a writer, including during controller upgrades.
+All rc consumers use this protocol; manually created Kubernetes consumers must
+not race rc operations on the parent PVC.
 
-## Observable results
+## Failure and deletion
 
-Associate every request with an identifier and a terminal result. Report the
-resolved commit, completion time, failure reason, and owning Job. Waiters must
-not accept a previous request's Ready condition. Concurrent requests must have
-defined serialization or coalescing semantics.
+A failed sync leaves the parent unavailable for new clones and mounts. It does
+not roll back a partial checkout. A new sync request can retry with the configured
+credentials. A changed Repository generation runs bootstrap after the current
+reservation is released. Existing child volumes remain usable.
 
-Keep full refs distinct from local branch names. The parent can have detached
-HEAD, so a remote branch named `main` does not imply a local `main` branch.
-Document `HEAD` as the current cloned base for Worktree creation. Ref inspection
-must report actual available refs rather than inventing local branch aliases.
+Deleting a running request stops its Job and waits for its Pods before releasing
+the parent. The parent remains unavailable until a later sync succeeds. A Job
+that disappears before its result is recorded produces `JobLost`; rc does not
+silently repeat the request.
 
-## Acceptance checks
+Deleting a Worktree during provisioning retains its source reservation until the
+clone is Bound. A stuck CSI operation therefore blocks parent writers until the
+storage problem is resolved. This avoids assuming that deleting a pending PVC
+cancels an in-flight storage operation.
 
-- Advance a test remote, sync, and create a Worktree at the new commit.
-- Keep an existing dirty Worktree unchanged through that sync.
-- Authenticate a private sync with only its configured Credential.
-- Serialize sync with RepositoryExec and another sync request.
-- Prevent cloning during reset and wait for an admitted source capture.
-- Retry a failed sync with a new request without deleting user storage.
-- Reject stale Ready results and preserve terminal results after Job cleanup.
-- Run storage lifecycle checks on an isolated Kind cluster.
+## Implementation and checks
 
-## Evidence locations
+- `internal/repositoryaccess`: atomic admission and consumer checks.
+- `internal/controller/repositories/repositorysync_controller.go`: request lifecycle and durable results.
+- `internal/controller/repositories/repository_controller.go`: shared Git and Credential handling.
+- `internal/controller/repositories/repository_operation.go`: Job and Pod cleanup ordering.
+- `internal/repositories/sync.go`: request submission and waiting.
 
-- `internal/cli/rcctl/commands/repositories/repositories.go`: command registration.
-- `internal/controller/repositories/repository_controller.go`: bootstrap, generation, readiness, and authentication.
-- `internal/controller/repositories/repositoryexec_controller.go`: exec serialization and credential omission.
-- `internal/controller/repositories/worktree_controller.go`: clone admission and readiness checks.
-- `api/repositories/v1alpha1/repository_types.go`: configured ref and update timestamp.
+Tests cover competing writers, pending clones, stale readiness, informer delay,
+Credential projection, failed-request retry, retained results, and existing
+Worktree readiness. A real Git test advances a remote and preserves a dirty child.
+
+An isolated Kind cluster with the CSI hostpath driver also verified authenticated
+HTTP sync, new and dirty existing Worktrees, Job cleanup, RepositoryExec exclusion,
+and a direct Workspace mount that blocks sync until suspension.

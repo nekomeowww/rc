@@ -34,6 +34,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	"github.com/nekomeowww/rc/internal/repositoryaccess"
 	"github.com/nekomeowww/rc/internal/runtimepolicy"
 )
 
@@ -61,6 +62,7 @@ var repositoryExecStatus = oneShotStatusAdapter[*repositoriesv1alpha1.Repository
 // RepositoryExecReconciler reconciles a RepositoryExec object.
 type RepositoryExecReconciler struct {
 	client.Client
+	APIReader   client.Reader
 	Scheme      *runtime.Scheme
 	RunnerImage string
 }
@@ -75,17 +77,36 @@ type RepositoryExecReconciler struct {
 // the same Repository are serialized because the parent has one writer.
 func (r *RepositoryExecReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	// Request status and Job existence must reflect completed API writes, not
+	// informer delivery order. This preserves at-most-once execution.
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
 	exec := new(repositoriesv1alpha1.RepositoryExec)
 
-	err := r.Get(ctx, req.NamespacedName, exec)
+	err := reader.Get(ctx, req.NamespacedName, exec)
 	if err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	if succeeded := meta.FindStatusCondition(exec.Status.Conditions, repositoriesv1alpha1.RepositoryExecConditionSucceeded); succeeded != nil && succeeded.Status != metav1.ConditionUnknown {
-		return ctrl.Result{}, nil
+
+	token := repositoryaccess.Token("repository-exec", exec)
+	succeeded := meta.FindStatusCondition(exec.Status.Conditions, repositoriesv1alpha1.RepositoryExecConditionSucceeded)
+	if !exec.DeletionTimestamp.IsZero() || (succeeded != nil && succeeded.Status != metav1.ConditionUnknown) {
+		done, err := releaseRepositoryOperation(ctx, r.Client, r.APIReader, exec, token, exec.Status.JobName)
+		if err != nil || done {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+	if !controllerutil.ContainsFinalizer(exec, repositoryOperationFinalizer) {
+		controllerutil.AddFinalizer(exec, repositoryOperationFinalizer)
+		if err := r.Update(ctx, exec); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
-	job, jobState, err := observeOneShotJob(ctx, r.Client, exec, exec.Status.JobName)
+	job, jobState, err := observeOneShotJob(ctx, reader, exec, exec.Status.JobName)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("observe Repository Exec Job: %w", err)
 	}
@@ -120,17 +141,12 @@ func (r *RepositoryExecReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
-	busy, err := r.repositoryHasActiveExec(ctx, repository, exec)
+	acquired, err := (repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}).Acquire(ctx, repository, token, repositoryaccess.Write, true)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if busy {
-		err := r.setSucceeded(ctx, exec, metav1.ConditionUnknown, "WaitingForRepository", "Another exec is using the Repository parent volume", "")
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-
-		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	if !acquired {
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, r.setSucceeded(ctx, exec, metav1.ConditionUnknown, "WaitingForRepository", "Repository is in use", "")
 	}
 
 	job = repositoryExecJob(exec, repository, r.RunnerImage)
@@ -148,30 +164,6 @@ func (r *RepositoryExecReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	log.Info("Created Repository Exec Job", "name", job.Name, "repository", repository.Name)
 	return ctrl.Result{}, r.setSucceeded(ctx, exec, metav1.ConditionUnknown, "JobCreated", "Command Job was created", job.Name)
-}
-
-func (r *RepositoryExecReconciler) repositoryHasActiveExec(
-	ctx context.Context,
-	repository *repositoriesv1alpha1.Repository,
-	current *repositoriesv1alpha1.RepositoryExec,
-) (bool, error) {
-	jobs := new(batchv1.JobList)
-
-	err := r.List(ctx, jobs, client.InNamespace(repository.Namespace), client.MatchingLabels{
-		repositoryUIDLabel: string(repository.UID),
-	})
-	if err != nil {
-		return false, fmt.Errorf("list Repository Exec Jobs: %w", err)
-	}
-
-	for index := range jobs.Items {
-		job := &jobs.Items[index]
-		if job.Name != current.Name && !jobFinished(job) {
-			return true, nil
-		}
-	}
-
-	return false, nil
 }
 
 func repositoryExecJob(
@@ -264,6 +256,7 @@ func jobFinished(job *batchv1.Job) bool {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *RepositoryExecReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.APIReader = mgr.GetAPIReader()
 	if r.RunnerImage == "" {
 		return fmt.Errorf("repository exec runner image must not be empty")
 	}

@@ -40,6 +40,7 @@ rules:
   - delete
   - get
   - list
+  - update
   - watch
 - apiGroups:
   - configs.rc.ayaka.io
@@ -99,6 +100,7 @@ rules:
   resources:
   - repositories
   - repositoryexecs
+  - repositorysyncs
   - worktreeexecs
   - worktrees
   verbs:
@@ -114,6 +116,7 @@ rules:
   resources:
   - repositories/finalizers
   - repositoryexecs/finalizers
+  - repositorysyncs/finalizers
   - worktreeexecs/finalizers
   - worktrees/finalizers
   verbs:
@@ -123,6 +126,7 @@ rules:
   resources:
   - repositories/status
   - repositoryexecs/status
+  - repositorysyncs/status
   - worktreeexecs/status
   - worktrees/status
   verbs:

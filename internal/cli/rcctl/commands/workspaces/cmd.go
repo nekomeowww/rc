@@ -616,7 +616,14 @@ func validateWorkspaceMountSource(ctx context.Context, kubeClient client.Client,
 		return fmt.Errorf("worktree %q is being deleted", worktree.Name)
 	}
 	ready := meta.FindStatusCondition(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady)
-	if worktree.Status.ObservedGeneration < worktree.Generation || ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration < worktree.Generation || worktree.Status.VolumeClaimName == "" {
+	worktreeReady := ready != nil && ready.Status == metav1.ConditionTrue && ready.ObservedGeneration >= worktree.Generation
+	volumeReady := meta.FindStatusCondition(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionVolumeReady)
+	// Deferred checkouts become Ready only after their owner's writable mount
+	// starts the initializer. Accept current volume readiness for that transition.
+	canInitialize := worktreebootstrap.Deferred(worktree) &&
+		worktree.Labels["workspaces.rc.ayaka.io/generated-for"] == workspace.Name && !mount.ReadOnly &&
+		volumeReady != nil && volumeReady.Status == metav1.ConditionTrue && volumeReady.ObservedGeneration >= worktree.Generation
+	if worktree.Status.ObservedGeneration < worktree.Generation || (!worktreeReady && !canInitialize) || worktree.Status.VolumeClaimName == "" {
 		return fmt.Errorf("worktree %q is not Ready", worktree.Name)
 	}
 	if mount.ReadOnly {

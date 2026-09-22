@@ -1,21 +1,21 @@
-# Explicit Repository refresh
+# Explicit Repository sync
 
 Status: proposal. This document describes missing behavior, not an available command.
 
 ## Current behavior
 
-Inspection at `9f64cc1` found no `rcctl repo sync` or `refresh` command.
+Inspection at `c64b463` found no `rcctl repo sync` command.
 The registered commands are `clone`, `exec`, `get`, `list`, and `delete`.
 
 The Repository controller already contains the Git synchronization procedure.
 It fetches the configured remote and checks out the configured full ref or remote
 default branch. It resets the parent checkout and removes untracked files,
-as specified in [ADR 0002](../adr/0002-sync-repositories-as-remote-mirrors.md).
+as implemented in `repositoryBootstrapScript` in the Repository controller.
 
 The controller names the bootstrap Job after the Repository generation.
 Once that generation is ready, it returns without fetching again. Neither
 elapsed time nor a remote commit changes the Kubernetes spec generation.
-Deleting the completed Job is not a refresh mechanism: the ready fast path
+Deleting the completed Job is not a sync mechanism: the ready fast path
 intentionally preserves the ready state after Job cleanup.
 
 `status.lastUpdatedAt` already records successful bootstrap completion.
@@ -25,9 +25,12 @@ They do not expose the resolved commit or the refs available in the mirror.
 `repo exec` is an explicit escape hatch for exact commands. It does not mount
 Repository credentials into arbitrary programs, and it does not update the
 Repository synchronization timestamp. A public `git fetch` can work through
-this path, but a private refresh needs credential handling and checkout policy.
+this path, but a private sync needs credential handling and checkout policy.
 
 ## Proposed operation
+
+Use `sync` because the operation fetches remote objects and resets the parent
+checkout to the configured ref. `fetch` alone does not describe the checkout change.
 
 Add `rcctl repo sync NAME`, with `--wait` enabled by default. It submits an
 explicit synchronization request and waits for that request's terminal result.
@@ -61,7 +64,7 @@ Reject unsupported storage behavior instead of assuming that every clone is
 an instantaneous filesystem snapshot.
 
 The Worktree controller currently tests `StorageReady=True` without checking
-its observed generation. A refresh implementation must close that stale-status
+its observed generation. A sync implementation must close that stale-status
 window and coordinate already admitted readers, not only strengthen the check.
 
 ## Observable results
@@ -80,7 +83,7 @@ must report actual available refs rather than inventing local branch aliases.
 
 - Advance a test remote, sync, and create a Worktree at the new commit.
 - Keep an existing dirty Worktree unchanged through that sync.
-- Authenticate a private refresh with only its configured Credential.
+- Authenticate a private sync with only its configured Credential.
 - Serialize sync with RepositoryExec and another sync request.
 - Prevent cloning during reset and wait for an admitted source capture.
 - Retry a failed sync with a new request without deleting user storage.

@@ -62,6 +62,15 @@ spec:
                 required:
                 - name
                 type: object
+              ttlSecondsAfterFinished:
+                default: 259200
+                description: |-
+                  ttlSecondsAfterFinished controls how long the completed request is retained.
+                  Defaults to 259200 seconds (3 days). Zero makes it eligible for immediate
+                  deletion after its consumers stop and the parent reservation is released.
+                format: int32
+                minimum: 0
+                type: integer
             required:
             - repositoryRef
             type: object
@@ -76,7 +85,9 @@ spec:
                   sync.
                 type: string
               completedAt:
-                description: completedAt is the terminal Job completion time.
+                description: |-
+                  completedAt is the Job completion time, or the time a failure without a
+                  completed Job was recorded.
                 format: date-time
                 type: string
               conditions:

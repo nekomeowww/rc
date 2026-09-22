@@ -33,6 +33,14 @@ type RepositorySyncSpec struct {
 	// repositoryRef selects a Repository in this namespace.
 	// +required
 	RepositoryRef RepositoryReference `json:"repositoryRef"`
+
+	// ttlSecondsAfterFinished controls how long the completed request is retained.
+	// Defaults to 259200 seconds (3 days). Zero makes it eligible for immediate
+	// deletion after its consumers stop and the parent reservation is released.
+	// +kubebuilder:default=259200
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 }
 
 // RepositorySyncStatus retains the result after Job cleanup.
@@ -50,7 +58,8 @@ type RepositorySyncStatus struct {
 	// commit is the resolved Git commit after a successful sync.
 	// +optional
 	Commit string `json:"commit,omitempty"`
-	// completedAt is the terminal Job completion time.
+	// completedAt is the Job completion time, or the time a failure without a
+	// completed Job was recorded.
 	// +optional
 	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
 	// conditions report waiting, running, or the terminal result.

@@ -74,7 +74,10 @@ func (r *RepositorySyncReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
 
-		return ctrl.Result{}, nil
+		if !request.DeletionTimestamp.IsZero() {
+			return ctrl.Result{}, nil
+		}
+		return r.expire(ctx, request, terminal)
 	}
 	if !controllerutil.ContainsFinalizer(request, repositoryOperationFinalizer) {
 		controllerutil.AddFinalizer(request, repositoryOperationFinalizer)
@@ -152,7 +155,34 @@ func (r *RepositorySyncReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 }
 
-const repositorySyncFailed = "SyncFailed"
+const (
+	repositorySyncFailed     = "SyncFailed"
+	repositorySyncDefaultTTL = 72 * time.Hour
+)
+
+// expire runs only after the terminal result is recorded and consumers stop.
+// RequeueAfter restores the deadline on reconciliation, including after restart.
+func (r *RepositorySyncReconciler) expire(ctx context.Context, request *repositoriesv1alpha1.RepositorySync, terminal *metav1.Condition) (ctrl.Result, error) {
+	completed := request.Status.CompletedAt
+	if completed == nil {
+		// Failures recorded before completion timestamps were added still have a
+		// persisted terminal transition time. Never restart their retention clock.
+		completed = &terminal.LastTransitionTime
+	}
+	ttl := repositorySyncDefaultTTL
+	if request.Spec.TTLSecondsAfterFinished != nil {
+		ttl = time.Duration(*request.Spec.TTLSecondsAfterFinished) * time.Second
+	}
+	if remaining := time.Until(completed.Add(ttl)); remaining > 0 {
+		return ctrl.Result{RequeueAfter: remaining}, nil
+	}
+	policy := metav1.DeletePropagationBackground
+	err := r.Delete(ctx, request, &client.DeleteOptions{
+		PropagationPolicy: &policy,
+		Preconditions:     &metav1.Preconditions{UID: &request.UID, ResourceVersion: &request.ResourceVersion},
+	})
+	return ctrl.Result{}, client.IgnoreNotFound(err)
+}
 
 var resolvedCommitPattern = regexp.MustCompile(`^(?:[a-f0-9]{40}|[a-f0-9]{64})$`)
 
@@ -235,6 +265,10 @@ func (r *RepositorySyncReconciler) setResult(ctx context.Context, request *repos
 		current.Status.RepositoryUID = request.Status.RepositoryUID
 		current.Status.Commit = request.Status.Commit
 		current.Status.CompletedAt = completed
+		if status != metav1.ConditionUnknown && completed == nil {
+			now := metav1.Now()
+			current.Status.CompletedAt = &now
+		}
 		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{Type: repositoriesv1alpha1.RepositorySyncConditionSucceeded, Status: status, Reason: reason, Message: message, ObservedGeneration: current.Generation})
 		if equality.Semantic.DeepEqual(before.Status, current.Status) {
 			return nil

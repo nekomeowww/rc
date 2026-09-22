@@ -209,6 +209,8 @@ rcctl -n development repo sync rc
 
 `sync` uses the Repository Credential and submodule policy. It removes untracked files from the parent and prints the resolved commit. Existing Worktrees keep their commits and local changes. Add `--wait=false` to print the request name immediately. Inspect its result with `kubectl get repositorysync <name> -o yaml`.
 
+Completed sync requests are automatically deleted after 3 days, whether they succeed or fail. Set `spec.ttlSecondsAfterFinished` when creating a `RepositorySync` to change retention.
+
 Sync waits for other parent writers, pending clones, and direct Repository mounts. Suspend Workspaces that mount the parent directly before syncing. [Repository sync](docs/design/repository-sync.md) describes coordination and failure handling.
 
 Repository parents are not writable Workspace checkouts. Create a Worktree when you want an isolated branch:

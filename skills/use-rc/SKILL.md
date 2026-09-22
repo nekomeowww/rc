@@ -174,6 +174,7 @@ removes untracked parent files and leaves existing Worktrees unchanged. It waits
 for parent writers, pending clones, and direct Repository mounts. Suspend direct
 parent mounts first. Workspaces mounted on independent Worktrees can keep running.
 Use `--wait=false` to submit without waiting; the command prints the request name.
+Completed request records expire after 3 days by default, on success or failure.
 
 ### Add a parallel branch to the same Workspace
 

@@ -15,7 +15,13 @@ true and prints the resolved commit. `--wait=false` prints the request name.
 and generation, commit, completion time, and `Succeeded` condition.
 
 The controller retains the Job until it records the terminal result. Successful
-requests advance Repository `lastUpdatedAt`. Terminal results survive Job cleanup.
+requests advance Repository `lastUpdatedAt`. Terminal results survive Job cleanup
+until the request expires. `spec.ttlSecondsAfterFinished` defaults to 259200
+(3 days) after success or failure. Set it when creating the immutable request.
+Zero allows immediate cleanup and can delete the result before a waiter reads it.
+Cleanup waits for consumers to stop and releases the parent reservation first.
+It deletes only the request and its owned resources, leaving Repository and
+Worktree volumes intact.
 Waiters observe their own request. An earlier Repository Ready condition cannot
 complete a new request. Concurrent requests compete for admission without FIFO
 ordering or coalescing. Each admitted request performs its own fetch.

@@ -11,6 +11,7 @@ resources:
 - bases/workspaces.rc.ayaka.io_workspaces.yaml
 - bases/workspaces.rc.ayaka.io_workspaceexecs.yaml
 - bases/repositories.rc.ayaka.io_worktreeexecs.yaml
+- bases/repositories.rc.ayaka.io_repositorysyncs.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

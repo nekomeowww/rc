@@ -43,6 +43,7 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/repositoryaccess"
 	"github.com/nekomeowww/rc/internal/runtimepolicy"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
@@ -66,6 +67,7 @@ const (
 // checkout initialized in its cloned Repository root.
 type WorktreeReconciler struct {
 	client.Client
+	APIReader   client.Reader
 	Scheme      *runtime.Scheme
 	RunnerImage string
 }
@@ -112,23 +114,23 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, fmt.Errorf("get Repository: %w", err)
 	}
 
-	ready := meta.FindStatusCondition(repository.Status.Conditions, repositoriesv1alpha1.RepositoryConditionStorageReady)
-	if ready == nil || ready.Status != metav1.ConditionTrue || repository.Status.VolumeClaimName == "" {
-		if err := r.setWorktreeStatus(ctx, worktree, metav1.ConditionUnknown, "RepositoryNotReady", "Referenced Repository parent volume is not ready", "", repository.Status.VolumeClaimName, worktreePath); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, nil
-	}
-
 	storageClassName, size, accessModes := effectiveWorktreeStorage(worktree, repository)
 	claim := new(corev1.PersistentVolumeClaim)
 	claimKey := types.NamespacedName{Name: worktree.Name, Namespace: worktree.Namespace}
 
 	err = r.Get(ctx, claimKey, claim)
 	if errors.IsNotFound(err) {
+		gate := repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}
+		admission, err := gate.Acquire(ctx, repository, repositoryaccess.Token("clone", worktree), repositoryaccess.Clone, true)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if admission != repositoryaccess.Admitted {
+			return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionUnknown, "RepositoryNotReady", "Repository is busy or not ready for cloning", "", repository.Status.VolumeClaimName, worktreePath)
+		}
 		claim = worktreeVolumeClaim(worktree, repository.Status.VolumeClaimName, storageClassName, size, accessModes)
 
-		err := controllerutil.SetControllerReference(worktree, claim, r.Scheme)
+		err = controllerutil.SetControllerReference(worktree, claim, r.Scheme)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("set Worktree owner on PersistentVolumeClaim: %w", err)
 		}
@@ -154,6 +156,11 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	if claim.Status.Phase != corev1.ClaimBound {
 		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "Provisioning", "Child volume is provisioning", claim.Name, repository.Status.VolumeClaimName, worktreePath)
+	}
+	// A Bound CSI clone is an independent volume. Pending claims retain admission
+	// through source capture. See https://kubernetes.io/docs/concepts/storage/volume-pvc-datasource/
+	if err := (repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}).Release(ctx, worktree.Namespace, repositoryaccess.Token("clone", worktree)); err != nil {
+		return ctrl.Result{}, err
 	}
 	if err := r.setWorktreeVolumeReady(ctx, worktree, claim.Name, repository.Status.VolumeClaimName, worktreePath); err != nil {
 		return ctrl.Result{}, err
@@ -259,6 +266,21 @@ func (r *WorktreeReconciler) reconcileDelete(ctx context.Context, worktree *repo
 		return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, nil
 	}
 
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	// Finish an admitted clone before releasing its source reservation. Deleting
+	// a pending PVC can leave a CSI CreateVolume operation in flight.
+	claim := new(corev1.PersistentVolumeClaim)
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(worktree), claim); err == nil && metav1.IsControlledBy(claim, worktree) && claim.Status.Phase != corev1.ClaimBound {
+		return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, nil
+	} else if err != nil && !errors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+	if err := (repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}).Release(ctx, worktree.Namespace, repositoryaccess.Token("clone", worktree)); err != nil {
+		return ctrl.Result{}, err
+	}
 	key := client.ObjectKeyFromObject(worktree)
 	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current := new(repositoriesv1alpha1.Worktree)
@@ -672,6 +694,7 @@ func (r *WorktreeReconciler) setWorktreeStatus(ctx context.Context, worktree *re
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *WorktreeReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.APIReader = mgr.GetAPIReader()
 	if r.RunnerImage == "" {
 		return fmt.Errorf("worktree runner image must not be empty")
 	}

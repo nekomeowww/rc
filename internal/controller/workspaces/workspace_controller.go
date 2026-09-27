@@ -49,6 +49,7 @@ import (
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/lifecycle"
 	"github.com/nekomeowww/rc/internal/rcplatform"
+	"github.com/nekomeowww/rc/internal/repositoryaccess"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
 )
@@ -111,6 +112,7 @@ type workspaceWriteClaim struct {
 // WorkspaceReconciler reconciles persistent Workspace storage and runtime Pods.
 type WorkspaceReconciler struct {
 	client.Client
+	APIReader           client.Reader
 	Scheme              *runtime.Scheme
 	RunnerImage         string
 	WindowsRunnerImage  string
@@ -133,6 +135,10 @@ type WorkspaceReconciler struct {
 //nolint:gocyclo // Reconcile is an explicit lifecycle state machine with guarded transitions.
 func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
 	workspace := new(workspacesv1alpha1.Workspace)
 	if err := r.Get(ctx, req.NamespacedName, workspace); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -145,6 +151,12 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if err := r.Update(ctx, workspace); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add Workspace finalizer: %w", err)
 		}
+	}
+
+	// Release claims before dependency checks. A missing dependency must not keep
+	// a reservation after the runtime Pod is gone. The API reader verifies absence.
+	if err := r.releaseClaims(ctx, workspace); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	resolved, reason, message, err := r.resolveWorkspaceBase(ctx, workspace)
@@ -244,7 +256,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "ActiveProcesses", "Workspace cannot suspend while processes are active")
 		}
 		pod := new(corev1.Pod)
-		if err := r.Get(ctx, req.NamespacedName, pod); err == nil {
+		if err := reader.Get(ctx, req.NamespacedName, pod); err == nil {
 			if !metav1.IsControlledBy(pod, workspace) {
 				return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "RuntimePodConflict", "A Pod with the Workspace runtime name exists but is not owned by this Workspace")
 			}
@@ -256,10 +268,9 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		} else if !errors.IsNotFound(err) {
 			return ctrl.Result{}, fmt.Errorf("get suspended Workspace runtime Pod: %w", err)
 		}
-		if err := r.releaseWriteClaims(ctx, workspace, nil); err != nil {
+		if err := r.releaseClaims(ctx, workspace); err != nil {
 			return ctrl.Result{}, err
 		}
-
 		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Suspended", "Workspace runtime is suspended")
 	}
 
@@ -270,9 +281,11 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	pod := new(corev1.Pod)
-	err = r.Get(ctx, req.NamespacedName, pod)
+	err = reader.Get(ctx, req.NamespacedName, pod)
 	if errors.IsNotFound(err) {
-		if err := r.releaseWriteClaims(ctx, workspace, resolved.writeClaims); err != nil {
+		// The Pod can disappear after the initial cleanup check. Release its old
+		// claims before acquiring the current mounts for a replacement Pod.
+		if err := r.releaseClaims(ctx, workspace); err != nil {
 			return ctrl.Result{}, err
 		}
 		acquired, claimMessage, err := r.acquireWriteClaims(ctx, workspace, resolved.writeClaims)
@@ -281,6 +294,28 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		if !acquired {
 			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "WorktreeInUse", claimMessage)
+		}
+
+		gate := repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}
+		token := repositoryaccess.Token("workspace", workspace)
+		for _, mount := range workspace.Spec.Mounts {
+			if mount.RepositoryRef == nil {
+				continue
+			}
+			repository := new(repositoriesv1alpha1.Repository)
+			if err := r.Get(ctx, client.ObjectKey{Namespace: workspace.Namespace, Name: mount.RepositoryRef.Name}, repository); err != nil {
+				return ctrl.Result{}, err
+			}
+			admission, err := gate.Acquire(ctx, repository, token, repositoryaccess.Mount, true)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if admission != repositoryaccess.Admitted {
+				if err := gate.Release(ctx, workspace.Namespace, token); err != nil {
+					return ctrl.Result{}, err
+				}
+				return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "RepositoryNotReady", "Repository is busy or not ready for mounting")
+			}
 		}
 		pod, err = workspaceRuntimePod(workspace, resolved)
 		if err != nil {
@@ -359,6 +394,10 @@ func workspaceInitializationFailure(pod *corev1.Pod) (string, string) {
 }
 
 func (r *WorkspaceReconciler) finalizeWorkspace(ctx context.Context, workspace *workspacesv1alpha1.Workspace) (ctrl.Result, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
 	if !controllerutil.ContainsFinalizer(workspace, workspaceFinalizer) {
 		return ctrl.Result{}, nil
 	}
@@ -388,7 +427,7 @@ func (r *WorkspaceReconciler) finalizeWorkspace(ctx context.Context, workspace *
 		return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, nil
 	}
 	pod := new(corev1.Pod)
-	if err := r.Get(ctx, client.ObjectKeyFromObject(workspace), pod); err == nil {
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(workspace), pod); err == nil {
 		if metav1.IsControlledBy(pod, workspace) {
 			if err := r.Delete(ctx, pod); err != nil && !errors.IsNotFound(err) {
 				return ctrl.Result{}, fmt.Errorf("delete runtime Pod while finalizing Workspace: %w", err)
@@ -398,7 +437,7 @@ func (r *WorkspaceReconciler) finalizeWorkspace(ctx context.Context, workspace *
 	} else if !errors.IsNotFound(err) {
 		return ctrl.Result{}, fmt.Errorf("get runtime Pod while finalizing Workspace: %w", err)
 	}
-	if err := r.releaseWriteClaims(ctx, workspace, nil); err != nil {
+	if err := r.releaseClaims(ctx, workspace); err != nil {
 		return ctrl.Result{}, err
 	}
 	controllerutil.RemoveFinalizer(workspace, workspaceFinalizer)
@@ -448,20 +487,29 @@ func (r *WorkspaceReconciler) acquireWriteClaims(ctx context.Context, workspace 
 	return true, "", nil
 }
 
-func (r *WorkspaceReconciler) releaseWriteClaims(ctx context.Context, workspace *workspacesv1alpha1.Workspace, keep []workspaceWriteClaim) error {
-	kept := make(map[string]struct{}, len(keep))
-	for _, claim := range keep {
-		kept[claim.leaseName] = struct{}{}
+// releaseClaims keeps reservations while a runtime Pod exists. Once it is absent,
+// the Workspace releases both parent mounts and Worktree write claims.
+func (r *WorkspaceReconciler) releaseClaims(ctx context.Context, workspace *workspacesv1alpha1.Workspace) error {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
 	}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(workspace), new(corev1.Pod)); err == nil {
+		return nil
+	} else if !errors.IsNotFound(err) {
+		return err
+	}
+
+	if err := (repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}).Release(ctx, workspace.Namespace, repositoryaccess.Token("workspace", workspace)); err != nil {
+		return err
+	}
+
 	leases := new(coordinationv1.LeaseList)
 	if err := r.List(ctx, leases, client.InNamespace(workspace.Namespace), client.MatchingLabels{worktreeclaim.HolderLabel: workspace.Name}); err != nil {
 		return fmt.Errorf("list Workspace Worktree write Leases: %w", err)
 	}
 	for index := range leases.Items {
 		lease := &leases.Items[index]
-		if _, exists := kept[lease.Name]; exists {
-			continue
-		}
 		if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != string(workspace.UID) {
 			continue
 		}
@@ -941,7 +989,7 @@ func (r *WorkspaceReconciler) ensureWorkspaceAccess(ctx context.Context, namespa
 		ObjectMeta: metav1.ObjectMeta{Name: defaultWorkspaceServiceAccount, Namespace: namespace},
 		Rules: []rbacv1.PolicyRule{
 			{APIGroups: []string{"workspaces.rc.ayaka.io"}, Resources: []string{"workspaceenvironments", "workspaces", "workspaceexecs", "workspaceexecs/status"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
-			{APIGroups: []string{"repositories.rc.ayaka.io"}, Resources: []string{"repositories", "repositoryexecs", "worktrees"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
+			{APIGroups: []string{"repositories.rc.ayaka.io"}, Resources: []string{"repositories", "repositoryexecs", "repositorysyncs", "worktrees"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
 			{APIGroups: []string{"configs.rc.ayaka.io"}, Resources: []string{"credentials", "agentcredentials"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
 			{APIGroups: []string{""}, Resources: []string{"configmaps", "secrets", "pods", "pods/log", "pods/exec", "pods/portforward"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
 		},
@@ -1075,6 +1123,7 @@ func (r *WorkspaceReconciler) setWorkspaceStatus(ctx context.Context, key types.
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *WorkspaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.APIReader = mgr.GetAPIReader()
 	if r.RunnerImage == "" {
 		return fmt.Errorf("workspace runner image must not be empty")
 	}

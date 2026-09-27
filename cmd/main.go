@@ -284,6 +284,14 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "repositories-worktreeexec")
 		os.Exit(1)
 	}
+	if err := (&repositoriescontroller.RepositorySyncReconciler{
+		RunnerImage: runnerImage,
+		Client:      mgr.GetClient(),
+		Scheme:      mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "repositories-repositorysync")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

@@ -91,4 +91,13 @@ resources:
   kind: WorktreeExec
   path: github.com/nekomeowww/rc/api/repositories/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: rc.ayaka.io
+  group: repositories
+  kind: RepositorySync
+  path: github.com/nekomeowww/rc/api/repositories/v1alpha1
+  version: v1alpha1
 version: "3"

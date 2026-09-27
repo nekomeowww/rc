@@ -49,7 +49,7 @@ const (
 // arbitrary side effect, so callers must terminate it as JobLost.
 func observeOneShotJob(
 	ctx context.Context,
-	kubeClient client.Client,
+	kubeClient client.Reader,
 	owner client.Object,
 	recordedJobName string,
 ) (*batchv1.Job, oneShotJobState, error) {

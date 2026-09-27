@@ -161,7 +161,7 @@ var _ = Describe("Repository Controller", func() {
 			},
 		}
 
-		job := repositoryBootstrapJob(repository, "ghcr.io/example/rc/runner:test", credential)
+		job := repositoryCheckoutJob(repository, repositoryBootstrapJobName(repository), "ghcr.io/example/rc/runner:test", credential)
 		container := job.Spec.Template.Spec.Containers[0]
 		Expect(container.Env).To(ContainElement(corev1.EnvVar{
 			Name:  "GIT_SSH_COMMAND",
@@ -184,7 +184,7 @@ var _ = Describe("Repository Controller", func() {
 			},
 		}
 
-		job := repositoryBootstrapJob(repository, "ghcr.io/example/rc/runner:test", nil)
+		job := repositoryCheckoutJob(repository, repositoryBootstrapJobName(repository), "ghcr.io/example/rc/runner:test", nil)
 		args := job.Spec.Template.Spec.Containers[0].Args
 
 		Expect(args[5]).To(Equal(repositorySubmoduleModeNone))
@@ -203,7 +203,7 @@ var _ = Describe("Repository Controller", func() {
 			},
 		}
 
-		job := repositoryBootstrapJob(repository, "ghcr.io/example/rc/runner:test", nil)
+		job := repositoryCheckoutJob(repository, repositoryBootstrapJobName(repository), "ghcr.io/example/rc/runner:test", nil)
 		args := job.Spec.Template.Spec.Containers[0].Args
 
 		Expect(args[5]).To(Equal(repositorySubmoduleModeDirect))
@@ -224,7 +224,7 @@ var _ = Describe("Repository Controller", func() {
 			},
 		}
 
-		job := repositoryBootstrapJob(repository, "ghcr.io/example/rc/runner:test", nil)
+		job := repositoryCheckoutJob(repository, repositoryBootstrapJobName(repository), "ghcr.io/example/rc/runner:test", nil)
 		args := job.Spec.Template.Spec.Containers[0].Args
 		script := args[1]
 		resetIndex := strings.Index(script, "git -C /repository reset --hard")

@@ -321,6 +321,22 @@ replace the runtime Pod. A change is rejected while processes are active
 unless the caller explicitly forces termination. rc will not use privileged
 mount propagation as a default hot-plug mechanism.
 
+An experimental Linux opt-in now uses `spec.hotMountWorktrees`. The runtime
+Pod pre-mounts a hostPath under `/workspace` with `HostToContainer` propagation.
+For each Worktree mount, the controller creates a privileged helper Pod on the
+same node. The helper mounts that Worktree's independent PVC and bind-mounts it
+into the shared host path with `Bidirectional` propagation. Adding a Worktree
+does not change the runtime Pod or its Environment. The controller keeps the
+Worktree write Lease, waits for helper readiness, and removes helpers before
+suspending or replacing the runtime. Unmounting still requires idle processes.
+The default mode retains the v1 Pod replacement behavior. Host path mounts and
+privileged helpers make the opt-in unsuitable for clusters enforcing restricted
+Pod Security admission. If a helper exits without unmounting, the controller
+starts a privileged cleanup Pod on that node. It removes stale bind mounts
+without mounting the PVC. The Workspace reports `HotMountFailed` until the user
+unmounts and remounts the Worktree. If cleanup fails, the controller keeps the
+write Lease and reports `HotMountCleanup`. An operator must clear a busy mount.
+
 Named Workspaces remain running unless stopped or configured with an idle
 timeout. Automatically created Workspaces suspend after their processes finish,
 but their resources and volumes remain until explicit cleanup.

@@ -1195,6 +1195,11 @@ spec:
                 required:
                 - name
                 type: object
+              hotMountWorktrees:
+                description: |-
+                  hotMountWorktrees keeps the Linux runtime Pod while Worktree mounts change.
+                  It uses privileged mount helpers on the runtime node.
+                type: boolean
               idleTimeout:
                 description: idleTimeout suspends an idle named Workspace. Zero or
                   omitted disables it.

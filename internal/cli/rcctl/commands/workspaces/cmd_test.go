@@ -53,6 +53,7 @@ const (
 	testWorktreeUID             = "worktree-uid"
 	testWorktreeReadyReason     = "WorktreeReady"
 	testReadyWorktreeName       = "ready"
+	testReadyPVCName            = "ready-pvc"
 )
 
 func TestSetWorkspaceCredentialReferences(t *testing.T) {
@@ -426,7 +427,7 @@ func TestApplyWorkspaceMountPreservesPartiallyStoppedProcesses(t *testing.T) {
 	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testWorkspaceNamespace, UID: testWorkspaceUID}}
 	worktree := &repositoriesv1alpha1.Worktree{
 		ObjectMeta: metav1.ObjectMeta{Name: testReadyWorktreeName, Namespace: testWorkspaceNamespace, UID: testWorktreeUID},
-		Status: repositoriesv1alpha1.WorktreeStatus{VolumeClaimName: "ready-pvc", Conditions: []metav1.Condition{{
+		Status: repositoriesv1alpha1.WorktreeStatus{VolumeClaimName: testReadyPVCName, Conditions: []metav1.Condition{{
 			Type: repositoriesv1alpha1.WorktreeConditionReady, Status: metav1.ConditionTrue, Reason: testWorktreeReadyReason,
 		}}},
 	}
@@ -458,7 +459,7 @@ func TestApplyWorkspaceMountReservesWriteLeaseBeforeStoppingProcesses(t *testing
 	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testWorkspaceNamespace, UID: testWorkspaceUID}}
 	worktree := &repositoriesv1alpha1.Worktree{
 		ObjectMeta: metav1.ObjectMeta{Name: testReadyWorktreeName, Namespace: testWorkspaceNamespace, UID: testWorktreeUID},
-		Status: repositoriesv1alpha1.WorktreeStatus{VolumeClaimName: "ready-pvc", Conditions: []metav1.Condition{{
+		Status: repositoriesv1alpha1.WorktreeStatus{VolumeClaimName: testReadyPVCName, Conditions: []metav1.Condition{{
 			Type: repositoriesv1alpha1.WorktreeConditionReady, Status: metav1.ConditionTrue, Reason: testWorktreeReadyReason,
 		}}},
 	}
@@ -477,4 +478,33 @@ func TestApplyWorkspaceMountReservesWriteLeaseBeforeStoppingProcesses(t *testing
 		})
 
 	require.NoError(t, err)
+}
+
+func TestApplyHotWorktreeMountDoesNotStopProcesses(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
+	require.NoError(t, repositoriesv1alpha1.AddToScheme(scheme))
+	require.NoError(t, coordinationv1.AddToScheme(scheme))
+	workspace := &workspacesv1alpha1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testWorkspaceNamespace, UID: testWorkspaceUID},
+		Spec:       workspacesv1alpha1.WorkspaceSpec{HotMountWorktrees: true},
+	}
+	worktree := &repositoriesv1alpha1.Worktree{
+		ObjectMeta: metav1.ObjectMeta{Name: testReadyWorktreeName, Namespace: testWorkspaceNamespace, UID: testWorktreeUID},
+		Status: repositoriesv1alpha1.WorktreeStatus{VolumeClaimName: testReadyPVCName, Conditions: []metav1.Condition{{
+			Type: repositoriesv1alpha1.WorktreeConditionReady, Status: metav1.ConditionTrue, Reason: testWorktreeReadyReason,
+		}}},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, worktree).Build()
+	mount := workspacesv1alpha1.WorkspaceMount{Name: worktree.Name, Path: worktree.Name, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: worktree.Name}}
+	stopCalls := 0
+	result, err := applyWorkspaceMount(context.Background(), kubeClient, client.ObjectKeyFromObject(workspace), mount,
+		func(context.Context, *workspacesv1alpha1.Workspace) ([]string, error) {
+			stopCalls++
+			return nil, nil
+		})
+	require.NoError(t, err)
+	assert.Zero(t, stopCalls, "hot mounting keeps running WorkspaceExecs")
+	assert.Equal(t, []workspacesv1alpha1.WorkspaceMount{mount}, result.workspace.Spec.Mounts)
 }

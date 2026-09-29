@@ -37,6 +37,7 @@ type WorkspacePodIntent struct {
 	Metadata          metav1.ObjectMeta
 	Image, HomeClaim  string
 	HomeHostPath      string
+	HotMountRoot      string
 	ServiceAccount    string
 	AutomountToken    bool
 	Resources         corev1.ResourceRequirements
@@ -51,12 +52,29 @@ func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, err
 	if runtime.os == Darwin {
 		return runtime.darwinWorkspacePod(intent)
 	}
-	volumes := make([]corev1.Volume, 0, len(intent.AdditionalVolumes)+2)
+	volumes := make([]corev1.Volume, 0, len(intent.AdditionalVolumes)+4)
 	volumes = append(volumes, corev1.Volume{Name: homeVolumeName, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: intent.HomeClaim}}})
+	if intent.HotMountRoot != "" {
+		if runtime.os != corev1.Linux {
+			return nil, fmt.Errorf("hot Worktree mounts require a Linux runtime")
+		}
+		kind := corev1.HostPathDirectoryOrCreate
+		volumes = append(volumes,
+			corev1.Volume{Name: "hot-worktrees", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: intent.HotMountRoot + "/visible", Type: &kind}}},
+			corev1.Volume{Name: "hot-worktree-roots", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: intent.HotMountRoot + "/roots", Type: &kind}}},
+		)
+	}
 	volumes = append(volumes, slices.Clone(intent.AdditionalVolumes)...)
 	volumes = append(volumes, corev1.Volume{Name: runtimeVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
-	mounts := make([]corev1.VolumeMount, 0, len(intent.AdditionalMounts)+2)
+	mounts := make([]corev1.VolumeMount, 0, len(intent.AdditionalMounts)+4)
 	mounts = append(mounts, corev1.VolumeMount{Name: homeVolumeName, MountPath: runtime.layout.home})
+	if intent.HotMountRoot != "" {
+		propagation := corev1.MountPropagationHostToContainer
+		mounts = append(mounts,
+			corev1.VolumeMount{Name: "hot-worktrees", MountPath: runtime.MountPath("/workspace"), MountPropagation: &propagation},
+			corev1.VolumeMount{Name: "hot-worktree-roots", MountPath: runtime.MountPath("/mnt/rc/worktrees"), MountPropagation: &propagation},
+		)
+	}
 	mounts = append(mounts, slices.Clone(intent.AdditionalMounts)...)
 	mounts = append(mounts, corev1.VolumeMount{Name: runtimeVolumeName, MountPath: runtime.layout.run})
 

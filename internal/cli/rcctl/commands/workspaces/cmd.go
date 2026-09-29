@@ -61,20 +61,21 @@ import (
 const darwinOSName corev1.OSName = "darwin"
 
 type createOptions struct {
-	placement        command.PlacementOptions
-	environment      string
-	image            string
-	storageClass     string
-	size             string
-	agentCredentials []string
-	credentials      []string
-	defaultCwd       string
-	serviceAccount   string
-	noServiceAccount bool
-	idleTimeout      time.Duration
-	wait             bool
-	gpu              command.GPUOptions
-	npmRegistry      string
+	placement         command.PlacementOptions
+	environment       string
+	image             string
+	storageClass      string
+	size              string
+	agentCredentials  []string
+	credentials       []string
+	defaultCwd        string
+	serviceAccount    string
+	noServiceAccount  bool
+	idleTimeout       time.Duration
+	wait              bool
+	gpu               command.GPUOptions
+	npmRegistry       string
+	hotMountWorktrees bool
 }
 
 type mountOptions struct {
@@ -109,6 +110,7 @@ func NewCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	return root
 }
 
+//nolint:gocyclo // Workspace creation validates each independent user option before creating resources.
 func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	options := new(createOptions)
 	cmd := &cobra.Command{
@@ -139,8 +141,9 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			workspace := &workspacesv1alpha1.Workspace{
 				ObjectMeta: metav1.ObjectMeta{Name: args[0], Namespace: namespace},
 				Spec: workspacesv1alpha1.WorkspaceSpec{
-					DesiredState: workspacesv1alpha1.WorkspaceDesiredStateRunning,
-					OS:           osName, NodeSelector: options.placement.NodeSelector, Tolerations: tolerations,
+					DesiredState:      workspacesv1alpha1.WorkspaceDesiredStateRunning,
+					HotMountWorktrees: options.hotMountWorktrees,
+					OS:                osName, NodeSelector: options.placement.NodeSelector, Tolerations: tolerations,
 					Image: options.image, DefaultWorkingDirectory: options.defaultCwd,
 					ServiceAccountName: options.serviceAccount,
 					Resources:          resources,
@@ -173,6 +176,9 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 					return fmt.Errorf("parse --size: value must be a positive Kubernetes quantity")
 				}
 				workspace.Spec.Storage = &workspacesv1alpha1.PersistentStorageSpec{StorageClassName: options.storageClass, Size: size}
+			}
+			if options.hotMountWorktrees && workspace.Spec.OS != corev1.Linux && workspace.Spec.OS != "" {
+				return fmt.Errorf("--hot-mount-worktrees requires Linux")
 			}
 			if err := setWorkspaceCredentialReferences(cmd.Context(), clusterClient.Kube, workspace, options.agentCredentials, options.credentials); err != nil {
 				return err
@@ -214,6 +220,7 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	cmd.Flags().BoolVar(&options.noServiceAccount, "no-service-account", false, "Disable ServiceAccount token mounting")
 	cmd.Flags().DurationVar(&options.idleTimeout, "idle-timeout", 0, "Suspend an idle named Workspace; zero disables")
 	cmd.Flags().StringVar(&options.npmRegistry, "npm-registry", "", "npm registry URL added to Workspace environment defaults")
+	cmd.Flags().BoolVar(&options.hotMountWorktrees, "hot-mount-worktrees", false, "Attach Worktree PVCs without replacing the Linux runtime Pod; requires privileged mount helpers")
 	cmd.Flags().BoolVar(&options.wait, "wait", true, "Wait for the Workspace runtime")
 	options.gpu.AddFlags(cmd.Flags())
 
@@ -510,6 +517,9 @@ func applyWorkspaceMount(
 		return workspaceMountResult{}, rollbackWorkspaceMount(ctx, kubeClient, key, mount, nil, false, err)
 	}
 
+	if current.Spec.HotMountWorktrees && mount.WorktreeRef != nil {
+		return workspaceMountResult{workspace: current}, nil
+	}
 	stopped, err := stop(ctx, current)
 	result := workspaceMountResult{workspace: current, stoppedProcesses: stopped}
 	if err != nil {
@@ -1158,7 +1168,7 @@ func waitWorkspaceGenerationReady(ctx context.Context, kubeClient client.Client,
 
 func workspaceReadinessTransient(reason string) bool {
 	switch reason {
-	case "Provisioning", "Starting", "Replacing", "Stopping", "WorktreeNotReady", "RepositoryNotReady", "WorktreeInUse":
+	case "Provisioning", "Starting", "Replacing", "Stopping", "Mounting", "Unmounting", "WorktreeNotReady", "RepositoryNotReady", "WorktreeInUse":
 		return true
 	default:
 		return false
@@ -1182,7 +1192,11 @@ func finishTopologyChange(cmd *cobra.Command, kubeClient client.Client, result w
 		return err
 	}
 
-	indicator := progress.Start(cmd.ErrOrStderr(), "waiting for replacement Workspace runtime...")
+	message := "waiting for replacement Workspace runtime..."
+	if result.workspace.Spec.HotMountWorktrees {
+		message = "waiting for Workspace Worktree mount..."
+	}
+	indicator := progress.Start(cmd.ErrOrStderr(), message)
 	defer indicator.Stop()
 	if err := waitWorkspaceGenerationReady(cmd.Context(), kubeClient, result.workspace, result.workspace.Generation); err != nil {
 		return err

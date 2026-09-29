@@ -70,6 +70,7 @@ const (
 	runtimeContainerName             = "rc-kube"
 	persistentVolumeClaimKind        = "PersistentVolumeClaim"
 	reasonTargetNotReady             = "TargetNotReady"
+	reasonStarting                   = "Starting"
 	agentTypeCodex                   = "codex"
 	defaultCredentialName            = "default"
 	verbCreate                       = "create"
@@ -89,6 +90,7 @@ type resolvedWorkspace struct {
 	sourceClaimName  string
 	volumeMounts     []corev1.VolumeMount
 	volumes          []corev1.Volume
+	hotMounts        []hotWorktreeMount
 	outdated         bool
 	serviceAccount   string
 	automountSAToken bool
@@ -107,6 +109,15 @@ type workspaceInitializer struct {
 type workspaceWriteClaim struct {
 	leaseName string
 	worktree  string
+}
+
+type hotWorktreeMount struct {
+	name      string
+	worktree  string
+	path      string
+	claimName string
+	subPath   string
+	readOnly  bool
 }
 
 // WorkspaceReconciler reconciles persistent Workspace storage and runtime Pods.
@@ -255,6 +266,11 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if active {
 			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "ActiveProcesses", "Workspace cannot suspend while processes are active")
 		}
+		if removed, err := r.removeHotMounts(ctx, workspace); err != nil {
+			return ctrl.Result{}, err
+		} else if !removed {
+			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Unmounting", "Workspace Worktree mounts are stopping")
+		}
 		pod := new(corev1.Pod)
 		if err := reader.Get(ctx, req.NamespacedName, pod); err == nil {
 			if !metav1.IsControlledBy(pod, workspace) {
@@ -283,6 +299,11 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	pod := new(corev1.Pod)
 	err = reader.Get(ctx, req.NamespacedName, pod)
 	if errors.IsNotFound(err) {
+		if removed, err := r.removeHotMounts(ctx, workspace); err != nil {
+			return ctrl.Result{}, err
+		} else if !removed {
+			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Unmounting", "Previous Workspace Worktree mounts are stopping")
+		}
 		// The Pod can disappear after the initial cleanup check. Release its old
 		// claims before acquiring the current mounts for a replacement Pod.
 		if err := r.releaseClaims(ctx, workspace); err != nil {
@@ -329,7 +350,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		log.Info("Created Workspace runtime Pod", "name", pod.Name)
 
-		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Starting", "Workspace runtime Pod is starting")
+		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reasonStarting, "Workspace runtime Pod is starting")
 	} else if err != nil {
 		return ctrl.Result{}, fmt.Errorf("get Workspace runtime Pod: %w", err)
 	}
@@ -340,18 +361,28 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	currentClaims, err := workspacePodWriteClaims(pod)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if len(currentClaims) == 0 && pod.Annotations[workspaceTopologyAnnotation] == expectedTopology {
-		currentClaims = resolved.writeClaims
+	currentClaims := resolved.writeClaims
+	if !workspace.Spec.HotMountWorktrees {
+		currentClaims, err = workspacePodWriteClaims(pod)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if len(currentClaims) == 0 && pod.Annotations[workspaceTopologyAnnotation] == expectedTopology {
+			currentClaims = resolved.writeClaims
+		}
 	}
 	acquired, claimMessage, err := r.acquireWriteClaims(ctx, workspace, currentClaims)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if !acquired {
+		if workspace.Spec.HotMountWorktrees {
+			if removed, err := r.removeHotMounts(ctx, workspace); err != nil {
+				return ctrl.Result{}, err
+			} else if !removed {
+				return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "WorktreeInUse", claimMessage)
+			}
+		}
 		if pod.DeletionTimestamp == nil {
 			if err := r.Delete(ctx, pod); err != nil && !errors.IsNotFound(err) {
 				return ctrl.Result{}, fmt.Errorf("stop Workspace runtime after losing Worktree write Lease: %w", err)
@@ -363,6 +394,11 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if active {
 			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "TopologyChangeBlocked", "Workspace topology changed while processes are active")
 		}
+		if removed, err := r.removeHotMounts(ctx, workspace); err != nil {
+			return ctrl.Result{}, err
+		} else if !removed {
+			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Unmounting", "Workspace Worktree mounts are stopping")
+		}
 		if err := r.Delete(ctx, pod); err != nil {
 			return ctrl.Result{}, fmt.Errorf("replace Workspace runtime Pod: %w", err)
 		}
@@ -373,7 +409,19 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, failureReason, failureMessage)
 	}
 	if !podReady(pod) {
-		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Starting", "Workspace runtime Pod is starting")
+		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reasonStarting, "Workspace runtime Pod is starting")
+	}
+	if workspace.Spec.HotMountWorktrees {
+		ready, reason, message, err := r.reconcileHotMounts(ctx, workspace, pod, resolved.hotMounts, active)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !ready {
+			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reason, message)
+		}
+		if err := r.releaseWriteClaims(ctx, workspace, resolved.writeClaims); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionTrue, "WorkspaceReady", "Workspace runtime is ready")
@@ -424,6 +472,11 @@ func (r *WorkspaceReconciler) finalizeWorkspace(ctx context.Context, workspace *
 		}
 	}
 	if waiting {
+		return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, nil
+	}
+	if removed, err := r.removeHotMounts(ctx, workspace); err != nil {
+		return ctrl.Result{}, err
+	} else if !removed {
 		return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, nil
 	}
 	pod := new(corev1.Pod)
@@ -532,6 +585,9 @@ func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspac
 		return resolved, reason, message, nil
 	}
 	resolved.runtime = platform
+	if workspace.Spec.HotMountWorktrees && platform.OS() != corev1.Linux {
+		return resolved, "UnsupportedHotMount", "Hot Worktree mounts require Linux", nil
+	}
 	if platform.OS() == rcplatform.Darwin {
 		if workspace.Spec.EnvironmentRef != nil {
 			return resolved, "UnsupportedDarwinEnvironment", "Darwin Workspaces do not support WorkspaceEnvironment PVC clones", nil
@@ -609,9 +665,16 @@ func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspac
 	return resolved, "", "", nil
 }
 
+//nolint:gocyclo // Each mount and projection has a distinct failure state reported to the Workspace.
 func (r *WorkspaceReconciler) resolveWorkspaceDependencies(ctx context.Context, workspace *workspacesv1alpha1.Workspace, resolved *resolvedWorkspace) (*resolvedWorkspace, string, string, error) {
+	if workspace.Spec.HotMountWorktrees {
+		if reason, message := validateHotMountPaths(workspace.Spec.Mounts); reason != "" {
+			return resolved, reason, message, nil
+		}
+	}
 	initializerNames := make(map[string]struct{})
 	worktreeRootMountIndexes := make(map[string]int)
+	hotWorktreeNames := make(map[string]struct{})
 	for _, mount := range workspace.Spec.Mounts {
 		volume, volumeMount, claim, initializer, reason, message, err := r.resolveWorkspaceMount(ctx, workspace.Namespace, mount, resolved.runtime)
 		if err != nil {
@@ -619,6 +682,23 @@ func (r *WorkspaceReconciler) resolveWorkspaceDependencies(ctx context.Context, 
 		}
 		if reason != "" {
 			return resolved, reason, message, nil
+		}
+		if workspace.Spec.HotMountWorktrees && mount.WorktreeRef != nil {
+			if _, duplicate := hotWorktreeNames[mount.WorktreeRef.Name]; duplicate {
+				return resolved, "DuplicateHotMount", "A hot-mount Workspace can mount each Worktree only once", nil
+			}
+			hotWorktreeNames[mount.WorktreeRef.Name] = struct{}{}
+			if initializer != nil {
+				return resolved, "DeferredHotMountUnsupported", "Initialize the Worktree before mounting it into a hot-mount Workspace", nil
+			}
+			resolved.hotMounts = append(resolved.hotMounts, hotWorktreeMount{
+				name: mount.Name, worktree: mount.WorktreeRef.Name, path: path.Clean(mount.Path), claimName: volume.PersistentVolumeClaim.ClaimName,
+				subPath: volumeMount.SubPath, readOnly: mount.ReadOnly,
+			})
+			if claim != nil {
+				resolved.writeClaims = append(resolved.writeClaims, *claim)
+			}
+			continue
 		}
 		resolved.volumes = append(resolved.volumes, volume)
 		resolved.volumeMounts = append(resolved.volumeMounts, volumeMount)
@@ -862,6 +942,7 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 				workspaceRuntimePolicyAnnotation: workspaceRuntimePolicyVersion,
 			},
 		}, Image: resolved.image, HomeClaim: workspace.Name, HomeHostPath: resolved.homeHostPath,
+		HotMountRoot:   hotMountHostRoot(workspace),
 		ServiceAccount: resolved.serviceAccount, AutomountToken: resolved.automountSAToken,
 		Resources: workspace.Spec.Resources, AdditionalVolumes: resolved.volumes, AdditionalMounts: resolved.volumeMounts,
 		Initializers: initializers, BeforeStop: resolved.beforeStop,
@@ -885,27 +966,37 @@ func workspacePodWriteClaims(pod *corev1.Pod) ([]workspaceWriteClaim, error) {
 }
 
 func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *resolvedWorkspace) (string, error) {
+	mounts := workspace.Spec.Mounts
+	if workspace.Spec.HotMountWorktrees {
+		mounts = make([]workspacesv1alpha1.WorkspaceMount, 0, len(workspace.Spec.Mounts))
+		for _, mount := range workspace.Spec.Mounts {
+			if mount.WorktreeRef == nil {
+				mounts = append(mounts, mount)
+			}
+		}
+	}
 	topology := struct {
-		RuntimePolicy    string
-		OS               corev1.OSName
-		Image            string
-		Mounts           []workspacesv1alpha1.WorkspaceMount
-		ConfigMapRefs    []workspacesv1alpha1.LocalReference
-		SecretRefs       []workspacesv1alpha1.LocalReference
-		AgentCredentials []workspacesv1alpha1.LocalReference
-		Credentials      []workspacesv1alpha1.LocalReference
-		ServiceAccount   string
-		AutomountSAToken bool
-		Resources        corev1.ResourceRequirements
-		NodeSelector     map[string]string
-		Tolerations      []corev1.Toleration
-		Affinity         *corev1.Affinity
-		RuntimeClassName *string
-		Lifecycle        *workspacesv1alpha1.WorkspaceLifecycle
-		HomeHostPath     string
+		RuntimePolicy     string
+		OS                corev1.OSName
+		Image             string
+		Mounts            []workspacesv1alpha1.WorkspaceMount
+		HotMountWorktrees bool
+		ConfigMapRefs     []workspacesv1alpha1.LocalReference
+		SecretRefs        []workspacesv1alpha1.LocalReference
+		AgentCredentials  []workspacesv1alpha1.LocalReference
+		Credentials       []workspacesv1alpha1.LocalReference
+		ServiceAccount    string
+		AutomountSAToken  bool
+		Resources         corev1.ResourceRequirements
+		NodeSelector      map[string]string
+		Tolerations       []corev1.Toleration
+		Affinity          *corev1.Affinity
+		RuntimeClassName  *string
+		Lifecycle         *workspacesv1alpha1.WorkspaceLifecycle
+		HomeHostPath      string
 	}{
 		RuntimePolicy: workspaceRuntimePolicyVersion, OS: resolved.runtime.OS(),
-		Image: resolved.image, Mounts: workspace.Spec.Mounts, ConfigMapRefs: workspace.Spec.ConfigMapRefs,
+		Image: resolved.image, Mounts: mounts, HotMountWorktrees: workspace.Spec.HotMountWorktrees, ConfigMapRefs: workspace.Spec.ConfigMapRefs,
 		SecretRefs: workspace.Spec.SecretRefs, AgentCredentials: workspace.Spec.AgentCredentialRefs,
 		Credentials: workspace.Spec.CredentialRefs, ServiceAccount: resolved.serviceAccount, HomeHostPath: resolved.homeHostPath,
 		AutomountSAToken: resolved.automountSAToken, Resources: workspace.Spec.Resources,
@@ -1092,7 +1183,7 @@ func (r *WorkspaceReconciler) setWorkspaceStatus(ctx context.Context, key types.
 		if current.Status.SourceEnvironmentRevision == 0 {
 			current.Status.SourceEnvironmentRevision = resolved.revision
 		}
-		if readyStatus == metav1.ConditionTrue || reason == "Starting" {
+		if readyStatus == metav1.ConditionTrue || reason == reasonStarting {
 			current.Status.RuntimePodName = current.Name
 		} else if reason == "Suspended" {
 			current.Status.RuntimePodName = ""

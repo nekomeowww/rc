@@ -424,7 +424,7 @@ func TestApplyWorkspaceMountPreservesPartiallyStoppedProcesses(t *testing.T) {
 	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
 	require.NoError(t, repositoriesv1alpha1.AddToScheme(scheme), "register Repository API types")
 	require.NoError(t, coordinationv1.AddToScheme(scheme), "register coordination API types")
-	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testWorkspaceNamespace, UID: testWorkspaceUID}}
+	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testWorkspaceNamespace, UID: testWorkspaceUID}, Spec: workspacesv1alpha1.WorkspaceSpec{OS: corev1.Windows}}
 	worktree := &repositoriesv1alpha1.Worktree{
 		ObjectMeta: metav1.ObjectMeta{Name: testReadyWorktreeName, Namespace: testWorkspaceNamespace, UID: testWorktreeUID},
 		Status: repositoriesv1alpha1.WorktreeStatus{VolumeClaimName: testReadyPVCName, Conditions: []metav1.Condition{{
@@ -488,7 +488,6 @@ func TestApplyHotWorktreeMountDoesNotStopProcesses(t *testing.T) {
 	require.NoError(t, coordinationv1.AddToScheme(scheme))
 	workspace := &workspacesv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testWorkspaceNamespace, UID: testWorkspaceUID},
-		Spec:       workspacesv1alpha1.WorkspaceSpec{HotMountWorktrees: true},
 	}
 	worktree := &repositoriesv1alpha1.Worktree{
 		ObjectMeta: metav1.ObjectMeta{Name: testReadyWorktreeName, Namespace: testWorkspaceNamespace, UID: testWorktreeUID},

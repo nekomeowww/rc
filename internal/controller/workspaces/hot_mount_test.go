@@ -23,7 +23,7 @@ import (
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
 )
 
-func TestHotWorktreeTopologyPreservesExistingRuntime(t *testing.T) {
+func TestHotWorktreeTopologyIgnoresReadyWorktreeMounts(t *testing.T) {
 	t.Parallel()
 	const firstMount = "code"
 	const secondMount = "second"
@@ -33,21 +33,61 @@ func TestHotWorktreeTopologyPreservesExistingRuntime(t *testing.T) {
 		},
 	}
 	resolved := &resolvedWorkspace{runtime: testRCPlatform(t), image: testRunnerImage}
-	legacyHash, err := workspaceTopologyHash(workspace, resolved)
+	baseHash, err := workspaceTopologyHash(workspace, resolved)
 	require.NoError(t, err)
-	assert.Equal(t, "00a91221ed6ed3c1fa84ea61df8776d479c0b230f8c903495aed55a13bc0c386", legacyHash)
-
-	workspace.Spec.HotMountWorktrees = true
-	hotHash, err := workspaceTopologyHash(workspace, resolved)
-	require.NoError(t, err)
-	assert.NotEqual(t, legacyHash, hotHash)
+	assert.NotEqual(t, "00a91221ed6ed3c1fa84ea61df8776d479c0b230f8c903495aed55a13bc0c386", baseHash, "controller upgrade changes the runtime topology")
 
 	workspace.Spec.Mounts = append(workspace.Spec.Mounts, workspacesv1alpha1.WorkspaceMount{
 		Name: secondMount, Path: secondMount, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: secondMount},
 	})
 	afterMountHash, err := workspaceTopologyHash(workspace, resolved)
 	require.NoError(t, err)
-	assert.Equal(t, hotHash, afterMountHash)
+	assert.Equal(t, baseHash, afterMountHash)
+
+	resolved.staticWorktreeMounts = []workspacesv1alpha1.WorkspaceMount{workspace.Spec.Mounts[1]}
+	deferredHash, err := workspaceTopologyHash(workspace, resolved)
+	require.NoError(t, err)
+	assert.NotEqual(t, baseHash, deferredHash)
+}
+
+func TestControllerUpgradeReplacesIdleWorkspaceRuntime(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, coordinationv1.AddToScheme(scheme))
+	require.NoError(t, rbacv1.AddToScheme(scheme))
+	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
+	workspace := &workspacesv1alpha1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "upgrade", Namespace: testNamespace, UID: types.UID("upgrade-uid")},
+		Spec: workspacesv1alpha1.WorkspaceSpec{
+			Image:   testRunnerImage,
+			Storage: &workspacesv1alpha1.PersistentStorageSpec{StorageClassName: testStorageClass, Size: resource.MustParse("20Gi")},
+		},
+	}
+	home := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: workspace.Name, Namespace: workspace.Namespace, OwnerReferences: []metav1.OwnerReference{{UID: workspace.UID, Controller: boolPointer(true)}}},
+		Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	oldPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: workspace.Name, Namespace: workspace.Namespace, Annotations: map[string]string{workspaceTopologyAnnotation: "platform-v2"},
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: workspacesv1alpha1.GroupVersion.String(), Kind: "Workspace", Name: workspace.Name, UID: workspace.UID, Controller: boolPointer(true)}},
+		},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(workspace, home, oldPod).WithObjects(workspace, home, oldPod).Build()
+	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
+	key := client.ObjectKeyFromObject(workspace)
+	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+	require.NoError(t, err)
+	require.Error(t, kubeClient.Get(ctx, key, new(corev1.Pod)), "replace the old runtime Pod")
+
+	_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+	require.NoError(t, err)
+	newPod := new(corev1.Pod)
+	require.NoError(t, kubeClient.Get(ctx, key, newPod))
+	assert.Equal(t, workspaceRuntimePolicyVersion, newPod.Annotations[workspaceRuntimePolicyAnnotation])
+	assert.NotEmpty(t, newPod.Spec.Volumes[1].HostPath, "new Linux runtime supports hot Worktree mounts")
 }
 
 func TestHotWorktreeMountKeepsRuntimeAndActiveProcess(t *testing.T) {
@@ -64,8 +104,7 @@ func TestHotWorktreeMountKeepsRuntimeAndActiveProcess(t *testing.T) {
 	workspace := &workspacesv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{Name: "hot-workspace", Namespace: testNamespace, UID: types.UID("workspace-uid")},
 		Spec: workspacesv1alpha1.WorkspaceSpec{
-			HotMountWorktrees: true,
-			Image:             testRunnerImage,
+			Image: testRunnerImage,
 			Storage: &workspacesv1alpha1.PersistentStorageSpec{
 				StorageClassName: testStorageClass, Size: resource.MustParse("20Gi"),
 			},
@@ -163,7 +202,6 @@ func TestFailedHotMountCreatesCleanupPodWithoutPVC(t *testing.T) {
 	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
 	workspace := &workspacesv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{Name: "workspace", Namespace: testNamespace, UID: types.UID("workspace-uid")},
-		Spec:       workspacesv1alpha1.WorkspaceSpec{HotMountWorktrees: true},
 	}
 	helper := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "workspace-hot-test", Namespace: testNamespace},

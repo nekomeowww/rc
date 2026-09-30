@@ -65,7 +65,7 @@ const (
 	workspaceRevisionAnnotation      = "workspaces.rc.ayaka.io/source-revision"
 	workspaceWriteClaimsAnnotation   = "workspaces.rc.ayaka.io/write-claims"
 	workspaceRuntimePolicyAnnotation = "workspaces.rc.ayaka.io/runtime-policy"
-	workspaceRuntimePolicyVersion    = "platform-v2"
+	workspaceRuntimePolicyVersion    = "platform-v3"
 	repositoryRootMountPath          = "/repository"
 	runtimeContainerName             = "rc-kube"
 	persistentVolumeClaimKind        = "PersistentVolumeClaim"
@@ -83,21 +83,22 @@ const (
 )
 
 type resolvedWorkspace struct {
-	runtime          rcplatform.Runtime
-	image            string
-	revision         int64
-	storage          workspacesv1alpha1.PersistentStorageSpec
-	sourceClaimName  string
-	volumeMounts     []corev1.VolumeMount
-	volumes          []corev1.Volume
-	hotMounts        []hotWorktreeMount
-	outdated         bool
-	serviceAccount   string
-	automountSAToken bool
-	writeClaims      []workspaceWriteClaim
-	initializers     []workspaceInitializer
-	beforeStop       []lifecycle.Action
-	homeHostPath     string
+	runtime              rcplatform.Runtime
+	image                string
+	revision             int64
+	storage              workspacesv1alpha1.PersistentStorageSpec
+	sourceClaimName      string
+	volumeMounts         []corev1.VolumeMount
+	volumes              []corev1.Volume
+	hotMounts            []hotWorktreeMount
+	staticWorktreeMounts []workspacesv1alpha1.WorkspaceMount
+	outdated             bool
+	serviceAccount       string
+	automountSAToken     bool
+	writeClaims          []workspaceWriteClaim
+	initializers         []workspaceInitializer
+	beforeStop           []lifecycle.Action
+	homeHostPath         string
 }
 
 type workspaceInitializer struct {
@@ -362,13 +363,10 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 	currentClaims := resolved.writeClaims
-	if !workspace.Spec.HotMountWorktrees {
+	if pod.Annotations[workspaceTopologyAnnotation] != expectedTopology {
 		currentClaims, err = workspacePodWriteClaims(pod)
 		if err != nil {
 			return ctrl.Result{}, err
-		}
-		if len(currentClaims) == 0 && pod.Annotations[workspaceTopologyAnnotation] == expectedTopology {
-			currentClaims = resolved.writeClaims
 		}
 	}
 	acquired, claimMessage, err := r.acquireWriteClaims(ctx, workspace, currentClaims)
@@ -376,7 +374,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 	if !acquired {
-		if workspace.Spec.HotMountWorktrees {
+		if resolved.runtime.OS() == corev1.Linux {
 			if removed, err := r.removeHotMounts(ctx, workspace); err != nil {
 				return ctrl.Result{}, err
 			} else if !removed {
@@ -411,7 +409,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if !podReady(pod) {
 		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reasonStarting, "Workspace runtime Pod is starting")
 	}
-	if workspace.Spec.HotMountWorktrees {
+	if resolved.runtime.OS() == corev1.Linux {
 		ready, reason, message, err := r.reconcileHotMounts(ctx, workspace, pod, resolved.hotMounts, active)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -585,9 +583,6 @@ func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspac
 		return resolved, reason, message, nil
 	}
 	resolved.runtime = platform
-	if workspace.Spec.HotMountWorktrees && platform.OS() != corev1.Linux {
-		return resolved, "UnsupportedHotMount", "Hot Worktree mounts require Linux", nil
-	}
 	if platform.OS() == rcplatform.Darwin {
 		if workspace.Spec.EnvironmentRef != nil {
 			return resolved, "UnsupportedDarwinEnvironment", "Darwin Workspaces do not support WorkspaceEnvironment PVC clones", nil
@@ -667,7 +662,7 @@ func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspac
 
 //nolint:gocyclo // Each mount and projection has a distinct failure state reported to the Workspace.
 func (r *WorkspaceReconciler) resolveWorkspaceDependencies(ctx context.Context, workspace *workspacesv1alpha1.Workspace, resolved *resolvedWorkspace) (*resolvedWorkspace, string, string, error) {
-	if workspace.Spec.HotMountWorktrees {
+	if resolved.runtime.OS() == corev1.Linux {
 		if reason, message := validateHotMountPaths(workspace.Spec.Mounts); reason != "" {
 			return resolved, reason, message, nil
 		}
@@ -683,22 +678,27 @@ func (r *WorkspaceReconciler) resolveWorkspaceDependencies(ctx context.Context, 
 		if reason != "" {
 			return resolved, reason, message, nil
 		}
-		if workspace.Spec.HotMountWorktrees && mount.WorktreeRef != nil {
+		if resolved.runtime.OS() == corev1.Linux && mount.WorktreeRef != nil {
 			if _, duplicate := hotWorktreeNames[mount.WorktreeRef.Name]; duplicate {
 				return resolved, "DuplicateHotMount", "A hot-mount Workspace can mount each Worktree only once", nil
 			}
 			hotWorktreeNames[mount.WorktreeRef.Name] = struct{}{}
-			if initializer != nil {
-				return resolved, "DeferredHotMountUnsupported", "Initialize the Worktree before mounting it into a hot-mount Workspace", nil
+			worktree := new(repositoriesv1alpha1.Worktree)
+			if err := r.Get(ctx, types.NamespacedName{Name: mount.WorktreeRef.Name, Namespace: workspace.Namespace}, worktree); err != nil {
+				return nil, "", "", fmt.Errorf("get Worktree mount mode: %w", err)
 			}
-			resolved.hotMounts = append(resolved.hotMounts, hotWorktreeMount{
-				name: mount.Name, worktree: mount.WorktreeRef.Name, path: path.Clean(mount.Path), claimName: volume.PersistentVolumeClaim.ClaimName,
-				subPath: volumeMount.SubPath, readOnly: mount.ReadOnly,
-			})
-			if claim != nil {
-				resolved.writeClaims = append(resolved.writeClaims, *claim)
+			if worktreebootstrap.Deferred(worktree) {
+				resolved.staticWorktreeMounts = append(resolved.staticWorktreeMounts, mount)
+			} else {
+				resolved.hotMounts = append(resolved.hotMounts, hotWorktreeMount{
+					name: mount.Name, worktree: mount.WorktreeRef.Name, path: path.Clean(mount.Path), claimName: volume.PersistentVolumeClaim.ClaimName,
+					subPath: volumeMount.SubPath, readOnly: mount.ReadOnly,
+				})
+				if claim != nil {
+					resolved.writeClaims = append(resolved.writeClaims, *claim)
+				}
+				continue
 			}
-			continue
 		}
 		resolved.volumes = append(resolved.volumes, volume)
 		resolved.volumeMounts = append(resolved.volumeMounts, volumeMount)
@@ -931,6 +931,10 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 	for _, initializer := range resolved.initializers {
 		initializers = append(initializers, rcplatform.Initializer{Name: initializer.name, Image: initializer.image, Action: initializer.action})
 	}
+	hotMountRoot := ""
+	if platform.OS() == corev1.Linux {
+		hotMountRoot = hotMountHostRoot(workspace)
+	}
 	return platform.WorkspacePod(rcplatform.WorkspacePodIntent{
 		Metadata: metav1.ObjectMeta{
 			Name:      workspace.Name,
@@ -942,7 +946,7 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 				workspaceRuntimePolicyAnnotation: workspaceRuntimePolicyVersion,
 			},
 		}, Image: resolved.image, HomeClaim: workspace.Name, HomeHostPath: resolved.homeHostPath,
-		HotMountRoot:   hotMountHostRoot(workspace),
+		HotMountRoot:   hotMountRoot,
 		ServiceAccount: resolved.serviceAccount, AutomountToken: resolved.automountSAToken,
 		Resources: workspace.Spec.Resources, AdditionalVolumes: resolved.volumes, AdditionalMounts: resolved.volumeMounts,
 		Initializers: initializers, BeforeStop: resolved.beforeStop,
@@ -967,13 +971,14 @@ func workspacePodWriteClaims(pod *corev1.Pod) ([]workspaceWriteClaim, error) {
 
 func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *resolvedWorkspace) (string, error) {
 	mounts := workspace.Spec.Mounts
-	if workspace.Spec.HotMountWorktrees {
+	if resolved.runtime.OS() == corev1.Linux {
 		mounts = make([]workspacesv1alpha1.WorkspaceMount, 0, len(workspace.Spec.Mounts))
 		for _, mount := range workspace.Spec.Mounts {
 			if mount.WorktreeRef == nil {
 				mounts = append(mounts, mount)
 			}
 		}
+		mounts = append(mounts, resolved.staticWorktreeMounts...)
 	}
 	topology := struct {
 		RuntimePolicy    string
@@ -1005,9 +1010,6 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 	data, err := json.Marshal(topology)
 	if err != nil {
 		return "", fmt.Errorf("marshal Workspace topology: %w", err)
-	}
-	if workspace.Spec.HotMountWorktrees {
-		data = append([]byte("hot-worktrees/v1\x00"), data...)
 	}
 	sum := sha256.Sum256(data)
 

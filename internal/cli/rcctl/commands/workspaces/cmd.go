@@ -61,21 +61,20 @@ import (
 const darwinOSName corev1.OSName = "darwin"
 
 type createOptions struct {
-	placement         command.PlacementOptions
-	environment       string
-	image             string
-	storageClass      string
-	size              string
-	agentCredentials  []string
-	credentials       []string
-	defaultCwd        string
-	serviceAccount    string
-	noServiceAccount  bool
-	idleTimeout       time.Duration
-	wait              bool
-	gpu               command.GPUOptions
-	npmRegistry       string
-	hotMountWorktrees bool
+	placement        command.PlacementOptions
+	environment      string
+	image            string
+	storageClass     string
+	size             string
+	agentCredentials []string
+	credentials      []string
+	defaultCwd       string
+	serviceAccount   string
+	noServiceAccount bool
+	idleTimeout      time.Duration
+	wait             bool
+	gpu              command.GPUOptions
+	npmRegistry      string
 }
 
 type mountOptions struct {
@@ -141,9 +140,8 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			workspace := &workspacesv1alpha1.Workspace{
 				ObjectMeta: metav1.ObjectMeta{Name: args[0], Namespace: namespace},
 				Spec: workspacesv1alpha1.WorkspaceSpec{
-					DesiredState:      workspacesv1alpha1.WorkspaceDesiredStateRunning,
-					HotMountWorktrees: options.hotMountWorktrees,
-					OS:                osName, NodeSelector: options.placement.NodeSelector, Tolerations: tolerations,
+					DesiredState: workspacesv1alpha1.WorkspaceDesiredStateRunning,
+					OS:           osName, NodeSelector: options.placement.NodeSelector, Tolerations: tolerations,
 					Image: options.image, DefaultWorkingDirectory: options.defaultCwd,
 					ServiceAccountName: options.serviceAccount,
 					Resources:          resources,
@@ -176,9 +174,6 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 					return fmt.Errorf("parse --size: value must be a positive Kubernetes quantity")
 				}
 				workspace.Spec.Storage = &workspacesv1alpha1.PersistentStorageSpec{StorageClassName: options.storageClass, Size: size}
-			}
-			if options.hotMountWorktrees && workspace.Spec.OS != corev1.Linux && workspace.Spec.OS != "" {
-				return fmt.Errorf("--hot-mount-worktrees requires Linux")
 			}
 			if err := setWorkspaceCredentialReferences(cmd.Context(), clusterClient.Kube, workspace, options.agentCredentials, options.credentials); err != nil {
 				return err
@@ -220,7 +215,6 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	cmd.Flags().BoolVar(&options.noServiceAccount, "no-service-account", false, "Disable ServiceAccount token mounting")
 	cmd.Flags().DurationVar(&options.idleTimeout, "idle-timeout", 0, "Suspend an idle named Workspace; zero disables")
 	cmd.Flags().StringVar(&options.npmRegistry, "npm-registry", "", "npm registry URL added to Workspace environment defaults")
-	cmd.Flags().BoolVar(&options.hotMountWorktrees, "hot-mount-worktrees", false, "Attach Worktree PVCs without replacing the Linux runtime Pod; requires privileged mount helpers")
 	cmd.Flags().BoolVar(&options.wait, "wait", true, "Wait for the Workspace runtime")
 	options.gpu.AddFlags(cmd.Flags())
 
@@ -267,7 +261,7 @@ func setWorkspaceCredentialReferences(
 }
 
 func newMountCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
-	root := &cobra.Command{Use: "mount", Short: "Add a code mount, replacing an idle runtime Pod"}
+	root := &cobra.Command{Use: "mount", Short: "Add a code mount to a Workspace"}
 	repositoryOptions := new(mountOptions)
 	repository := &cobra.Command{
 		Use: "repo REPOSITORY", Short: "Create and mount a writable Worktree, or explicitly mount Repository read-only", Args: cobra.ExactArgs(1),
@@ -297,7 +291,7 @@ func addMountFlags(cmd *cobra.Command, options *mountOptions) {
 	cmd.Flags().StringVar(&options.path, "path", "", "Path below /workspace; defaults to mount name")
 	cmd.Flags().StringVar(&options.name, "name", "", "Mount name; defaults to source name")
 	cmd.Flags().BoolVar(&options.force, "force", false, "Stop active processes before replacing topology")
-	cmd.Flags().BoolVar(&options.noWait, "no-wait", false, "Return without waiting for the replacement runtime")
+	cmd.Flags().BoolVar(&options.noWait, "no-wait", false, "Return without waiting for the mount update")
 }
 
 func mountRepository(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, selector string, options mountOptions) error {
@@ -517,8 +511,14 @@ func applyWorkspaceMount(
 		return workspaceMountResult{}, rollbackWorkspaceMount(ctx, kubeClient, key, mount, nil, false, err)
 	}
 
-	if current.Spec.HotMountWorktrees && mount.WorktreeRef != nil {
-		return workspaceMountResult{workspace: current}, nil
+	if (current.Spec.OS == "" || current.Spec.OS == corev1.Linux) && mount.WorktreeRef != nil {
+		worktree := new(repositoriesv1alpha1.Worktree)
+		if err := kubeClient.Get(ctx, client.ObjectKey{Name: mount.WorktreeRef.Name, Namespace: current.Namespace}, worktree); err != nil {
+			return workspaceMountResult{}, rollbackWorkspaceMount(ctx, kubeClient, key, mount, lease, createdLease, err)
+		}
+		if meta.IsStatusConditionTrue(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady) && !worktreebootstrap.Deferred(worktree) {
+			return workspaceMountResult{workspace: current}, nil
+		}
 	}
 	stopped, err := stop(ctx, current)
 	result := workspaceMountResult{workspace: current, stoppedProcesses: stopped}
@@ -668,7 +668,7 @@ func newUnmountCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	var force bool
 	var noWait bool
 	cmd := &cobra.Command{
-		Use: "unmount WORKSPACE MOUNT", Short: "Remove a code mount, replacing an idle runtime Pod", Args: cobra.ExactArgs(2),
+		Use: "unmount WORKSPACE MOUNT", Short: "Remove a code mount from a Workspace", Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			config, namespace, err := kubeconfigFlags.Resolve()
 			if err != nil {
@@ -723,7 +723,7 @@ func newUnmountCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "Stop active processes before replacing topology")
-	cmd.Flags().BoolVar(&noWait, "no-wait", false, "Return without waiting for the replacement runtime")
+	cmd.Flags().BoolVar(&noWait, "no-wait", false, "Return without waiting for the mount update")
 
 	return cmd
 }
@@ -1192,11 +1192,7 @@ func finishTopologyChange(cmd *cobra.Command, kubeClient client.Client, result w
 		return err
 	}
 
-	message := "waiting for replacement Workspace runtime..."
-	if result.workspace.Spec.HotMountWorktrees {
-		message = "waiting for Workspace Worktree mount..."
-	}
-	indicator := progress.Start(cmd.ErrOrStderr(), message)
+	indicator := progress.Start(cmd.ErrOrStderr(), "waiting for Workspace mount update...")
 	defer indicator.Stop()
 	if err := waitWorkspaceGenerationReady(cmd.Context(), kubeClient, result.workspace, result.workspace.Generation); err != nil {
 		return err

@@ -139,11 +139,6 @@ type WorkspaceSpec struct {
 	// +optional
 	Mounts []WorkspaceMount `json:"mounts,omitempty"`
 
-	// hotMountWorktrees keeps the Linux runtime Pod while Worktree mounts change.
-	// It uses privileged mount helpers on the runtime node.
-	// +optional
-	HotMountWorktrees bool `json:"hotMountWorktrees,omitempty"`
-
 	// configMapRefs are projected into the Workspace runtime.
 	// +listType=map
 	// +listMapKey=name

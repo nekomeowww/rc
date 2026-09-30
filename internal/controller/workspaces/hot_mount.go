@@ -88,9 +88,6 @@ rmdir "$HOT_ROOT" 2>/dev/null || :
 `
 
 func hotMountHostRoot(workspace *workspacesv1alpha1.Workspace) string {
-	if !workspace.Spec.HotMountWorktrees {
-		return ""
-	}
 	return path.Join(hotMountHostBase, workspace.Namespace, string(workspace.UID))
 }
 

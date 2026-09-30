@@ -166,6 +166,14 @@ func TestWorkspaceRuntimeUsesDeferredWorktreeAndLifecycleActions(t *testing.T) {
 	beforeStop, err := lifecycle.Decode(pod.Spec.Containers[0].Lifecycle.PreStop.Exec.Command[3])
 	requirements.NoError(err)
 	assertions.Equal([]string{lifecycleToolTestName, "cleanup"}, beforeStop[0].Command)
+
+	worktree.Status.Conditions = append(worktree.Status.Conditions, metav1.Condition{
+		Type: repositoriesv1alpha1.WorktreeConditionReady, Status: metav1.ConditionTrue, Reason: "Initialized",
+	})
+	requirements.NoError(kubeClient.Status().Update(ctx, worktree))
+	_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+	requirements.NoError(err)
+	requirements.NoError(kubeClient.Get(ctx, key, pod), "keep the generated Worktree mount after initialization")
 }
 
 func TestWorkspaceMountsExplicitWorktreeMetadataAtStableVolumeRoot(t *testing.T) {
@@ -316,8 +324,8 @@ func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 		assertions.NotEqual("sudoers", volume.Name, "normal Workspace has no sudoers volume")
 	}
 	assertions.Equal("/home/agent", pod.Spec.Containers[0].VolumeMounts[0].MountPath, "mount persistent home")
-	assertions.Equal("/workspace/rc", pod.Spec.Containers[0].VolumeMounts[1].MountPath, "mount selected Worktree")
-	assertions.Empty(pod.Spec.Containers[0].VolumeMounts[1].SubPath, "mount a generated Worktree clone from its volume root")
+	assertions.Equal("/workspace", pod.Spec.Containers[0].VolumeMounts[1].MountPath, "reserve the hot Worktree mount root")
+	assertions.Equal(corev1.MountPropagationHostToContainer, *pod.Spec.Containers[0].VolumeMounts[1].MountPropagation)
 	assertions.True(metav1.IsControlledBy(pod, workspace), "Workspace owns runtime Pod")
 
 	serviceAccount := new(corev1.ServiceAccount)
@@ -361,11 +369,11 @@ func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 	currentWorkspace.Spec.Mounts = append(currentWorkspace.Spec.Mounts, workspacesv1alpha1.WorkspaceMount{Name: "other", Path: "other", WorktreeRef: &workspacesv1alpha1.LocalReference{Name: secondWorktree.Name}})
 	requirements.NoError(kubeClient.Update(ctx, currentWorkspace), "request topology edit")
 	_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
-	requirements.NoError(err, "reject topology edit while process is active")
-	requirements.NoError(kubeClient.Get(ctx, key, pod), "retain runtime Pod for blocked topology edit")
+	requirements.NoError(err, "accept hot Worktree mount while process is active")
+	requirements.NoError(kubeClient.Get(ctx, key, pod), "retain runtime Pod for hot Worktree mount")
 	blockedLeases := new(coordinationv1.LeaseList)
 	requirements.NoError(kubeClient.List(ctx, blockedLeases, client.InNamespace(workspace.Namespace)), "list claims after blocked topology edit")
-	assertions.Len(blockedLeases.Items, 1, "do not acquire desired claims before topology replacement")
+	assertions.Len(blockedLeases.Items, 2, "reserve the added Worktree without replacing the runtime")
 	requirements.NoError(kubeClient.Get(ctx, key, currentWorkspace), "get Workspace to revert topology")
 	currentWorkspace.Spec.Mounts = originalMounts
 	requirements.NoError(kubeClient.Update(ctx, currentWorkspace), "revert blocked topology edit")

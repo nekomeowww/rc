@@ -109,6 +109,7 @@ func NewCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	return root
 }
 
+//nolint:gocyclo // Workspace creation validates each independent user option before creating resources.
 func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	options := new(createOptions)
 	cmd := &cobra.Command{
@@ -260,7 +261,7 @@ func setWorkspaceCredentialReferences(
 }
 
 func newMountCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
-	root := &cobra.Command{Use: "mount", Short: "Add a code mount, replacing an idle runtime Pod"}
+	root := &cobra.Command{Use: "mount", Short: "Add a code mount to a Workspace"}
 	repositoryOptions := new(mountOptions)
 	repository := &cobra.Command{
 		Use: "repo REPOSITORY", Short: "Create and mount a writable Worktree, or explicitly mount Repository read-only", Args: cobra.ExactArgs(1),
@@ -290,7 +291,7 @@ func addMountFlags(cmd *cobra.Command, options *mountOptions) {
 	cmd.Flags().StringVar(&options.path, "path", "", "Path below /workspace; defaults to mount name")
 	cmd.Flags().StringVar(&options.name, "name", "", "Mount name; defaults to source name")
 	cmd.Flags().BoolVar(&options.force, "force", false, "Stop active processes before replacing topology")
-	cmd.Flags().BoolVar(&options.noWait, "no-wait", false, "Return without waiting for the replacement runtime")
+	cmd.Flags().BoolVar(&options.noWait, "no-wait", false, "Return without waiting for the mount update")
 }
 
 func mountRepository(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, selector string, options mountOptions) error {
@@ -510,6 +511,15 @@ func applyWorkspaceMount(
 		return workspaceMountResult{}, rollbackWorkspaceMount(ctx, kubeClient, key, mount, nil, false, err)
 	}
 
+	if (current.Spec.OS == "" || current.Spec.OS == corev1.Linux) && mount.WorktreeRef != nil {
+		worktree := new(repositoriesv1alpha1.Worktree)
+		if err := kubeClient.Get(ctx, client.ObjectKey{Name: mount.WorktreeRef.Name, Namespace: current.Namespace}, worktree); err != nil {
+			return workspaceMountResult{}, rollbackWorkspaceMount(ctx, kubeClient, key, mount, lease, createdLease, err)
+		}
+		if meta.IsStatusConditionTrue(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady) && !worktreebootstrap.Deferred(worktree) {
+			return workspaceMountResult{workspace: current}, nil
+		}
+	}
 	stopped, err := stop(ctx, current)
 	result := workspaceMountResult{workspace: current, stoppedProcesses: stopped}
 	if err != nil {
@@ -658,7 +668,7 @@ func newUnmountCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	var force bool
 	var noWait bool
 	cmd := &cobra.Command{
-		Use: "unmount WORKSPACE MOUNT", Short: "Remove a code mount, replacing an idle runtime Pod", Args: cobra.ExactArgs(2),
+		Use: "unmount WORKSPACE MOUNT", Short: "Remove a code mount from a Workspace", Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			config, namespace, err := kubeconfigFlags.Resolve()
 			if err != nil {
@@ -713,7 +723,7 @@ func newUnmountCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "Stop active processes before replacing topology")
-	cmd.Flags().BoolVar(&noWait, "no-wait", false, "Return without waiting for the replacement runtime")
+	cmd.Flags().BoolVar(&noWait, "no-wait", false, "Return without waiting for the mount update")
 
 	return cmd
 }
@@ -1158,7 +1168,7 @@ func waitWorkspaceGenerationReady(ctx context.Context, kubeClient client.Client,
 
 func workspaceReadinessTransient(reason string) bool {
 	switch reason {
-	case "Provisioning", "Starting", "Replacing", "Stopping", "WorktreeNotReady", "RepositoryNotReady", "WorktreeInUse":
+	case "Provisioning", "Starting", "Replacing", "Stopping", "Mounting", "Unmounting", "WorktreeNotReady", "RepositoryNotReady", "WorktreeInUse":
 		return true
 	default:
 		return false
@@ -1182,7 +1192,7 @@ func finishTopologyChange(cmd *cobra.Command, kubeClient client.Client, result w
 		return err
 	}
 
-	indicator := progress.Start(cmd.ErrOrStderr(), "waiting for replacement Workspace runtime...")
+	indicator := progress.Start(cmd.ErrOrStderr(), "waiting for Workspace mount update...")
 	defer indicator.Stop()
 	if err := waitWorkspaceGenerationReady(cmd.Context(), kubeClient, result.workspace, result.workspace.Generation); err != nil {
 		return err

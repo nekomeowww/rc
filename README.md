@@ -247,6 +247,24 @@ rcctl -n development workspace default dev
 rcctl -n development exec -it --agent-credential codex --cwd /workspace/rc dev -- codex
 ```
 
+On Linux, add ready Worktree PVCs without replacing the Workspace runtime Pod:
+
+```sh
+rcctl -n development env create prepared --image ghcr.io/nekomeowww/rc/runner:latest --storage-class csi-hostpath-sc
+rcctl -n development workspace create dev-hot --environment prepared
+rcctl -n development workspace mount worktree rc-readme --workspace dev-hot --path rc
+```
+
+Each Worktree keeps its own cloned PVC. A privileged mount helper runs on the
+Workspace node and publishes that PVC into the existing Pod. The Workspace
+keeps its Environment, home, cache, and running processes when a Worktree is
+added. Linux Workspaces require a cluster that permits privileged Pods and
+hostPath mounts. Stop active Workspace processes before unmounting a Worktree.
+Upgrading the controller replaces existing runtime Pods to install the mount
+propagation path. Windows Workspaces retain Pod replacement for mount changes.
+If a mount helper crashes, rc cleans the node bind mount and reports the failure.
+Unmount and remount that Worktree to retry.
+
 #### Optimizations
 
 ##### npm

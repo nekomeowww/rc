@@ -596,7 +596,7 @@ func (r *WorkspaceExecReconciler) claimProcessRuntime(ctx context.Context, key t
 	current.Status.RuntimePodUID = target.podUID
 	meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 		Type: workspacesv1alpha1.WorkspaceExecConditionReady, Status: metav1.ConditionFalse,
-		ObservedGeneration: current.Generation, Reason: "Starting", Message: "rc-kube is starting the command",
+		ObservedGeneration: current.Generation, Reason: reasonStarting, Message: "rc-kube is starting the command",
 	})
 	if err := r.Status().Update(ctx, current); err != nil {
 		return fmt.Errorf("persist WorkspaceExec runtime claim: %w", err)

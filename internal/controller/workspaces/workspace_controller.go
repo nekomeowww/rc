@@ -976,27 +976,26 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 		}
 	}
 	topology := struct {
-		RuntimePolicy     string
-		OS                corev1.OSName
-		Image             string
-		Mounts            []workspacesv1alpha1.WorkspaceMount
-		HotMountWorktrees bool
-		ConfigMapRefs     []workspacesv1alpha1.LocalReference
-		SecretRefs        []workspacesv1alpha1.LocalReference
-		AgentCredentials  []workspacesv1alpha1.LocalReference
-		Credentials       []workspacesv1alpha1.LocalReference
-		ServiceAccount    string
-		AutomountSAToken  bool
-		Resources         corev1.ResourceRequirements
-		NodeSelector      map[string]string
-		Tolerations       []corev1.Toleration
-		Affinity          *corev1.Affinity
-		RuntimeClassName  *string
-		Lifecycle         *workspacesv1alpha1.WorkspaceLifecycle
-		HomeHostPath      string
+		RuntimePolicy    string
+		OS               corev1.OSName
+		Image            string
+		Mounts           []workspacesv1alpha1.WorkspaceMount
+		ConfigMapRefs    []workspacesv1alpha1.LocalReference
+		SecretRefs       []workspacesv1alpha1.LocalReference
+		AgentCredentials []workspacesv1alpha1.LocalReference
+		Credentials      []workspacesv1alpha1.LocalReference
+		ServiceAccount   string
+		AutomountSAToken bool
+		Resources        corev1.ResourceRequirements
+		NodeSelector     map[string]string
+		Tolerations      []corev1.Toleration
+		Affinity         *corev1.Affinity
+		RuntimeClassName *string
+		Lifecycle        *workspacesv1alpha1.WorkspaceLifecycle
+		HomeHostPath     string
 	}{
 		RuntimePolicy: workspaceRuntimePolicyVersion, OS: resolved.runtime.OS(),
-		Image: resolved.image, Mounts: mounts, HotMountWorktrees: workspace.Spec.HotMountWorktrees, ConfigMapRefs: workspace.Spec.ConfigMapRefs,
+		Image: resolved.image, Mounts: mounts, ConfigMapRefs: workspace.Spec.ConfigMapRefs,
 		SecretRefs: workspace.Spec.SecretRefs, AgentCredentials: workspace.Spec.AgentCredentialRefs,
 		Credentials: workspace.Spec.CredentialRefs, ServiceAccount: resolved.serviceAccount, HomeHostPath: resolved.homeHostPath,
 		AutomountSAToken: resolved.automountSAToken, Resources: workspace.Spec.Resources,
@@ -1006,6 +1005,9 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 	data, err := json.Marshal(topology)
 	if err != nil {
 		return "", fmt.Errorf("marshal Workspace topology: %w", err)
+	}
+	if workspace.Spec.HotMountWorktrees {
+		data = append([]byte("hot-worktrees/v1\x00"), data...)
 	}
 	sum := sha256.Sum256(data)
 

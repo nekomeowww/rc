@@ -23,6 +23,33 @@ import (
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
 )
 
+func TestHotWorktreeTopologyPreservesExistingRuntime(t *testing.T) {
+	t.Parallel()
+	const firstMount = "code"
+	const secondMount = "second"
+	workspace := &workspacesv1alpha1.Workspace{
+		Spec: workspacesv1alpha1.WorkspaceSpec{
+			Mounts: []workspacesv1alpha1.WorkspaceMount{{Name: firstMount, Path: firstMount}},
+		},
+	}
+	resolved := &resolvedWorkspace{runtime: testRCPlatform(t), image: testRunnerImage}
+	legacyHash, err := workspaceTopologyHash(workspace, resolved)
+	require.NoError(t, err)
+	assert.Equal(t, "00a91221ed6ed3c1fa84ea61df8776d479c0b230f8c903495aed55a13bc0c386", legacyHash)
+
+	workspace.Spec.HotMountWorktrees = true
+	hotHash, err := workspaceTopologyHash(workspace, resolved)
+	require.NoError(t, err)
+	assert.NotEqual(t, legacyHash, hotHash)
+
+	workspace.Spec.Mounts = append(workspace.Spec.Mounts, workspacesv1alpha1.WorkspaceMount{
+		Name: secondMount, Path: secondMount, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: secondMount},
+	})
+	afterMountHash, err := workspaceTopologyHash(workspace, resolved)
+	require.NoError(t, err)
+	assert.Equal(t, hotHash, afterMountHash)
+}
+
 func TestHotWorktreeMountKeepsRuntimeAndActiveProcess(t *testing.T) {
 	t.Parallel()
 	const mountName = "new"

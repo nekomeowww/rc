@@ -538,6 +538,31 @@ func (r *WorkspaceReconciler) acquireWriteClaims(ctx context.Context, workspace 
 	return true, "", nil
 }
 
+func (r *WorkspaceReconciler) releaseWriteClaims(ctx context.Context, workspace *workspacesv1alpha1.Workspace, keep []workspaceWriteClaim) error {
+	kept := make(map[string]struct{}, len(keep))
+	for _, claim := range keep {
+		kept[claim.leaseName] = struct{}{}
+	}
+	leases := new(coordinationv1.LeaseList)
+	if err := r.List(ctx, leases, client.InNamespace(workspace.Namespace), client.MatchingLabels{worktreeclaim.HolderLabel: workspace.Name}); err != nil {
+		return fmt.Errorf("list Workspace Worktree write Leases: %w", err)
+	}
+	for index := range leases.Items {
+		lease := &leases.Items[index]
+		if _, exists := kept[lease.Name]; exists {
+			continue
+		}
+		if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != string(workspace.UID) {
+			continue
+		}
+		if err := r.Delete(ctx, lease); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("release Worktree write Lease: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // releaseClaims keeps reservations while a runtime Pod exists. Once it is absent,
 // the Workspace releases both parent mounts and Worktree write claims.
 func (r *WorkspaceReconciler) releaseClaims(ctx context.Context, workspace *workspacesv1alpha1.Workspace) error {
@@ -555,21 +580,7 @@ func (r *WorkspaceReconciler) releaseClaims(ctx context.Context, workspace *work
 		return err
 	}
 
-	leases := new(coordinationv1.LeaseList)
-	if err := r.List(ctx, leases, client.InNamespace(workspace.Namespace), client.MatchingLabels{worktreeclaim.HolderLabel: workspace.Name}); err != nil {
-		return fmt.Errorf("list Workspace Worktree write Leases: %w", err)
-	}
-	for index := range leases.Items {
-		lease := &leases.Items[index]
-		if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != string(workspace.UID) {
-			continue
-		}
-		if err := r.Delete(ctx, lease); err != nil && !errors.IsNotFound(err) {
-			return fmt.Errorf("release Worktree write Lease: %w", err)
-		}
-	}
-
-	return nil
+	return r.releaseWriteClaims(ctx, workspace, nil)
 }
 
 func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspace *workspacesv1alpha1.Workspace) (*resolvedWorkspace, string, string, error) {

@@ -201,7 +201,7 @@ func TestFailedHotMountCreatesCleanupPodWithoutPVC(t *testing.T) {
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
 	workspace := &workspacesv1alpha1.Workspace{
-		ObjectMeta: metav1.ObjectMeta{Name: "workspace", Namespace: testNamespace, UID: types.UID("workspace-uid")},
+		ObjectMeta: metav1.ObjectMeta{Name: "mount-workspace", Namespace: testNamespace, UID: types.UID("workspace-uid")},
 	}
 	helper := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "workspace-hot-test", Namespace: testNamespace},

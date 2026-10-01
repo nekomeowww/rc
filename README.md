@@ -1,5 +1,19 @@
 # rc
 
+<picture>
+  <source
+    width="100%"
+    srcset="./docs/images/overview-3x1-dark.webp"
+    media="(prefers-color-scheme: dark)"
+  />
+  <source
+    width="100%"
+    srcset="./docs/images/overview-3x1-light.webp"
+    media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)"
+  />
+  <img width="100%" src="./docs/images/overview-3x1-light.webp" />
+</picture>
+
 `rc` runs persistent, Kubernetes-backed development workspaces for coding agents.
 It keeps repositories, Git worktrees, home directories, credentials, and processes as explicit Kubernetes resources, while `rcctl` provides the day-to-day command-line workflow.
 
@@ -22,6 +36,20 @@ Git remote -> Repository parent PVC -> Worktree child PVC -> Workspace
 ```
 
 A `Repository` is the synchronized, authoritative mirror of a Git remote. A `Worktree` is an independent CSI clone of that Repository volume. rc initializes the requested branch or ref directly in the cloned Repository root, without downloading the remote or materializing a second linked worktree. A `Workspace` mounts one or more Worktrees together with a persistent home directory, and can run multiple concurrent `WorkspaceExec` resources.
+
+<picture>
+  <source
+    width="100%"
+    srcset="./docs/images/resource-model-3x1-dark.webp"
+    media="(prefers-color-scheme: dark)"
+  />
+  <source
+    width="100%"
+    srcset="./docs/images/resource-model-3x1-light.webp"
+    media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)"
+  />
+  <img width="100%" src="./docs/images/resource-model-3x1-light.webp" />
+</picture>
 
 This gives each task an ordinary Git branch and working tree without repeatedly downloading the same remote. Worktrees remain inspectable after a process exits, and a disconnected terminal does not stop the process it started.
 
@@ -122,6 +150,37 @@ npx skills add nekomeowww/rc --skill use-rc --skill setup-rc --skill setup-rc-lo
 
 ## Quick start with rcctl
 
+The top-level command groups follow the rc resource model:
+
+| Command | Purpose |
+| --- | --- |
+| `rcctl credentials` | Import Git, agent, and process credentials |
+| `rcctl repo` | Clone, inspect, execute commands in, and delete Repository mirrors |
+| `rcctl worktree` | Create, inspect, execute in, and delete independent Git checkouts |
+| `rcctl env` | Prepare and commit reusable Workspace home environments |
+| `rcctl workspace` | Create persistent development machines and manage their mounts |
+| `rcctl run` / `rcctl exec` | Run commands in a new / existing Workspace |
+| `rcctl ps` / `attach` / `logs` / `stop` / `inspect` / `rm` | List and manage processes |
+
+In most cases, it takes only a few steps to get started with rcctl:
+
+<picture>
+  <source
+    width="100%"
+    srcset="./docs/images/quick-start-3x1-dark.webp"
+    media="(prefers-color-scheme: dark)"
+  />
+  <source
+    width="100%"
+    srcset="./docs/images/quick-start-3x1-light.webp"
+    media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)"
+  />
+  <img width="100%" src="./docs/images/quick-start-3x1-light.webp" />
+</picture>
+
+<details>
+  <summary>Try without Kubernetes</summary>
+
 For a disposable local cluster on macOS or Linux, install Kind and Docker, then create a single-node cluster with the clone-capable CSI hostpath driver:
 
 ```sh
@@ -139,17 +198,7 @@ The examples below use the `development` namespace and the local StorageClass. W
 kubectl create namespace development --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-The top-level command groups follow the rc resource model:
-
-| Command | Purpose |
-| --- | --- |
-| `rcctl credentials` | Import Git, agent, and process credentials |
-| `rcctl repo` | Clone, inspect, execute commands in, and delete Repository mirrors |
-| `rcctl worktree` | Create, inspect, execute in, and delete independent Git checkouts |
-| `rcctl env` | Prepare and commit reusable Workspace home environments |
-| `rcctl workspace` | Create persistent development machines and manage their mounts |
-| `rcctl run` / `rcctl exec` | Run commands in a new / existing Workspace |
-| `rcctl ps` / `attach` / `logs` / `stop` / `inspect` / `rm` | List and manage processes |
+</details>
 
 ### Import credentials
 
@@ -363,6 +412,20 @@ kubectl delete -f https://github.com/nekomeowww/rc/releases/latest/download/inst
 ```
 
 Removing the CRDs deletes all rc custom resources from the cluster. Review the associated PVC retention behavior before uninstalling a production deployment.
+
+<picture>
+  <source
+    width="100%"
+    srcset="./docs/images/cover-3x1-dark.webp"
+    media="(prefers-color-scheme: dark)"
+  />
+  <source
+    width="100%"
+    srcset="./docs/images/cover-3x1-light.webp"
+    media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)"
+  />
+  <img width="100%" src="./docs/images/cover-3x1-light.webp" />
+</picture>
 
 ## Contributing
 

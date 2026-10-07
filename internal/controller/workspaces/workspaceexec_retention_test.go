@@ -63,7 +63,7 @@ func TestTerminalWorkspaceExecRetainsCleanupFinalizer(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "terminal-with-transcript", Namespace: testNamespace, Finalizers: []string{executionFinalizer}},
 		Status:     workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, TranscriptPath: ".rc/processes/terminal-with-transcript/transcript.log"},
 	}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(process).WithObjects(process).Build()
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(process).WithObjects(process).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	r := &WorkspaceExecReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 	_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(process)})
 	require.NoError(t, err)
@@ -110,7 +110,7 @@ func TestDeletingLastExecutionPreservesWorkspaceIdleClock(t *testing.T) {
 	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "idle-clock", Namespace: testNamespace, UID: "idle-clock-uid"}}
 	process := &workspacesv1alpha1.WorkspaceExec{ObjectMeta: metav1.ObjectMeta{Name: "last-result", Namespace: testNamespace, Finalizers: []string{executionFinalizer}}, Spec: workspacesv1alpha1.WorkspaceExecSpec{TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: workspace.Name}}, Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, CompletedAt: &completed}}
 	require.NoError(t, controllerutil.SetControllerReference(workspace, process, scheme))
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, process).WithStatusSubresource(workspace, process).Build()
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, process).WithStatusSubresource(workspace, process).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	require.NoError(t, kube.Delete(ctx, process))
 	_, err := (&WorkspaceExecReconciler{Client: kube, APIReader: kube, Scheme: scheme}).Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(process)})
 	require.NoError(t, err)

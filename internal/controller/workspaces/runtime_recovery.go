@@ -53,7 +53,7 @@ func (r *WorkspaceReconciler) reconcileRuntimeRecovery(ctx context.Context, work
 		return ctrl.Result{}, false, nil
 	}
 	processes := new(workspacesv1alpha1.WorkspaceExecList)
-	if err := r.APIReader.List(ctx, processes, client.InNamespace(workspace.Namespace)); err != nil {
+	if err := r.APIReader.List(ctx, processes, client.InNamespace(workspace.Namespace), client.MatchingFields{executionTargetIndex: workspace.Name}); err != nil {
 		return ctrl.Result{}, true, err
 	}
 	bound := false

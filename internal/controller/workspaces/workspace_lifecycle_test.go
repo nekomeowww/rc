@@ -187,13 +187,20 @@ func TestLifecycleUsesAuthoritativeExecutionState(t *testing.T) {
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
 	workspace := lifecycleWorkspace(now)
 	workspace.Spec.RetentionPolicy = workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit
-	cache := lifecycleClient(t, workspace)
-	authoritative := lifecycleClient(t, workspace, lifecycleExec(workspace, workspacesv1alpha1.WorkspaceExecPhaseRunning))
+	authoritative := lifecycleClient(t, workspace, lifecycleExec(workspace, workspacesv1alpha1.WorkspaceExecPhaseRunning)).(client.WithWatch)
+	// The cache shares the server but has not yet observed the running execution.
+	cache := interceptor.NewClient(authoritative, interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+		if _, ok := list.(*workspacesv1alpha1.WorkspaceExecList); ok {
+			return nil
+		}
+		return c.List(ctx, list, opts...)
+	}})
 	_, err := (&WorkspaceRetentionReconciler{Client: cache, APIReader: authoritative, Now: func() time.Time { return now }}).Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
 	require.NoError(t, err)
 	persisted := new(workspacesv1alpha1.Workspace)
-	require.NoError(t, cache.Get(context.Background(), client.ObjectKeyFromObject(workspace), persisted))
-	assert.True(t, persisted.DeletionTimestamp.IsZero(), "cache may not yet contain the running execution")
+	require.NoError(t, authoritative.Get(context.Background(), client.ObjectKeyFromObject(workspace), persisted))
+	assert.True(t, persisted.DeletionTimestamp.IsZero(), "the API recheck at the deletion boundary sees the running execution")
+	assert.False(t, persisted.Status.ExecutionAdmissionClosed, "the fence reopens after the recheck refuses deletion")
 }
 
 func TestConfirmedSuspensionHasItsOwnClock(t *testing.T) {

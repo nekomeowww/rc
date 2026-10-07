@@ -78,7 +78,9 @@ func (r *WorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctrl.R
 			returnedErr = errors.Join(returnedErr, gate.Reopen(ctx, workspace))
 		}
 	}()
-	processes, err := listWorkspaceProcesses(ctx, r.APIReader, workspace)
+	// Planning reads the cache; deleteExpired closes admission and rechecks
+	// through the API reader before any destructive request.
+	processes, err := listWorkspaceProcesses(ctx, r.Client, workspace)
 	if err != nil {
 		return ctrl.Result{}, err
 	}

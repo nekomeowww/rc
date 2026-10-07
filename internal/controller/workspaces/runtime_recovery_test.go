@@ -129,7 +129,7 @@ func TestWorkspaceExecTerminalPodBecomesLost(t *testing.T) {
 				Spec:       workspacesv1alpha1.WorkspaceExecSpec{TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: "unready-workspace"}},
 				Status:     workspacesv1alpha1.WorkspaceExecStatus{Phase: phase, RuntimePodName: pod.Name, RuntimePodUID: string(pod.UID)},
 			}
-			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(process, pod).WithObjects(process, pod).Build()
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(process, pod).WithObjects(process, pod).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 			processRuntime := &recordingProcessRuntime{}
 			reconciler := &WorkspaceExecReconciler{Client: kubeClient, APIReader: kubeClient, Runtime: processRuntime}
 			request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(process)}
@@ -178,7 +178,7 @@ func newRuntimeRecoveryFixture(t *testing.T) *runtimeRecoveryFixture {
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(workspace, &workspacesv1alpha1.WorkspaceExec{}, home, &corev1.Pod{}).
-		WithObjects(workspace, home).Build()
+		WithObjects(workspace, home).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	fixture := &runtimeRecoveryFixture{ctx: ctx, client: kubeClient, workspace: workspace}
 	reconciler := &WorkspaceReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
 	fixture.reconciler = reconciler

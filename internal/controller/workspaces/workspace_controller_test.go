@@ -78,7 +78,7 @@ func TestWorkspaceCreatesHomeWhileWorktreeIsProvisioning(t *testing.T) {
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(workspace, worktree, &corev1.PersistentVolumeClaim{}).
-		WithObjects(workspace, worktree).Build()
+		WithObjects(workspace, worktree).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	reconciler := &WorkspaceReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
 	key := client.ObjectKeyFromObject(workspace)
 
@@ -142,7 +142,7 @@ func TestWorkspaceRuntimeUsesDeferredWorktreeAndLifecycleActions(t *testing.T) {
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(workspace, worktree, home, &corev1.Pod{}).
-		WithObjects(workspace, worktree, home).Build()
+		WithObjects(workspace, worktree, home).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	reconciler := &WorkspaceReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
 	key := client.ObjectKeyFromObject(workspace)
 
@@ -202,7 +202,7 @@ func TestWorkspaceMountsExplicitWorktreeMetadataAtStableVolumeRoot(t *testing.T)
 			}},
 		},
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	reconciler := &WorkspaceReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
 	workspace := &workspacesv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{Name: "explicit-worktree", Namespace: testNamespace},
@@ -289,7 +289,7 @@ func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 			}},
 		},
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).
 		WithStatusSubresource(workspace, environment, worktree, &workspacesv1alpha1.WorkspaceExec{}, &corev1.PersistentVolumeClaim{}, &corev1.Pod{}).
 		WithObjects(environment, worktree, workspace).
 		Build()
@@ -439,7 +439,7 @@ func TestWorkspaceSuspendsAfterIdleTimeout(t *testing.T) {
 		Spec:       workspacesv1alpha1.WorkspaceExecSpec{TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: workspace.Name}, Command: []string{testTrueValue}},
 		Status:     workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, CompletedAt: &now},
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, process, home).WithObjects(workspace, home, process).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, process, home).WithObjects(workspace, home, process).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	// Lifecycle decisions run independently; the runtime reconciler applies
 	// the resulting desired state and confirms the compute has stopped.
 	_, retentionErr := (&WorkspaceRetentionReconciler{Client: kubeClient, APIReader: kubeClient}).Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
@@ -493,7 +493,7 @@ func TestWorkspaceNeverMutatesUnownedRuntimePod(t *testing.T) {
 			foreignPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 				Name: workspace.Name, Namespace: workspace.Namespace, UID: types.UID("foreign-pod-uid"),
 			}}
-			kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).
 				WithStatusSubresource(workspace, home, foreignPod, &workspacesv1alpha1.WorkspaceExec{}).
 				WithObjects(workspace, home, foreignPod).
 				Build()
@@ -529,7 +529,7 @@ func TestWorkspaceDeletionLeavesUnownedSameNamePod(t *testing.T) {
 	foreignPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name: workspace.Name, Namespace: workspace.Namespace, UID: types.UID("foreign-pod-uid"),
 	}}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).
 		WithStatusSubresource(workspace, foreignPod, &workspacesv1alpha1.WorkspaceExec{}).
 		WithObjects(workspace, foreignPod).
 		Build()
@@ -567,7 +567,7 @@ func TestWorkspaceSuspendsWithoutExecutions(t *testing.T) {
 		}}},
 	}
 	home := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: workspace.Name, Namespace: workspace.Namespace, OwnerReferences: []metav1.OwnerReference{{UID: workspace.UID, Controller: boolPointer(true)}}}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, home).WithObjects(workspace, home).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, home).WithObjects(workspace, home).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	// Lifecycle decisions run independently; the runtime reconciler applies
 	// the resulting desired state and confirms the compute has stopped.
 	_, retentionErr := (&WorkspaceRetentionReconciler{Client: kubeClient, APIReader: kubeClient}).Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})

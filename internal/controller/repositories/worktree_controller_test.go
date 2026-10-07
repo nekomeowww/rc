@@ -49,6 +49,14 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(k8sClient.Status().Update(ctx, repository)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, repository)).To(Succeed()) })
 
+		// A ready Repository alone is not storage evidence. Model the observed
+		// Bound source PVC that the controller now reads before planning a clone.
+		source := parentVolumeClaim(repository)
+		Expect(k8sClient.Create(ctx, source)).To(Succeed())
+		source.Status = corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound, Capacity: source.Spec.Resources.Requests.DeepCopy()}
+		Expect(k8sClient.Status().Update(ctx, source)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, source)).To(Succeed()) })
+
 		worktree := &repositoriesv1alpha1.Worktree{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: worktreeName, Namespace: testNamespace,
@@ -140,6 +148,14 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(k8sClient.Status().Update(ctx, repository)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, repository)).To(Succeed()) })
 
+		// A ready Repository alone is not storage evidence. Model the observed
+		// Bound source PVC that the controller now reads before planning a clone.
+		source := parentVolumeClaim(repository)
+		Expect(k8sClient.Create(ctx, source)).To(Succeed())
+		source.Status = corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound, Capacity: source.Spec.Resources.Requests.DeepCopy()}
+		Expect(k8sClient.Status().Update(ctx, source)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, source)).To(Succeed()) })
+
 		worktree := &repositoriesv1alpha1.Worktree{
 			ObjectMeta: metav1Object(worktreeName),
 			Spec: repositoriesv1alpha1.WorktreeSpec{
@@ -159,7 +175,7 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(k8sClient.Get(ctx, key, claim)).To(Succeed())
 		Expect(claim.Spec.DataSource.Kind).To(Equal("PersistentVolumeClaim"))
 		Expect(claim.Spec.DataSource.Name).To(Equal(repositoryName))
-		Expect(claim.Spec.AccessModes).To(Equal([]corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}))
+		Expect(claim.Spec.AccessModes).To(Equal([]corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}))
 
 		claim.Status.Phase = corev1.ClaimBound
 		Expect(k8sClient.Status().Update(ctx, claim)).To(Succeed())

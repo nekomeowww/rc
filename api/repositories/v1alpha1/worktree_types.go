@@ -35,21 +35,28 @@ const (
 )
 
 // WorktreeStorageSpec optionally overrides the storage inherited from the
-// referenced Repository.
+// actual source PVC, with the Repository size as a desired default.
 type WorktreeStorageSpec struct {
 	// storageClassName is the StorageClass used to provision the child volume.
+	// When omitted, it inherits the actual source PVC class. A different class
+	// requires compatible CSI cloning support; rc does not infer capabilities.
 	// +kubebuilder:validation:MinLength=1
 	// +optional
 	StorageClassName string `json:"storageClassName,omitempty"`
 
-	// size is the requested capacity of the child volume.
+	// size is the requested capacity of the child volume. When omitted, it is
+	// the maximum of Repository size, source PVC request, and source capacity.
+	// An explicit size below either source value is rejected before PVC creation.
+	// Planning waits until the source is Bound and reports a positive capacity.
 	// +kubebuilder:validation:XValidation:rule="quantity(self).isGreaterThan(quantity('0'))",message="size must be greater than zero"
 	// +optional
 	Size *resource.Quantity `json:"size,omitempty"`
 
 	// accessModes controls how workloads may mount the child volume. When
-	// omitted, the controller requests ReadWriteMany so a workload and a
-	// parallel inspection Pod can mount the worktree together.
+	// omitted, it inherits the actual source PVC access modes (normally RWO).
+	// Explicit RWX remains available for drivers that support it. The previous
+	// parallel inspection Pod default was removed because it assumed CSI RWX
+	// support; inspection must respect the volume's mount and scheduling limits.
 	// +kubebuilder:validation:Items:Enum=ReadWriteOnce;ReadOnlyMany;ReadWriteMany;ReadWriteOncePod
 	// +optional
 	AccessModes []corev1.PersistentVolumeAccessMode `json:"accessModes,omitempty"`
@@ -106,7 +113,8 @@ type WorktreeSpec struct {
 	// +optional
 	LockReason string `json:"lockReason,omitempty"`
 
-	// storage optionally overrides the Repository storage settings.
+	// storage optionally overrides creation-time clone storage defaults.
+	// Subsequent parent changes do not alter an existing independent child PVC.
 	// +optional
 	Storage *WorktreeStorageSpec `json:"storage,omitempty"`
 }

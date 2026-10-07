@@ -52,9 +52,11 @@ import (
 	"github.com/nekomeowww/rc/internal/cli/rcctl/progress"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	repositoryservice "github.com/nekomeowww/rc/internal/repositories"
+	"github.com/nekomeowww/rc/internal/volumeclaim"
 	workspaceservice "github.com/nekomeowww/rc/internal/workspaces"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
+	"github.com/nekomeowww/rc/internal/worktreeownership"
 	clioutput "github.com/nekomeowww/rc/pkg/output"
 )
 
@@ -71,7 +73,7 @@ type createOptions struct {
 	defaultCwd       string
 	serviceAccount   string
 	noServiceAccount bool
-	idleTimeout      time.Duration
+	lifecycle        command.LifecycleOptions
 	wait             bool
 	gpu              command.GPUOptions
 	npmRegistry      string
@@ -115,6 +117,9 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use: "create NAME", Short: "Create a persistent Workspace", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := options.lifecycle.Validate(); err != nil {
+				return err
+			}
 			osName, tolerations, err := options.placement.Resolve()
 			if err != nil {
 				return err
@@ -140,8 +145,11 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			workspace := &workspacesv1alpha1.Workspace{
 				ObjectMeta: metav1.ObjectMeta{Name: args[0], Namespace: namespace},
 				Spec: workspacesv1alpha1.WorkspaceSpec{
-					DesiredState: workspacesv1alpha1.WorkspaceDesiredStateRunning,
-					OS:           osName, NodeSelector: options.placement.NodeSelector, Tolerations: tolerations,
+					DesiredState:         workspacesv1alpha1.WorkspaceDesiredStateRunning,
+					RetentionPolicy:      workspacesv1alpha1.WorkspaceRetentionPolicyRetain,
+					IdleTimeout:          &metav1.Duration{Duration: options.lifecycle.IdleTimeout},
+					DeleteAfterSuspended: &metav1.Duration{Duration: options.lifecycle.DeleteAfterSuspended},
+					OS:                   osName, NodeSelector: options.placement.NodeSelector, Tolerations: tolerations,
 					Image: options.image, DefaultWorkingDirectory: options.defaultCwd,
 					ServiceAccountName: options.serviceAccount,
 					Resources:          resources,
@@ -186,8 +194,10 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			} else if osName == darwinOSName {
 				workspace.Spec.AutomountServiceAccountToken = boolPointer(false)
 			}
-			if options.idleTimeout > 0 {
-				workspace.Spec.IdleTimeout = &metav1.Duration{Duration: options.idleTimeout}
+			if osName != darwinOSName {
+				if err := volumeclaim.Preflight(cmd.Context(), clusterClient.Kube, workspace, volumeclaim.WorkspaceHome, 0); err != nil {
+					return err
+				}
 			}
 			if err := clusterClient.Kube.Create(cmd.Context(), workspace); err != nil {
 				return fmt.Errorf("create Workspace: %w", err)
@@ -213,7 +223,7 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	cmd.Flags().StringVar(&options.defaultCwd, "cwd", "", "Default process working directory")
 	cmd.Flags().StringVar(&options.serviceAccount, "service-account", "", "Same-namespace ServiceAccount")
 	cmd.Flags().BoolVar(&options.noServiceAccount, "no-service-account", false, "Disable ServiceAccount token mounting")
-	cmd.Flags().DurationVar(&options.idleTimeout, "idle-timeout", 0, "Suspend an idle named Workspace; zero disables")
+	options.lifecycle.AddFlags(cmd.Flags())
 	cmd.Flags().StringVar(&options.npmRegistry, "npm-registry", "", "npm registry URL added to Workspace environment defaults")
 	cmd.Flags().BoolVar(&options.wait, "wait", true, "Wait for the Workspace runtime")
 	options.gpu.AddFlags(cmd.Flags())
@@ -339,6 +349,9 @@ func mountRepository(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, sele
 		mount.ReadOnly = true
 	} else {
 		worktree := generatedWorkspaceWorktree(workspace, repository, mountName, accessModes)
+		if err := volumeclaim.Preflight(cmd.Context(), clusterClient.Kube, worktree, volumeclaim.Worktree, 0); err != nil {
+			return err
+		}
 		if err := clusterClient.Kube.Create(cmd.Context(), worktree); err != nil {
 			return fmt.Errorf("create mounted Worktree: %w", err)
 		}
@@ -379,8 +392,7 @@ func generatedWorkspaceWorktree(
 ) *repositoriesv1alpha1.Worktree {
 	worktree := &repositoriesv1alpha1.Worktree{
 		ObjectMeta: metav1.ObjectMeta{Name: boundedName(workspace.Name + "-" + mountName), Namespace: repository.Namespace, Labels: map[string]string{
-			workspaceservice.CreatedForWorkspaceLabel: workspace.Name,
-			worktreebootstrap.EagerLabel:              "true",
+			worktreebootstrap.EagerLabel: "true",
 		}},
 		Spec: repositoriesv1alpha1.WorktreeSpec{
 			RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: repository.Name}, Branch: "rc/" + workspace.Name + "/" + mountName,
@@ -392,6 +404,7 @@ func generatedWorkspaceWorktree(
 		}
 	}
 
+	worktreeownership.InitializeGenerated(workspace, worktree)
 	return worktree
 }
 
@@ -463,6 +476,9 @@ func applyWorktreeMount(
 }
 
 func validateWorkspaceMount(workspace *workspacesv1alpha1.Workspace, mount workspacesv1alpha1.WorkspaceMount) error {
+	if !workspace.DeletionTimestamp.IsZero() {
+		return fmt.Errorf("workspace %q is being deleted", workspace.Name)
+	}
 	if problems := validation.IsDNS1123Label(mount.Name); len(problems) > 0 {
 		return fmt.Errorf("invalid workspace mount name %q: %s", mount.Name, problems[0])
 	}
@@ -622,7 +638,7 @@ func validateWorkspaceMountSource(ctx context.Context, kubeClient client.Client,
 	if err := kubeClient.Get(ctx, key, worktree); err != nil {
 		return fmt.Errorf("get mounted Worktree %q: %w", mount.WorktreeRef.Name, err)
 	}
-	if !worktree.DeletionTimestamp.IsZero() {
+	if worktreeownership.MountsClosed(worktree) {
 		return fmt.Errorf("worktree %q is being deleted", worktree.Name)
 	}
 	ready := meta.FindStatusCondition(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady)
@@ -796,36 +812,98 @@ func newDeleteCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err := clusterClient.Kube.Get(cmd.Context(), client.ObjectKey{Name: args[0], Namespace: namespace}, workspace); err != nil {
 				return err
 			}
-			stopped, err := stopForTopologyChange(cmd.Context(), clusterClient, workspace, force)
-			if err != nil {
-				return topologyChangeFailure(cmd, stopped, err)
-			}
-			createdWorktrees := new(repositoriesv1alpha1.WorktreeList)
-			if cascade {
-				if err := clusterClient.Kube.List(cmd.Context(), createdWorktrees, client.InNamespace(namespace), client.MatchingLabels{workspaceservice.CreatedForWorkspaceLabel: workspace.Name}); err != nil {
-					return topologyChangeFailure(cmd, stopped, err)
-				}
-				for _, worktree := range createdWorktrees.Items {
-					if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "cascade delete worktree/%s\n", worktree.Name); err != nil {
-						return topologyChangeFailure(cmd, stopped, err)
-					}
-				}
-			}
-			if err := clusterClient.Kube.Delete(cmd.Context(), workspace); err != nil {
-				return topologyChangeFailure(cmd, stopped, err)
-			}
-			for index := range createdWorktrees.Items {
-				if err := clusterClient.Kube.Delete(cmd.Context(), &createdWorktrees.Items[index]); err != nil {
-					return topologyChangeFailure(cmd, stopped, err)
-				}
-			}
-			return reportStoppedProcesses(cmd, stopped)
+			return deleteWorkspace(cmd, clusterClient.Kube, workspace, cascade || cmd.Flags().Changed("cascade-created-worktrees"),
+				func(ctx context.Context, current *workspacesv1alpha1.Workspace) ([]string, error) {
+					return stopForTopologyChange(ctx, clusterClient, current, force)
+				})
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "Stop active processes before deletion")
-	cmd.Flags().BoolVar(&cascade, "cascade-created-worktrees", false, "Preview and delete Worktrees created for this Workspace")
+	cmd.Flags().BoolVar(&cascade, "cascade-created-worktrees", false, "Deprecated: owned Worktrees always cascade; label-only legacy Worktrees are retained")
 
 	return cmd
+}
+
+// deleteWorkspace reports lifecycle effects before stopping processes, then lets
+// Kubernetes GC cascade through owner UIDs. Labels never authorize a DELETE.
+func deleteWorkspace(cmd *cobra.Command, kubeClient client.Client, workspace *workspacesv1alpha1.Workspace, cascade bool, stop workspaceStopper) error {
+	if cascade {
+		if _, err := fmt.Fprintln(cmd.ErrOrStderr(), "--cascade-created-worktrees is deprecated: Workspace-owned Worktrees always cascade; legacy label-only Worktrees are retained"); err != nil {
+			return err
+		}
+	}
+	report, err := reviewWorkspaceDeletion(cmd.Context(), kubeClient, workspace)
+	if err != nil {
+		return err
+	}
+	for _, line := range report {
+		if _, err := fmt.Fprintln(cmd.ErrOrStderr(), line); err != nil {
+			return err
+		}
+	}
+	stopped, err := stop(cmd.Context(), workspace)
+	if err != nil {
+		return topologyChangeFailure(cmd, stopped, err)
+	}
+	current := new(workspacesv1alpha1.Workspace)
+	if err := kubeClient.Get(cmd.Context(), client.ObjectKeyFromObject(workspace), current); err != nil {
+		return topologyChangeFailure(cmd, stopped, err)
+	}
+	if current.UID != workspace.UID {
+		return topologyChangeFailure(cmd, stopped, fmt.Errorf("workspace %q was replaced while stopping processes", workspace.Name))
+	}
+	currentReport, err := reviewWorkspaceDeletion(cmd.Context(), kubeClient, current)
+	if err != nil {
+		return topologyChangeFailure(cmd, stopped, err)
+	}
+	if !slices.Equal(report, currentReport) {
+		return topologyChangeFailure(cmd, stopped, fmt.Errorf("workspace %q ownership or mount topology changed while stopping processes; review and retry deletion", workspace.Name))
+	}
+	// UID and resourceVersion preconditions prevent deleting a replacement or
+	// a Workspace changed after the refreshed ownership report.
+	uid, version := current.UID, current.ResourceVersion
+	if err := kubeClient.Delete(cmd.Context(), current, client.PropagationPolicy(metav1.DeletePropagationBackground), client.Preconditions{UID: &uid, ResourceVersion: &version}); err != nil {
+		return topologyChangeFailure(cmd, stopped, err)
+	}
+	if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "workspace/%s deletion requested\n", workspace.Name); err != nil {
+		return err
+	}
+	return reportStoppedProcesses(cmd, stopped)
+}
+
+func reviewWorkspaceDeletion(ctx context.Context, kubeClient client.Client, workspace *workspacesv1alpha1.Workspace) ([]string, error) {
+	worktrees := new(repositoriesv1alpha1.WorktreeList)
+	if err := kubeClient.List(ctx, worktrees, client.InNamespace(workspace.Namespace)); err != nil {
+		return nil, err
+	}
+	slices.SortFunc(worktrees.Items, func(a, b repositoriesv1alpha1.Worktree) int { return strings.Compare(a.Name, b.Name) })
+	report := make([]string, 0, len(worktrees.Items))
+	for index := range worktrees.Items {
+		worktree := &worktrees.Items[index]
+		if worktreeownership.IsOwnedBy(worktree, workspace) {
+			blockers, err := worktreeownership.ReferenceBlockers(ctx, kubeClient, workspace.Namespace, worktree.Name)
+			if err != nil {
+				return nil, err
+			}
+			blockers = slices.DeleteFunc(blockers, func(name string) bool { return name == workspace.Name })
+			if len(blockers) > 0 {
+				return nil, fmt.Errorf("worktree %q is also mounted by Workspaces %q; unmount there or run rcctl worktree detach %s --workspace %s before deleting the owner", worktree.Name, strings.Join(blockers, ", "), worktree.Name, workspace.Name)
+			}
+			report = append(report, fmt.Sprintf("cascade delete worktree/%s (Workspace-owned; asynchronous GC)", worktree.Name))
+			continue
+		}
+		if worktree.Labels[worktreeownership.GeneratedForLabel] == workspace.Name {
+			report = append(report, fmt.Sprintf("retain worktree/%s (legacy label is not ownership; use worktree adopt explicitly)", worktree.Name))
+			continue
+		}
+		for _, mount := range workspace.Spec.Mounts {
+			if mount.WorktreeRef != nil && mount.WorktreeRef.Name == worktree.Name {
+				report = append(report, fmt.Sprintf("retain worktree/%s (not owned by this Workspace)", worktree.Name))
+				break
+			}
+		}
+	}
+	return report, nil
 }
 
 func newPortForwardCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
@@ -992,6 +1070,13 @@ func workspaceListTable(workspaces []workspacesv1alpha1.Workspace, now time.Time
 	}
 }
 
+func suspendedAtDisplay(workspace *workspacesv1alpha1.Workspace) string {
+	if workspace.Status.SuspendedAt == nil {
+		return "-"
+	}
+	return clioutput.Timestamp(*workspace.Status.SuspendedAt)
+}
+
 func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.Field {
 	environment := "-"
 	if workspace.Spec.EnvironmentRef != nil {
@@ -1001,9 +1086,13 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 	if workspace.Spec.Storage != nil {
 		storage = workspaceStorageSummary(*workspace.Spec.Storage)
 	}
-	idleTimeout := "-"
+	idleTimeout := "disabled"
 	if workspace.Spec.IdleTimeout != nil {
 		idleTimeout = workspace.Spec.IdleTimeout.Duration.String()
+	}
+	deleteAfterSuspended := "disabled"
+	if workspace.Spec.DeleteAfterSuspended != nil {
+		deleteAfterSuspended = workspace.Spec.DeleteAfterSuspended.Duration.String()
 	}
 	automountToken := "default"
 	if workspace.Spec.AutomountServiceAccountToken != nil {
@@ -1037,6 +1126,8 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 		{Name: "Automount service account token", Value: automountToken},
 		{Name: "Runtime class", Value: runtimeClass},
 		{Name: "Idle timeout", Value: idleTimeout},
+		{Name: "Delete after suspended", Value: deleteAfterSuspended},
+		{Name: "Suspended at", Value: suspendedAtDisplay(workspace)},
 		{Name: "Mounts", Value: workspaceMountSummary(workspace.Spec.Mounts)},
 		{Name: "Agent credentials", Value: workspaceReferenceNames(workspace.Spec.AgentCredentialRefs)},
 		{Name: "Credentials", Value: workspaceReferenceNames(workspace.Spec.CredentialRefs)},

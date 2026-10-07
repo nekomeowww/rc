@@ -13,6 +13,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const runtimeRunningPhase = "Running"
+
 var _ = Describe("Execution retention API", func() {
 	It("defaults only opted-in policies and validates positive limits", func() {
 		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "retention-api-"}}
@@ -41,7 +43,7 @@ var _ = Describe("Execution retention API", func() {
 		process.Status.Phase = workspacesv1alpha1.WorkspaceExecPhaseRunning
 		Expect(k8sClient.Status().Update(ctx, process)).To(Succeed())
 		list := new(workspacesv1alpha1.WorkspaceExecList)
-		Expect(k8sClient.List(ctx, list, client.InNamespace(testAPINamespace), client.MatchingFields{"status.phase": "Running", "spec.targetRef.name": "retention-api-target"})).To(Succeed())
+		Expect(k8sClient.List(ctx, list, client.InNamespace(testAPINamespace), client.MatchingFields{"status.phase": runtimeRunningPhase, "spec.targetRef.name": "retention-api-target"})).To(Succeed())
 		Expect(list.Items).To(HaveLen(1))
 		process.Spec.Command = []string{"changed"}
 		Expect(k8sClient.Update(ctx, process)).NotTo(Succeed())

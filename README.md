@@ -272,6 +272,13 @@ rcctl -n development worktree exec rc-readme -- git status --short
 
 The add command creates a child PVC through CSI cloning and initializes the requested Git checkout in the clone root. `worktree exec` is the lightweight path for short commands that need only the base Runner Image: it runs in a separate Job, does not allocate a Workspace home PVC, and holds the same exclusive write Lease as a Workspace mount. It intentionally does not provide Workspace Environment state, caches, credentials, process persistence, or an interactive terminal. Use `run --rm --worktree rc-readme -- COMMAND` when a command needs those Workspace capabilities. Checkout modes remain available through flags such as `--ref`, `--detach`, `--orphan`, and `--no-checkout`. `--lock` and `--reason` record their requested intent, but no Git lock is required because the clone root has no linked-worktree metadata to prune. Delete an unmounted Worktree and its owned PVC and bootstrap Job with `rcctl worktree rm rc-readme`.
 
+New Worktrees inherit their source PVC access modes and StorageClass. The default
+size covers both the source's requested and reported capacity; a smaller explicit
+`--size` is rejected before creating the child PVC. Explicit
+`--access-mode ReadWriteMany` remains available on compatible drivers. See [clone
+storage planning](docs/design/worktree-storage.md) for defaults, validation, and existing
+claim compatibility.
+
 ### Run a process
 
 The shortest isolated path is to explicitly request a temporary Workspace and a writable Worktree from an existing Repository:
@@ -280,11 +287,20 @@ The shortest isolated path is to explicitly request a temporary Workspace and a 
 rcctl -n development run -it --rm --repo rc --image ghcr.io/nekomeowww/rc/runner:latest --storage-class csi-hostpath-sc --agent-credential codex --cwd /workspace/rc -- codex
 ```
 
-`run` always creates a new Workspace. It retains that Workspace by default;
-`--rm` requests cleanup after all its processes terminate, with a five-minute
-grace period for reading results and logs. Generated Worktrees from `--repo`
-are owned by the new Workspace. Existing Worktrees selected with `--worktree`
-are never deleted by this cleanup. Use `--name` to choose the new Workspace name.
+`run` always creates a new Workspace. **Unnamed runs are temporary by default**:
+the Workspace and owned storage are deleted five minutes after all processes
+terminate. Add `--retain` to preserve a run for later `exec` or log inspection.
+Named runs retain by default; `--rm` explicitly makes a named run temporary.
+Use `--retain` to keep an unnamed run. `--rm=false` remains a compatible explicit retained form.
+
+Generated Worktrees from `--repo` are owned by the new Workspace. Existing
+Worktrees selected with `--worktree` are never deleted by this cleanup.
+`workspace create` remains retained by default. Long-lived Workspaces can opt
+into `--idle-timeout=1h --delete-after-suspended=168h`: the first stage
+stops compute; the second deletes owned storage after a full suspended grace
+period. Both stages default to disabled for CLI and direct API creation.
+See [Workspace lifetime decisions and migration](docs/adr/0005-workspace-lifetimes.md)
+for the behavior matrix, timer rules, and script migration.
 
 For a named development machine, create the Workspace first and mount the Worktree explicitly:
 

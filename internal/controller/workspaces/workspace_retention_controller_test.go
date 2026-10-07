@@ -18,6 +18,7 @@ package workspaces
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -120,7 +121,7 @@ func TestAbandonedTemporaryWorkspaceDeletesWithoutWorkspaceExec(t *testing.T) {
 			RetentionPolicy: workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit,
 		},
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).WithObjects(workspace).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).WithObjects(workspace).Build()
 	reconciler := &WorkspaceRetentionReconciler{Client: kubeClient}
 
 	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
@@ -147,7 +148,7 @@ func TestNewTemporaryWorkspaceWaitsForWorkspaceExecCreation(t *testing.T) {
 			RetentionPolicy: workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit,
 		},
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).WithObjects(workspace).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).WithObjects(workspace).Build()
 	reconciler := &WorkspaceRetentionReconciler{Client: kubeClient}
 
 	result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
@@ -156,4 +157,24 @@ func TestNewTemporaryWorkspaceWaitsForWorkspaceExecCreation(t *testing.T) {
 	requirements.NoError(kubeClient.Get(ctx, client.ObjectKeyFromObject(workspace), persisted), "get retained starting Workspace")
 	assertions.True(persisted.DeletionTimestamp.IsZero(), "retain Workspace while its WorkspaceExec is being created")
 	assertions.Positive(result.RequeueAfter, "schedule abandoned Workspace collection")
+}
+
+// ROOT CAUSE: Suspension stopped compute but had no storage-retention stage.
+func TestSuspendedWorkspaceExpires(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
+	workspace := &workspacesv1alpha1.Workspace{}
+	// Decode the proposed policy through the API boundary: before the change the
+	// field is silently discarded and the retained Workspace is never collected.
+	require.NoError(t, json.Unmarshal([]byte(`{"spec":{"desiredState":"Suspended","deleteAfterSuspended":"1h"}}`), workspace))
+	workspace.ObjectMeta = metav1.ObjectMeta{Name: "suspended", Namespace: testNamespace, Finalizers: []string{workspaceFinalizer}}
+	workspace.Status.SuspendedAt = &metav1.Time{Time: time.Now().Add(-2 * time.Hour)}
+	workspace.Status.Conditions = []metav1.Condition{{Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionFalse, Reason: reasonSuspended, LastTransitionTime: metav1.NewTime(time.Now().Add(-2 * time.Hour))}}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace).WithObjects(workspace).Build()
+	_, err := (&WorkspaceRetentionReconciler{Client: kubeClient}).Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
+	require.NoError(t, err)
+	persisted := new(workspacesv1alpha1.Workspace)
+	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(workspace), persisted))
+	assert.False(t, persisted.DeletionTimestamp.IsZero(), "collect storage after the configured suspended interval")
 }

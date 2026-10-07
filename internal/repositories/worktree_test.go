@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -13,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	"github.com/nekomeowww/rc/internal/worktreestorage"
 )
 
 func TestWorktreeClientWaitWritesBootstrapLogsBeforeReturningFailure(t *testing.T) {
@@ -88,4 +90,24 @@ func TestWorktreeExecClientWaitPreservesJobLostConditionWhenLogsAreGone(t *testi
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "Command Job disappeared before its terminal result was recorded")
 	assert.ErrorContains(t, err, "has no Pods")
+}
+
+func TestWorktreeClientWaitReturnsStorageFailure(t *testing.T) {
+	t.Parallel()
+	for _, reason := range []string{worktreestorage.SizeTooSmall, worktreestorage.StorageInvalid, "VolumeClaimLost"} {
+		t.Run(reason, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, repositoriesv1alpha1.AddToScheme(scheme))
+			worktree := &repositoriesv1alpha1.Worktree{
+				ObjectMeta: metav1.ObjectMeta{Name: "rejected-clone", Namespace: execTestNamespace},
+				Status:     repositoriesv1alpha1.WorktreeStatus{Conditions: []metav1.Condition{{Type: repositoriesv1alpha1.WorktreeConditionReady, Status: metav1.ConditionFalse, Reason: reason, Message: "invalid clone storage"}}},
+			}
+			c := &WorktreeClient{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()}
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			err := c.Wait(ctx, worktree, io.Discard)
+			require.ErrorContains(t, err, "invalid clone storage")
+			assert.NotErrorIs(t, err, context.DeadlineExceeded, "CLI must fail promptly rather than wait for a PVC that cannot be created")
+		})
+	}
 }

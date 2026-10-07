@@ -84,7 +84,7 @@ type ExecutionRetentionPolicy struct {
 	TTLAfterFinished *metav1.Duration `json:"ttlAfterFinished,omitempty"`
 
 	// maxEntries keeps at most this many unpinned terminal records per target.
-	// +kubebuilder:default=3000
+	// +kubebuilder:default=15000
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	MaxEntries int32 `json:"maxEntries,omitempty"`

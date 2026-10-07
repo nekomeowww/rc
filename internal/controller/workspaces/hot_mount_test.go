@@ -77,7 +77,7 @@ func TestControllerUpgradeReplacesIdleWorkspaceRuntime(t *testing.T) {
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(workspace, home, oldPod).WithObjects(workspace, home, oldPod).Build()
-	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
+	reconciler := &WorkspaceReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
 	key := client.ObjectKeyFromObject(workspace)
 	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 	require.NoError(t, err)
@@ -118,7 +118,7 @@ func TestHotWorktreeMountKeepsRuntimeAndActiveProcess(t *testing.T) {
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(workspace, home, &corev1.Pod{}, &workspacesv1alpha1.WorkspaceExec{}, &repositoriesv1alpha1.Worktree{}).
 		WithObjects(workspace, home).Build()
-	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
+	reconciler := &WorkspaceReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
 	key := client.ObjectKeyFromObject(workspace)
 	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 	require.NoError(t, err)
@@ -215,7 +215,7 @@ func TestFailedHotMountCreatesCleanupPodWithoutPVC(t *testing.T) {
 		},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1.Pod{}).WithObjects(workspace).Build()
-	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
+	reconciler := &WorkspaceReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
 	cleaned, message, err := reconciler.cleanFailedHotMount(ctx, workspace, helper)
 	require.NoError(t, err)
 	assert.False(t, cleaned)

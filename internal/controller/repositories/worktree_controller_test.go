@@ -73,7 +73,7 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(k8sClient.Create(ctx, worktree)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, worktree)).To(Succeed()) })
 		key := types.NamespacedName{Name: worktreeName, Namespace: testNamespace}
-		reconciler := &WorktreeReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: "ghcr.io/example/rc/runner:test"}
+		reconciler := &WorktreeReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: "ghcr.io/example/rc/runner:test"}
 
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		Expect(err).NotTo(HaveOccurred())
@@ -169,7 +169,7 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(k8sClient.Create(ctx, worktree)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, worktree)).To(Succeed()) })
 
-		reconciler := &WorktreeReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: runnerImage}
+		reconciler := &WorktreeReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: runnerImage}
 		key := types.NamespacedName{Name: worktreeName, Namespace: testNamespace}
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		Expect(err).NotTo(HaveOccurred())
@@ -386,7 +386,7 @@ var _ = Describe("Worktree Controller", func() {
 		claim.Status.Phase = corev1.ClaimPending
 		Expect(k8sClient.Status().Update(ctx, claim)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, worktree)).To(Succeed())
-		gate := repositoryaccess.Gate{Client: k8sClient}
+		gate := repositoryaccess.Gate{Client: k8sClient, Reader: k8sClient}
 		for range 2 {
 			result, err := reconciler.Reconcile(ctx, request)
 			Expect(err).NotTo(HaveOccurred())
@@ -423,7 +423,7 @@ var _ = Describe("Worktree Controller", func() {
 			}}},
 		}
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree, workspace).Build()
-		reconciler := &WorktreeReconciler{Client: client, Scheme: scheme, RunnerImage: testRunnerImage}
+		reconciler := &WorktreeReconciler{Client: client, APIReader: client, Scheme: scheme, RunnerImage: testRunnerImage}
 
 		result, err := reconciler.reconcileDelete(context.Background(), worktree)
 
@@ -449,7 +449,7 @@ var _ = Describe("Worktree Controller", func() {
 			Spec:       coordinationv1.LeaseSpec{HolderIdentity: &holder},
 		}
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree, lease).Build()
-		reconciler := &WorktreeReconciler{Client: client, Scheme: scheme, RunnerImage: testRunnerImage}
+		reconciler := &WorktreeReconciler{Client: client, APIReader: client, Scheme: scheme, RunnerImage: testRunnerImage}
 
 		result, err := reconciler.reconcileDelete(context.Background(), worktree)
 
@@ -471,7 +471,7 @@ var _ = Describe("Worktree Controller", func() {
 			Name: "delete-available", Namespace: testNamespace, UID: testWorktreeUID, DeletionTimestamp: &now, Finalizers: []string{worktreeDeletionFinalizer},
 		}}
 		kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()
-		reconciler := &WorktreeReconciler{Client: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
+		reconciler := &WorktreeReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
 
 		result, err := reconciler.reconcileDelete(context.Background(), worktree)
 
@@ -503,7 +503,7 @@ var _ = Describe("Worktree Controller", func() {
 		}
 		baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()
 		raceClient := &workspaceMountRaceClient{Client: baseClient, workspace: workspace}
-		reconciler := &WorktreeReconciler{Client: raceClient, Scheme: scheme, RunnerImage: testRunnerImage}
+		reconciler := &WorktreeReconciler{Client: raceClient, APIReader: raceClient, Scheme: scheme, RunnerImage: testRunnerImage}
 
 		result, err := reconciler.reconcileDelete(context.Background(), worktree)
 
@@ -521,7 +521,7 @@ var _ = Describe("Worktree Controller", func() {
 			Name: "watched-worktree", Namespace: testNamespace, UID: "watched-worktree-uid",
 		}}
 		kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()
-		reconciler := &WorktreeReconciler{Client: kubeClient}
+		reconciler := &WorktreeReconciler{Client: kubeClient, APIReader: kubeClient}
 		workspace := &workspacesv1alpha1.Workspace{
 			ObjectMeta: metav1.ObjectMeta{Name: testDeveloperName, Namespace: testNamespace},
 			Spec: workspacesv1alpha1.WorkspaceSpec{Mounts: []workspacesv1alpha1.WorkspaceMount{{

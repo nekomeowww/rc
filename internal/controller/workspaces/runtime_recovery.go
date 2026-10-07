@@ -31,15 +31,6 @@ import (
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 )
 
-// runtimeReader bypasses informer lag at runtime identity and mount cleanup
-// boundaries. Unit tests can use the same fake client for reads and writes.
-func (r *WorkspaceReconciler) runtimeReader() client.Reader {
-	if r.APIReader != nil {
-		return r.APIReader
-	}
-	return r.Client
-}
-
 // reconcileRuntimeRecovery runs before dependency resolution: losing a Worktree
 // or Environment must not hide a terminal runtime or block its cleanup.
 //
@@ -51,9 +42,8 @@ func (r *WorkspaceReconciler) reconcileRuntimeRecovery(ctx context.Context, work
 	if workspace.Spec.DesiredState == workspacesv1alpha1.WorkspaceDesiredStateSuspended {
 		return ctrl.Result{}, false, nil
 	}
-	reader := r.runtimeReader()
 	pod := new(corev1.Pod)
-	err := reader.Get(ctx, client.ObjectKeyFromObject(workspace), pod)
+	err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(workspace), pod)
 	if apierrors.IsNotFound(err) {
 		return ctrl.Result{}, false, nil
 	} else if err != nil {
@@ -63,7 +53,7 @@ func (r *WorkspaceReconciler) reconcileRuntimeRecovery(ctx context.Context, work
 		return ctrl.Result{}, false, nil
 	}
 	processes := new(workspacesv1alpha1.WorkspaceExecList)
-	if err := reader.List(ctx, processes, client.InNamespace(workspace.Namespace)); err != nil {
+	if err := r.APIReader.List(ctx, processes, client.InNamespace(workspace.Namespace)); err != nil {
 		return ctrl.Result{}, true, err
 	}
 	bound := false

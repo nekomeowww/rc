@@ -24,7 +24,7 @@ func TestWindowsDeferredBootstrapWaitsForRuntimeReadiness(t *testing.T) {
 	worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: "test", Labels: map[string]string{"workspaces.rc.ayaka.io/generated-for": workspaceName}}}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: workspaceName, Namespace: "test", Labels: map[string]string{"workspaces.rc.ayaka.io/workspace": workspaceName}}, Spec: corev1.PodSpec{OS: &corev1.PodOS{Name: corev1.Windows}, Volumes: []corev1.Volume{{Name: "code", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "child"}}}}}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(worktree, pod).WithObjects(worktree, pod).Build()
-	reconciler := &WorktreeReconciler{Client: kubeClient}
+	reconciler := &WorktreeReconciler{Client: kubeClient, APIReader: kubeClient}
 	ctx := context.Background()
 	require.NoError(t, reconciler.reconcileWorkspaceBootstrap(ctx, worktree, "child", "source", "/repository"))
 	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(worktree), worktree))

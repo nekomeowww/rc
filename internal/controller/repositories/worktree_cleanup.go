@@ -61,16 +61,12 @@ func (r *WorktreeReconciler) prepareWorktreeCleanup(ctx context.Context, worktre
 	if err != nil || len(blockers) > 0 {
 		return false, err
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
-	claimName, resolveErr := volumeclaim.Resolve(ctx, reader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
+	claimName, resolveErr := volumeclaim.Resolve(ctx, r.APIReader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
 	if resolveErr != nil && claimName == "" {
 		return false, resolveErr
 	}
 	pods := new(corev1.PodList)
-	if err := reader.List(ctx, pods, client.InNamespace(worktree.Namespace)); err != nil {
+	if err := r.APIReader.List(ctx, pods, client.InNamespace(worktree.Namespace)); err != nil {
 		return false, err
 	}
 	for _, pod := range pods.Items {
@@ -102,16 +98,12 @@ func (r *WorktreeReconciler) reconcileStorageDeletion(ctx context.Context, workt
 	if !ready {
 		return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, r.setStorageDeletionStatus(ctx, worktree, "VolumeDeleting", "Storage deletion requested; waiting for mounts, writers and Pods to stop")
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
-	claimName, resolveErr := volumeclaim.Resolve(ctx, reader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
+	claimName, resolveErr := volumeclaim.Resolve(ctx, r.APIReader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
 	if resolveErr != nil && claimName == "" {
 		return ctrl.Result{}, resolveErr
 	}
 	claim := new(corev1.PersistentVolumeClaim)
-	if err := reader.Get(ctx, client.ObjectKey{Namespace: worktree.Namespace, Name: claimName}, claim); err == nil {
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: worktree.Namespace, Name: claimName}, claim); err == nil {
 		if !metav1.IsControlledBy(claim, worktree) || claim.DeletionTimestamp.IsZero() {
 			return ctrl.Result{}, r.setStorageDeletionStatus(ctx, worktree, "VolumeDeletionFenced", "Storage admission is permanently closed; inspect the Worktree before replacing it")
 		}
@@ -134,11 +126,7 @@ func (r *WorktreeReconciler) reconcileStorageDeletion(ctx context.Context, workt
 func (r *WorktreeReconciler) setStorageDeletionStatus(ctx context.Context, worktree *repositoriesv1alpha1.Worktree, reason, message string) error {
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current := new(repositoriesv1alpha1.Worktree)
-		reader := r.APIReader
-		if reader == nil {
-			reader = r.Client
-		}
-		if err := reader.Get(ctx, client.ObjectKeyFromObject(worktree), current); err != nil {
+		if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(worktree), current); err != nil {
 			return client.IgnoreNotFound(err)
 		}
 		before := current.DeepCopy()

@@ -61,7 +61,7 @@ func TestTemporaryWorkspaceDeletionDoesNotDependOnRuntimeTopology(t *testing.T) 
 		Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, CompletedAt: &completedAt},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).WithStatusSubresource(workspace, process).WithObjects(workspace, process).Build()
-	reconciler := &WorkspaceRetentionReconciler{Client: kubeClient}
+	reconciler := &WorkspaceRetentionReconciler{Client: kubeClient, APIReader: kubeClient}
 
 	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
 	requirements.NoError(err, "reconcile temporary Workspace with missing runtime dependency")
@@ -94,7 +94,7 @@ func TestTemporaryWorkspaceWaitsDuringTerminalGracePeriod(t *testing.T) {
 		Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, CompletedAt: &completedAt},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).WithStatusSubresource(workspace, process).WithObjects(workspace, process).Build()
-	reconciler := &WorkspaceRetentionReconciler{Client: kubeClient}
+	reconciler := &WorkspaceRetentionReconciler{Client: kubeClient, APIReader: kubeClient}
 
 	result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
 	requirements.NoError(err, "reconcile recently completed temporary Workspace")
@@ -122,7 +122,7 @@ func TestAbandonedTemporaryWorkspaceDeletesWithoutWorkspaceExec(t *testing.T) {
 		},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).WithObjects(workspace).Build()
-	reconciler := &WorkspaceRetentionReconciler{Client: kubeClient}
+	reconciler := &WorkspaceRetentionReconciler{Client: kubeClient, APIReader: kubeClient}
 
 	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
 	requirements.NoError(err, "reconcile abandoned temporary Workspace")
@@ -149,7 +149,7 @@ func TestNewTemporaryWorkspaceWaitsForWorkspaceExecCreation(t *testing.T) {
 		},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).WithObjects(workspace).Build()
-	reconciler := &WorkspaceRetentionReconciler{Client: kubeClient}
+	reconciler := &WorkspaceRetentionReconciler{Client: kubeClient, APIReader: kubeClient}
 
 	result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
 	requirements.NoError(err, "reconcile new temporary Workspace")
@@ -172,7 +172,7 @@ func TestSuspendedWorkspaceExpires(t *testing.T) {
 	workspace.Status.SuspendedAt = &metav1.Time{Time: time.Now().Add(-2 * time.Hour)}
 	workspace.Status.Conditions = []metav1.Condition{{Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionFalse, Reason: reasonSuspended, LastTransitionTime: metav1.NewTime(time.Now().Add(-2 * time.Hour))}}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace).WithObjects(workspace).Build()
-	_, err := (&WorkspaceRetentionReconciler{Client: kubeClient}).Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
+	_, err := (&WorkspaceRetentionReconciler{Client: kubeClient, APIReader: kubeClient}).Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
 	require.NoError(t, err)
 	persisted := new(workspacesv1alpha1.Workspace)
 	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(workspace), persisted))

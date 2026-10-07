@@ -83,7 +83,7 @@ func TestWorkspaceTerminalRuntimeRecovery(t *testing.T) {
 					fixture.reconcile(t)
 					require.NoError(t, kubeClient.Get(ctx, key, new(corev1.Pod)), "wait for bound executions before deleting")
 					processRuntime := &recordingProcessRuntime{}
-					execReconciler := &WorkspaceExecReconciler{Client: kubeClient, Runtime: processRuntime}
+					execReconciler := &WorkspaceExecReconciler{Client: kubeClient, APIReader: kubeClient, Runtime: processRuntime}
 					execKey := client.ObjectKey{Namespace: workspace.Namespace, Name: "bound-execution"}
 					for range 2 {
 						_, err := execReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: execKey})
@@ -128,7 +128,7 @@ func TestWorkspaceExecTerminalPodBecomesLost(t *testing.T) {
 			}
 			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(process, pod).WithObjects(process, pod).Build()
 			processRuntime := &recordingProcessRuntime{}
-			reconciler := &WorkspaceExecReconciler{Client: kubeClient, Runtime: processRuntime}
+			reconciler := &WorkspaceExecReconciler{Client: kubeClient, APIReader: kubeClient, Runtime: processRuntime}
 			request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(process)}
 			_, err := reconciler.Reconcile(ctx, request)
 			require.NoError(t, err)
@@ -177,7 +177,7 @@ func newRuntimeRecoveryFixture(t *testing.T) *runtimeRecoveryFixture {
 		WithStatusSubresource(workspace, &workspacesv1alpha1.WorkspaceExec{}, home, &corev1.Pod{}).
 		WithObjects(workspace, home).Build()
 	fixture := &runtimeRecoveryFixture{ctx: ctx, client: kubeClient, workspace: workspace}
-	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
+	reconciler := &WorkspaceReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
 	fixture.reconciler = reconciler
 	key := client.ObjectKeyFromObject(workspace)
 	request := reconcile.Request{NamespacedName: key}

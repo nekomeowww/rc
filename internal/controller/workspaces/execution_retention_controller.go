@@ -75,16 +75,9 @@ func (r *executionRetentionService) reconcileExecutionHistory(ctx context.Contex
 	return ctrl.Result{RequeueAfter: executionRetentionInterval}, errors.Join(failures...)
 }
 
-func (r *executionRetentionService) retentionReader() client.Reader {
-	if r.APIReader != nil {
-		return r.APIReader
-	}
-	return r.Client
-}
-
 func (r *executionRetentionService) executionHistory(ctx context.Context, namespace string, target workspacesv1alpha1.WorkspaceExecTargetReference) ([]workspacesv1alpha1.WorkspaceExec, error) {
 	listed := new(workspacesv1alpha1.WorkspaceExecList)
-	if err := r.retentionReader().List(ctx, listed, client.InNamespace(namespace), client.MatchingFields{executionTargetIndex: target.Name}); err != nil {
+	if err := r.APIReader.List(ctx, listed, client.InNamespace(namespace), client.MatchingFields{executionTargetIndex: target.Name}); err != nil {
 		return nil, fmt.Errorf("list execution history: %w", err)
 	}
 	executions := make([]workspacesv1alpha1.WorkspaceExec, 0, len(listed.Items))
@@ -100,7 +93,7 @@ func (r *executionRetentionService) executionHistory(ctx context.Context, namesp
 // bump any execution's resourceVersion. A deleting or temporary target retains
 // its existing whole-target deletion lifecycle.
 func (r *executionRetentionService) currentExecutionPolicy(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) (*workspacesv1alpha1.ExecutionRetentionPolicy, error) {
-	target, err := readExecutionTarget(ctx, r.retentionReader(), process)
+	target, err := readExecutionTarget(ctx, r.APIReader, process)
 	if err != nil || target == nil {
 		return nil, err
 	}
@@ -125,7 +118,7 @@ func (r *executionRetentionService) currentExecutionPolicy(ctx context.Context, 
 // re-plans the current target list, because changed peers affect the rank.
 func (r *executionRetentionService) executionCleanupCandidate(ctx context.Context, snapshot *workspacesv1alpha1.WorkspaceExec) (*workspacesv1alpha1.WorkspaceExec, error) {
 	current := new(workspacesv1alpha1.WorkspaceExec)
-	if err := r.retentionReader().Get(ctx, client.ObjectKeyFromObject(snapshot), current); err != nil {
+	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(snapshot), current); err != nil {
 		return nil, err
 	}
 	if current.UID != snapshot.UID || current.Spec.TargetRef != snapshot.Spec.TargetRef || !current.DeletionTimestamp.IsZero() || current.Spec.Retain || !executionTerminal(current.Status.Phase) || current.Status.CompletedAt == nil {

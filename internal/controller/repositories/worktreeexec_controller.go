@@ -62,6 +62,8 @@ var worktreeExecStatus = oneShotStatusAdapter[*repositoriesv1alpha1.WorktreeExec
 // WorktreeExecReconciler reconciles a WorktreeExec object.
 type WorktreeExecReconciler struct {
 	client.Client
+	// APIReader is required. It bypasses the informer cache; SetupWithManager
+	// sets it from the manager.
 	APIReader   client.Reader
 	Scheme      *runtime.Scheme
 	RunnerImage string
@@ -249,11 +251,7 @@ var errWorktreeNotReady = errors.New("referenced Worktree is not ready")
 func (r *WorktreeExecReconciler) readyWorktree(ctx context.Context, exec *repositoriesv1alpha1.WorktreeExec) (*repositoriesv1alpha1.Worktree, error) {
 	worktree := new(repositoriesv1alpha1.Worktree)
 	key := types.NamespacedName{Name: exec.Spec.WorktreeRef.Name, Namespace: exec.Namespace}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
-	if err := reader.Get(ctx, key, worktree); err != nil {
+	if err := r.APIReader.Get(ctx, key, worktree); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, fmt.Errorf("referenced Worktree does not exist")
 		}

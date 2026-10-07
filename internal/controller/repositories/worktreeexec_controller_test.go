@@ -104,7 +104,7 @@ var _ = Describe("WorktreeExec Job", func() {
 			Spec:       coordinationv1.LeaseSpec{HolderIdentity: &workspaceHolder},
 		}
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(lease).Build()
-		reconciler := &WorktreeExecReconciler{Client: client, Scheme: scheme}
+		reconciler := &WorktreeExecReconciler{Client: client, APIReader: client, Scheme: scheme}
 
 		acquired, err := reconciler.acquireClaim(context.Background(), exec, worktree)
 
@@ -123,7 +123,7 @@ var _ = Describe("WorktreeExec Job", func() {
 			Spec:       coordinationv1.LeaseSpec{HolderIdentity: &holder},
 		}
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(lease).Build()
-		reconciler := &WorktreeExecReconciler{Client: client, Scheme: scheme}
+		reconciler := &WorktreeExecReconciler{Client: client, APIReader: client, Scheme: scheme}
 
 		Expect(reconciler.releaseClaim(context.Background(), exec)).To(Succeed())
 		persisted := new(coordinationv1.Lease)
@@ -138,7 +138,7 @@ var _ = Describe("WorktreeExec Job", func() {
 		worktree := readyWorktreeForExec()
 		exec := worktreeExecWithRecordedJob()
 		client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&repositoriesv1alpha1.WorktreeExec{}).WithObjects(worktree, exec).Build()
-		reconciler := &WorktreeExecReconciler{Client: client, Scheme: scheme, RunnerImage: testRunnerImage}
+		reconciler := &WorktreeExecReconciler{Client: client, APIReader: client, Scheme: scheme, RunnerImage: testRunnerImage}
 
 		_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: clientObjectKey(exec)})
 
@@ -161,7 +161,7 @@ var _ = Describe("WorktreeExec Job", func() {
 		exec := worktreeExecWithRecordedJob()
 		job := runningWorktreeExecJob(scheme, exec)
 		client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&repositoriesv1alpha1.WorktreeExec{}, &batchv1.Job{}).WithObjects(worktree, exec, job).Build()
-		reconciler := &WorktreeExecReconciler{Client: client, Scheme: scheme, RunnerImage: testRunnerImage}
+		reconciler := &WorktreeExecReconciler{Client: client, APIReader: client, Scheme: scheme, RunnerImage: testRunnerImage}
 
 		_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: clientObjectKey(exec)})
 
@@ -184,7 +184,7 @@ var _ = Describe("WorktreeExec Job", func() {
 			Spec:       coordinationv1.LeaseSpec{HolderIdentity: &foreignHolder},
 		}
 		client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&repositoriesv1alpha1.WorktreeExec{}, &batchv1.Job{}).WithObjects(worktree, exec, job, lease).Build()
-		reconciler := &WorktreeExecReconciler{Client: client, Scheme: scheme, RunnerImage: testRunnerImage}
+		reconciler := &WorktreeExecReconciler{Client: client, APIReader: client, Scheme: scheme, RunnerImage: testRunnerImage}
 
 		_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: clientObjectKey(exec)})
 
@@ -225,7 +225,7 @@ var _ = Describe("WorktreeExec Job", func() {
 			Expect(condition).NotTo(BeNil())
 			Expect(condition.Reason).To(Equal("JobScheduled"))
 		}}
-		reconciler := &WorktreeExecReconciler{Client: observingClient, Scheme: scheme, RunnerImage: testRunnerImage}
+		reconciler := &WorktreeExecReconciler{Client: observingClient, APIReader: observingClient, Scheme: scheme, RunnerImage: testRunnerImage}
 
 		_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: clientObjectKey(exec)})
 
@@ -250,7 +250,7 @@ var _ = Describe("WorktreeExec Job", func() {
 		exec := worktreeExecWithRecordedJob()
 		exec.Status = repositoriesv1alpha1.WorktreeExecStatus{}
 		kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree, exec).Build()
-		reconciler := &WorktreeExecReconciler{Client: kubeClient}
+		reconciler := &WorktreeExecReconciler{Client: kubeClient, APIReader: kubeClient}
 		lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
 			Name: worktreeclaim.LeaseName(worktree), Namespace: worktree.Namespace,
 		}}
@@ -274,7 +274,7 @@ var _ = Describe("WorktreeExec Job", func() {
 			Name: "orphaned-command-pod", Namespace: exec.Namespace, Labels: map[string]string{"job-name": exec.Status.JobName},
 		}}
 		kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&repositoriesv1alpha1.WorktreeExec{}).WithObjects(exec, lease, pod).Build()
-		reconciler := &WorktreeExecReconciler{Client: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
+		reconciler := &WorktreeExecReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
 		request := reconcile.Request{NamespacedName: clientObjectKey(exec)}
 
 		Expect(reconciler.execsForJobPod(context.Background(), pod)).To(ConsistOf(request))

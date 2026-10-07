@@ -36,7 +36,7 @@ func transcriptExpired(process *workspacesv1alpha1.WorkspaceExec, policy *worksp
 // next bounded batch. Offline PVCs are serialized under one target-owned Pod.
 func (r *executionRetentionService) reconcileTranscripts(ctx context.Context, target client.Object, policy *workspacesv1alpha1.ExecutionRetentionPolicy) error {
 	current := target.DeepCopyObject().(client.Object)
-	if err := r.retentionReader().Get(ctx, client.ObjectKeyFromObject(target), current); err != nil {
+	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(target), current); err != nil {
 		return client.IgnoreNotFound(err)
 	}
 	if current.GetUID() != target.GetUID() || !current.GetDeletionTimestamp().IsZero() {
@@ -108,13 +108,13 @@ func (r *executionRetentionService) reconcileTranscripts(ctx context.Context, ta
 // dispatch. Deleting active records enter only after their finalizer stopped them.
 func (r *executionRetentionService) transcriptCandidate(ctx context.Context, snapshot *workspacesv1alpha1.WorkspaceExec) (*workspacesv1alpha1.WorkspaceExec, error) {
 	process := new(workspacesv1alpha1.WorkspaceExec)
-	if err := r.retentionReader().Get(ctx, client.ObjectKeyFromObject(snapshot), process); err != nil {
+	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(snapshot), process); err != nil {
 		return nil, client.IgnoreNotFound(err)
 	}
 	if process.UID != snapshot.UID || process.Spec.TargetRef != snapshot.Spec.TargetRef || transcriptCleaned(process) {
 		return nil, nil
 	}
-	gone, err := transcriptStorageGone(ctx, r.retentionReader(), process)
+	gone, err := transcriptStorageGone(ctx, r.APIReader, process)
 	if err != nil {
 		return nil, err
 	}
@@ -148,12 +148,12 @@ func (r *executionRetentionService) transcriptCandidate(ctx context.Context, sna
 }
 
 func (r *executionRetentionService) cleanupVolume(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) (workspaceservice.TranscriptVolume, string, error) {
-	volume, err := workspaceservice.ResolveTranscriptVolume(ctx, r.retentionReader(), process)
+	volume, err := workspaceservice.ResolveTranscriptVolume(ctx, r.APIReader, process)
 	if err != nil || volume.Claim == "" {
 		return volume, "", err
 	}
 	claim := new(corev1.PersistentVolumeClaim)
-	if err := r.retentionReader().Get(ctx, client.ObjectKey{Namespace: process.Namespace, Name: volume.Claim}, claim); err != nil {
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: process.Namespace, Name: volume.Claim}, claim); err != nil {
 		return volume, "", err
 	}
 	if !claim.DeletionTimestamp.IsZero() {
@@ -170,7 +170,7 @@ func (r *executionRetentionService) pruneLiveTranscript(ctx context.Context, tar
 	if process.Spec.TargetRef.Kind == workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment {
 		label = environmentManagedByLabel
 	}
-	if err := r.retentionReader().List(ctx, pods, client.InNamespace(process.Namespace), client.MatchingLabels{label: target.GetName()}); err != nil {
+	if err := r.APIReader.List(ctx, pods, client.InNamespace(process.Namespace), client.MatchingLabels{label: target.GetName()}); err != nil {
 		return false, err
 	}
 	for i := range pods.Items {
@@ -208,7 +208,7 @@ func (r *executionRetentionService) pruneLiveTranscript(ctx context.Context, tar
 // survives any failed acknowledgement, so restart safely retries the same batch.
 func (r *executionRetentionService) ackTranscript(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec, cleanupErr error) error {
 	current := new(workspacesv1alpha1.WorkspaceExec)
-	if err := r.retentionReader().Get(ctx, client.ObjectKeyFromObject(process), current); err != nil {
+	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(process), current); err != nil {
 		return client.IgnoreNotFound(err)
 	}
 	if current.UID != process.UID || transcriptCleaned(current) {

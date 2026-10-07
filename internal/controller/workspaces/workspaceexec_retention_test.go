@@ -38,9 +38,9 @@ func TestRetainedWorkspaceExecHistoryExpires(t *testing.T) {
 	}
 	require.NoError(t, controllerutil.SetControllerReference(workspace, process, scheme))
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, process).WithObjects(workspace, process).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
-	r := &WorkspaceExecReconciler{Client: kube, Scheme: scheme}
+	r := &WorkspaceExecReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 	key := client.ObjectKeyFromObject(process)
-	retention := &WorkspaceRetentionReconciler{Client: kube}
+	retention := &WorkspaceRetentionReconciler{Client: kube, APIReader: kube}
 	_, err := retention.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
 	require.NoError(t, err)
 	for range 3 {
@@ -64,7 +64,7 @@ func TestTerminalWorkspaceExecRetainsCleanupFinalizer(t *testing.T) {
 		Status:     workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, TranscriptPath: ".rc/processes/terminal-with-transcript/transcript.log"},
 	}
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(process).WithObjects(process).Build()
-	r := &WorkspaceExecReconciler{Client: kube, Scheme: scheme}
+	r := &WorkspaceExecReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 	_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(process)})
 	require.NoError(t, err)
 	require.NoError(t, kube.Get(ctx, client.ObjectKeyFromObject(process), process))
@@ -81,7 +81,7 @@ func TestRetentionBoundsOutstandingDeletions(t *testing.T) {
 		process.ResourceVersion = ""
 		require.NoError(t, kube.Create(t.Context(), process))
 	}
-	r := &executionRetentionService{Client: kube}
+	r := &executionRetentionService{Client: kube, APIReader: kube}
 	for range 2 {
 		_, err := r.reconcileExecutionHistory(t.Context(), workspace.Namespace, executionTargetReference(workspace), workspace.UID, workspace.Spec.ExecutionRetention)
 		require.NoError(t, err)
@@ -112,7 +112,7 @@ func TestDeletingLastExecutionPreservesWorkspaceIdleClock(t *testing.T) {
 	require.NoError(t, controllerutil.SetControllerReference(workspace, process, scheme))
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, process).WithStatusSubresource(workspace, process).Build()
 	require.NoError(t, kube.Delete(ctx, process))
-	_, err := (&WorkspaceExecReconciler{Client: kube, Scheme: scheme}).Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(process)})
+	_, err := (&WorkspaceExecReconciler{Client: kube, APIReader: kube, Scheme: scheme}).Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(process)})
 	require.NoError(t, err)
 	require.NoError(t, kube.Get(ctx, client.ObjectKeyFromObject(workspace), workspace))
 	active, hadProcesses, last, err := workspaceProcessState(ctx, kube, workspace)

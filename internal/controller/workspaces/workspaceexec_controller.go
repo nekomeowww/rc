@@ -75,6 +75,8 @@ type resolvedCredentialProjection struct {
 // WorkspaceExecReconciler reconciles an at-most-once command with rc-kube.
 type WorkspaceExecReconciler struct {
 	client.Client
+	// APIReader is required. It bypasses the informer cache; SetupWithManager
+	// sets it from the manager.
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
 	Runtime   processruntime.Runtime
@@ -201,19 +203,15 @@ func (r *WorkspaceExecReconciler) startProcess(ctx context.Context, key types.Na
 		return ctrl.Result{}, err
 	}
 	// Status writes are not synchronously reflected in the informer cache.
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
 	current := new(workspacesv1alpha1.WorkspaceExec)
-	if err := reader.Get(ctx, key, current); err != nil {
+	if err := r.APIReader.Get(ctx, key, current); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !current.DeletionTimestamp.IsZero() || executionTerminal(current.Status.Phase) {
 		return ctrl.Result{Requeue: true}, nil
 	}
 	if target.workspace != nil {
-		gate := workspaceadmission.Gate{Client: r.Client, Reader: reader}
+		gate := workspaceadmission.Gate{Client: r.Client, Reader: r.APIReader}
 		if err := gate.Admit(ctx, target.workspace, current); err != nil {
 			if errors.Is(err, workspaceadmission.ErrClosed) || errors.Is(err, workspaceadmission.ErrOwnerChanged) || apierrors.IsNotFound(err) {
 				return ctrl.Result{}, r.setTerminalProcessStatus(ctx, key, workspacesv1alpha1.WorkspaceExecPhaseFailed, nil, "WorkspaceAdmissionRejected", err.Error(), 0)
@@ -273,7 +271,7 @@ func (r *WorkspaceExecReconciler) finalizeWorkspaceExec(ctx context.Context, pro
 	if !controllerutil.ContainsFinalizer(process, executionFinalizer) {
 		return ctrl.Result{}, nil
 	}
-	owner, err := readExecutionTarget(ctx, r.cleanupReader(), process)
+	owner, err := readExecutionTarget(ctx, r.APIReader, process)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -325,13 +323,9 @@ func (r *WorkspaceExecReconciler) finalizeWorkspaceExec(ctx context.Context, pro
 // processRuntimeLoss uses authoritative Pod identity and terminal state rather
 // than Workspace Ready. A Pod exit is not the exit code of its child processes.
 func (r *WorkspaceExecReconciler) processRuntimeLoss(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) (string, string, error) {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
 	pod := new(corev1.Pod)
 	key := client.ObjectKey{Namespace: process.Namespace, Name: process.Status.RuntimePodName}
-	err := reader.Get(ctx, key, pod)
+	err := r.APIReader.Get(ctx, key, pod)
 	if apierrors.IsNotFound(err) || (err == nil && string(pod.UID) != process.Status.RuntimePodUID) {
 		return "RuntimeReplaced", "The original runtime Pod no longer exists", nil
 	}
@@ -350,11 +344,7 @@ func (r *WorkspaceExecReconciler) originalProcessTarget(ctx context.Context, pro
 	}
 	pod := new(corev1.Pod)
 	key := types.NamespacedName{Name: process.Status.RuntimePodName, Namespace: process.Namespace}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
-	if err := reader.Get(ctx, key, pod); err != nil {
+	if err := r.APIReader.Get(ctx, key, pod); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, true, nil
 		}

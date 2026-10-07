@@ -17,6 +17,7 @@ import (
 // making either layer responsible for the other's lifecycle.
 type executionRetentionService struct {
 	client.Client
+	// APIReader is required. Callers pass their own uncached reader.
 	APIReader client.Reader
 	Runtime   processruntime.TranscriptPruner
 }

@@ -49,6 +49,8 @@ const (
 // RepositoryReconciler reconciles a Repository object.
 type RepositoryReconciler struct {
 	client.Client
+	// APIReader is required. It bypasses the informer cache; SetupWithManager
+	// sets it from the manager.
 	APIReader   client.Reader
 	Scheme      *runtime.Scheme
 	RunnerImage string
@@ -90,11 +92,7 @@ func (r *RepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 	jobs := new(batchv1.JobList)
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
-	if err := reader.List(ctx, jobs, client.InNamespace(repository.Namespace)); err != nil {
+	if err := r.APIReader.List(ctx, jobs, client.InNamespace(repository.Namespace)); err != nil {
 		return ctrl.Result{}, err
 	}
 	for _, previous := range jobs.Items {
@@ -103,7 +101,7 @@ func (r *RepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 	}
 
-	claimName, err := volumeclaim.Resolve(ctx, reader, repository, volumeclaim.Repository, 0, repository.Status.VolumeClaimName)
+	claimName, err := volumeclaim.Resolve(ctx, r.APIReader, repository, volumeclaim.Repository, 0, repository.Status.VolumeClaimName)
 	if volumeclaim.IsConflict(err) {
 		return ctrl.Result{}, setRepositoryStorageReady(ctx, r.Client, repository, metav1.ConditionFalse, "VolumeClaimConflict", err.Error(), repository.Status.VolumeClaimName, nil)
 	}

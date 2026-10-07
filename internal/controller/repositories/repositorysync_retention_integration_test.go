@@ -32,7 +32,7 @@ var _ = Describe("RepositorySync retention", func() {
 		request.Status.CompletedAt = &now
 		request.Status.Conditions = []metav1.Condition{{Type: repositoriesv1alpha1.RepositorySyncConditionSucceeded, Status: metav1.ConditionFalse, Reason: "RepositoryNotFound", Message: "Repository does not exist", LastTransitionTime: now, ObservedGeneration: request.Generation}}
 		Expect(k8sClient.Status().Update(ctx, request)).To(Succeed())
-		r := RepositorySyncReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: syncTestRunnerImage}
+		r := RepositorySyncReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: syncTestRunnerImage}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(request)})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(request), new(repositoriesv1alpha1.RepositorySync)))).To(BeTrue())

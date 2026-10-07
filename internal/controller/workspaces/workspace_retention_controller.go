@@ -45,7 +45,8 @@ const (
 // whose retention policy has expired independently of runtime topology health.
 type WorkspaceRetentionReconciler struct {
 	client.Client
-	// APIReader bypasses the informer cache for destructive lifecycle decisions.
+	// APIReader is required. It bypasses the informer cache for destructive
+	// lifecycle decisions.
 	APIReader client.Reader
 	Runtime   processruntime.Runtime
 	// Now allows deterministic deadline and restart tests; defaults to time.Now.
@@ -60,12 +61,8 @@ type WorkspaceRetentionReconciler struct {
 // It reads process state independently of runtime dependencies, and persists
 // clocks in status so controller restarts do not reset the recovery window.
 func (r *WorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, returnedErr error) {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
 	workspace := new(workspacesv1alpha1.Workspace)
-	if err := reader.Get(ctx, req.NamespacedName, workspace); err != nil {
+	if err := r.APIReader.Get(ctx, req.NamespacedName, workspace); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !workspace.DeletionTimestamp.IsZero() {
@@ -75,11 +72,11 @@ func (r *WorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// reopen on cancellation/failure. Once DELETE succeeds, Reopen is a no-op.
 	defer func() {
 		if workspace.Status.ExecutionAdmissionClosed {
-			gate := workspaceadmission.Gate{Client: r.Client, Reader: reader}
+			gate := workspaceadmission.Gate{Client: r.Client, Reader: r.APIReader}
 			returnedErr = errors.Join(returnedErr, gate.Reopen(ctx, workspace))
 		}
 	}()
-	active, hasProcesses, lastCompletion, err := workspaceProcessState(ctx, reader, workspace)
+	active, hasProcesses, lastCompletion, err := workspaceProcessState(ctx, r.APIReader, workspace)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -219,18 +216,14 @@ func earlierResult(a, b ctrl.Result) ctrl.Result {
 }
 
 func (r *WorkspaceRetentionReconciler) deleteExpired(ctx context.Context, workspace *workspacesv1alpha1.Workspace) error {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
-	gate := workspaceadmission.Gate{Client: r.Client, Reader: reader}
+	gate := workspaceadmission.Gate{Client: r.Client, Reader: r.APIReader}
 	if err := gate.Close(ctx, workspace); err != nil {
 		return err
 	}
 	// Close before scanning: no execution can now cross controller admission.
 	// A process may have appeared while recording activity. Refresh the list at
 	// the deletion boundary and fail closed on errors or any nonterminal phase.
-	active, _, _, stateErr := workspaceProcessState(ctx, reader, workspace)
+	active, _, _, stateErr := workspaceProcessState(ctx, r.APIReader, workspace)
 	if stateErr != nil {
 		return stateErr
 	}

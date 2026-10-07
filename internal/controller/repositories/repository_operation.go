@@ -23,9 +23,6 @@ const repositoryOperationFinalizer = "repositories.rc.ayaka.io/parent-access"
 // parent. A lost Job alone is not proof that its Pods have stopped. Deletion
 // uses foreground propagation, then removes the operation's finalizer last.
 func releaseRepositoryOperation(ctx context.Context, c client.Client, reader client.Reader, owner client.Object, token, jobName string) (bool, error) {
-	if reader == nil {
-		reader = c
-	}
 	if jobName != "" {
 		job := new(batchv1.Job)
 		err := reader.Get(ctx, client.ObjectKey{Namespace: owner.GetNamespace(), Name: jobName}, job)

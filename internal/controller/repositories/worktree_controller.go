@@ -68,6 +68,8 @@ const (
 // checkout initialized in its cloned Repository root.
 type WorktreeReconciler struct {
 	client.Client
+	// APIReader is required. It bypasses the informer cache; SetupWithManager
+	// sets it from the manager.
 	APIReader   client.Reader
 	Scheme      *runtime.Scheme
 	RunnerImage string
@@ -87,12 +89,8 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	log := logf.FromContext(ctx)
 	// Both creation evidence and child existence must be read outside the cache;
 	// a stale pre-creation Worktree must not authorize replacing a lost child.
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
 	worktree := new(repositoriesv1alpha1.Worktree)
-	if err := reader.Get(ctx, req.NamespacedName, worktree); err != nil {
+	if err := r.APIReader.Get(ctx, req.NamespacedName, worktree); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !worktree.DeletionTimestamp.IsZero() {
@@ -107,7 +105,7 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	worktreePath := worktreePath(worktree)
-	claimName, err := volumeclaim.Resolve(ctx, reader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
+	claimName, err := volumeclaim.Resolve(ctx, r.APIReader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
 	if err != nil && claimName == "" {
 		return ctrl.Result{}, err
 	}
@@ -116,7 +114,7 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// Read directly before creation: a cached absence must not replan a child
 	// already created from an earlier source observation.
-	claimErr := reader.Get(ctx, claimKey, claim)
+	claimErr := r.APIReader.Get(ctx, claimKey, claim)
 	if claimErr != nil && !errors.IsNotFound(claimErr) {
 		return ctrl.Result{}, fmt.Errorf("get Worktree PersistentVolumeClaim: %w", claimErr)
 	}
@@ -166,7 +164,7 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		// source after admission instead of using Repository intent or cache state.
 		source := new(corev1.PersistentVolumeClaim)
 		sourceKey := types.NamespacedName{Name: repository.Status.VolumeClaimName, Namespace: worktree.Namespace}
-		if err := reader.Get(ctx, sourceKey, source); err != nil {
+		if err := r.APIReader.Get(ctx, sourceKey, source); err != nil {
 			if !errors.IsNotFound(err) {
 				return ctrl.Result{}, fmt.Errorf("get clone source PVC: %w", err)
 			}
@@ -311,21 +309,17 @@ func (r *WorktreeReconciler) reconcileDelete(ctx context.Context, worktree *repo
 		return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, nil
 	}
 
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
 	// Finish an admitted clone before releasing its source reservation. Deleting
 	// a pending PVC can leave a CSI CreateVolume operation in flight.
 	// Use the same identity as provisioning, including recovery before status is
 	// persisted. Absence at the CR name does not prove its selected PVC is gone.
-	claimName, err := volumeclaim.Resolve(ctx, reader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
+	claimName, err := volumeclaim.Resolve(ctx, r.APIReader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
 	if err != nil && claimName == "" {
 		return ctrl.Result{}, err
 	}
 	claim := new(corev1.PersistentVolumeClaim)
 	claimKey := client.ObjectKey{Namespace: worktree.Namespace, Name: claimName}
-	if err := reader.Get(ctx, claimKey, claim); err == nil && metav1.IsControlledBy(claim, worktree) {
+	if err := r.APIReader.Get(ctx, claimKey, claim); err == nil && metav1.IsControlledBy(claim, worktree) {
 		if claim.DeletionTimestamp.IsZero() && claim.Status.Phase != corev1.ClaimBound {
 			return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, nil
 		}
@@ -348,7 +342,7 @@ func (r *WorktreeReconciler) reconcileDelete(ctx context.Context, worktree *repo
 	key := client.ObjectKeyFromObject(worktree)
 	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current := new(repositoriesv1alpha1.Worktree)
-		if err := reader.Get(ctx, key, current); err != nil {
+		if err := r.APIReader.Get(ctx, key, current); err != nil {
 			return client.IgnoreNotFound(err)
 		}
 		before := current.DeepCopy()
@@ -363,11 +357,7 @@ func (r *WorktreeReconciler) reconcileDelete(ctx context.Context, worktree *repo
 }
 
 func (r *WorktreeReconciler) worktreeReferenceBlockers(ctx context.Context, worktree *repositoriesv1alpha1.Worktree) ([]string, error) {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
-	return worktreeownership.ReferenceBlockers(ctx, reader, worktree.Namespace, worktree.Name)
+	return worktreeownership.ReferenceBlockers(ctx, r.APIReader, worktree.Namespace, worktree.Name)
 }
 
 func (r *WorktreeReconciler) worktreesForWorkspace(_ context.Context, object client.Object) []ctrl.Request {

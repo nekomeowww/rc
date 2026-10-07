@@ -25,14 +25,8 @@ const (
 // Reservations have no TTL: time passing cannot stop an admitted runtime.
 type MountAccess struct {
 	Client client.Client
+	// Reader is required and must bypass the manager cache in production.
 	Reader client.Reader
-}
-
-func (g MountAccess) reader() client.Reader {
-	if g.Reader != nil {
-		return g.Reader
-	}
-	return g.Client
 }
 
 // MountsClosed reports an irreversible storage/deletion fence. A Worktree whose
@@ -77,7 +71,7 @@ func storeMountHolders(worktree *repositoriesv1alpha1.Worktree, holders map[stri
 // only after confirming that this Workspace's consumers have stopped.
 func (g MountAccess) Admit(ctx context.Context, captured *repositoriesv1alpha1.Worktree, workspace *workspacesv1alpha1.Workspace) (bool, error) {
 	owner := new(workspacesv1alpha1.Workspace)
-	if err := g.reader().Get(ctx, client.ObjectKeyFromObject(workspace), owner); err != nil {
+	if err := g.Reader.Get(ctx, client.ObjectKeyFromObject(workspace), owner); err != nil {
 		return false, client.IgnoreNotFound(err)
 	}
 	if owner.UID != workspace.UID || !owner.DeletionTimestamp.IsZero() {
@@ -87,7 +81,7 @@ func (g MountAccess) Admit(ctx context.Context, captured *repositoriesv1alpha1.W
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		admitted = false
 		current := new(repositoriesv1alpha1.Worktree)
-		if err := g.reader().Get(ctx, client.ObjectKeyFromObject(captured), current); err != nil {
+		if err := g.Reader.Get(ctx, client.ObjectKeyFromObject(captured), current); err != nil {
 			return client.IgnoreNotFound(err)
 		}
 		if current.UID != captured.UID || current.Generation != captured.Generation || current.Status.VolumeClaimName != captured.Status.VolumeClaimName || MountsClosed(current) {
@@ -122,7 +116,7 @@ func (g MountAccess) Close(ctx context.Context, worktree *repositoriesv1alpha1.W
 	drained := false
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current := new(repositoriesv1alpha1.Worktree)
-		if err := g.reader().Get(ctx, client.ObjectKeyFromObject(worktree), current); err != nil {
+		if err := g.Reader.Get(ctx, client.ObjectKeyFromObject(worktree), current); err != nil {
 			return err
 		}
 		if current.UID != worktree.UID {
@@ -159,7 +153,7 @@ func (g MountAccess) ReleaseExcept(ctx context.Context, workspace *workspacesv1a
 		}
 		if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 			current := new(repositoriesv1alpha1.Worktree)
-			if err := g.reader().Get(ctx, client.ObjectKeyFromObject(&worktree), current); err != nil {
+			if err := g.Reader.Get(ctx, client.ObjectKeyFromObject(&worktree), current); err != nil {
 				return client.IgnoreNotFound(err)
 			}
 			if current.UID != worktree.UID {

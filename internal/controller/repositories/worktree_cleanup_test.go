@@ -138,7 +138,7 @@ func TestDeletingWorkspaceDoesNotBlockWorktreeGC(t *testing.T) {
 	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: ownershipWorkspaceName, Namespace: ownershipNamespace, UID: ownershipWorkspaceUID, DeletionTimestamp: &now, Finalizers: []string{metav1.FinalizerDeleteDependents}}, Spec: workspacesv1alpha1.WorkspaceSpec{Mounts: []workspacesv1alpha1.WorkspaceMount{{Name: ownershipWorktreeName, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: ownershipWorktreeName}}}}}
 	worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: ownershipWorktreeName, Namespace: ownershipNamespace, UID: ownershipWorktreeUID, DeletionTimestamp: &now, Finalizers: []string{worktreeDeletionFinalizer}}}
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, worktree).Build()
-	r := &WorktreeReconciler{Client: kube, Scheme: scheme}
+	r := &WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 	// ROOT CAUSE: foreground GC waits for the dependent's finalizer, while
 	// the finalizer counted its deleting owner as a live reference forever.
 	blockers, err := r.worktreeReferenceBlockers(context.Background(), worktree)

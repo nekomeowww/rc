@@ -46,7 +46,7 @@ func syncFixture(t *testing.T) (client.Client, *repositoriesv1alpha1.Repository,
 
 func reconcileSync(t *testing.T, c client.Client, request *repositoriesv1alpha1.RepositorySync) {
 	t.Helper()
-	r := RepositorySyncReconciler{Client: c, Scheme: c.Scheme(), RunnerImage: syncTestRunnerImage}
+	r := RepositorySyncReconciler{Client: c, APIReader: c, Scheme: c.Scheme(), RunnerImage: syncTestRunnerImage}
 	_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(request)})
 	require.NoError(t, err)
 }
@@ -59,13 +59,13 @@ func TestSyncRetainsResultAndBlocksExecAndClones(t *testing.T) {
 	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(request), job))
 	require.Nil(t, job.Spec.TTLSecondsAfterFinished, "an unrecorded result must survive long controller outages")
 	require.Contains(t, job.Spec.Template.Spec.Containers[0].Args, "refs/heads/main")
-	gate := repositoryaccess.Gate{Client: c}
+	gate := repositoryaccess.Gate{Client: c, Reader: c}
 	admitted, err := gate.Acquire(t.Context(), repository, "new-clone", repositoryaccess.Clone, true)
 	require.NoError(t, err)
 	require.Equal(t, repositoryaccess.NotReserved, admitted)
 	exec := &repositoriesv1alpha1.RepositoryExec{ObjectMeta: metav1.ObjectMeta{Name: "other-command", Namespace: repository.Namespace, UID: "other-command"}, Spec: repositoriesv1alpha1.RepositoryExecSpec{RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: repository.Name}, Command: []string{"git", "status"}}}
 	require.NoError(t, c.Create(t.Context(), exec))
-	executor := RepositoryExecReconciler{Client: c, Scheme: c.Scheme(), RunnerImage: syncTestRunnerImage}
+	executor := RepositoryExecReconciler{Client: c, APIReader: c, Scheme: c.Scheme(), RunnerImage: syncTestRunnerImage}
 	_, err = executor.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(exec)})
 	require.NoError(t, err)
 	jobs := new(batchv1.JobList)
@@ -100,7 +100,7 @@ func TestSyncRetainsResultAndBlocksExecAndClones(t *testing.T) {
 func TestSyncWaitsForAdmittedCloneAndRetryUsesNewRequest(t *testing.T) {
 	t.Parallel()
 	c, repository, request := syncFixture(t)
-	gate := repositoryaccess.Gate{Client: c}
+	gate := repositoryaccess.Gate{Client: c, Reader: c}
 	acquired, err := gate.Acquire(t.Context(), repository, "pending-clone", repositoryaccess.Clone, true)
 	require.NoError(t, err)
 	require.Equal(t, repositoryaccess.Admitted, acquired)
@@ -134,7 +134,7 @@ func TestExistingWorktreeRemainsReadyDuringSync(t *testing.T) {
 	claim.Status.Phase = corev1.ClaimBound
 	require.NoError(t, c.Create(t.Context(), claim))
 	reconcileSync(t, c, request)
-	controller := WorktreeReconciler{Client: c, Scheme: c.Scheme(), RunnerImage: syncTestRunnerImage}
+	controller := WorktreeReconciler{Client: c, APIReader: c, Scheme: c.Scheme(), RunnerImage: syncTestRunnerImage}
 	_, err := controller.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(worktree)})
 	require.NoError(t, err)
 	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(worktree), worktree))
@@ -195,7 +195,7 @@ func TestDeletingSyncWaitsForItsPods(t *testing.T) {
 	reconcileSync(t, c, request)
 	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(request), request))
 	require.Contains(t, request.Finalizers, repositoryOperationFinalizer)
-	gate := repositoryaccess.Gate{Client: c}
+	gate := repositoryaccess.Gate{Client: c, Reader: c}
 	busy, err := gate.Busy(t.Context(), repository, "another-writer")
 	require.NoError(t, err)
 	require.True(t, busy)

@@ -51,19 +51,13 @@ const (
 // Owners release only after their consumer stops; finalizers cover deletion.
 type Gate struct {
 	Client client.Client
+	// Reader is required and must bypass the manager cache in production.
 	Reader client.Reader
 }
 
 type reservation struct {
 	Mode    Mode            `json:"mode"`
 	Holders map[string]bool `json:"holders"`
-}
-
-func (g Gate) reader() client.Reader {
-	if g.Reader != nil {
-		return g.Reader
-	}
-	return g.Client
 }
 
 // Token identifies one resource incarnation, independent of name reuse.
@@ -100,7 +94,7 @@ func (g Gate) Acquire(ctx context.Context, repository *repositories.Repository, 
 		acquired = false
 		lease := new(coordinationv1.Lease)
 		key := leaseKey(repository)
-		err := g.reader().Get(ctx, key, lease)
+		err := g.Reader.Get(ctx, key, lease)
 		if errors.IsNotFound(err) {
 			lease = &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace,
 				Labels:          map[string]string{gateLabel: "true"},
@@ -108,7 +102,7 @@ func (g Gate) Acquire(ctx context.Context, repository *repositories.Repository, 
 			if err := g.Client.Create(ctx, lease); err != nil && !errors.IsAlreadyExists(err) {
 				return err
 			}
-			if err := g.reader().Get(ctx, key, lease); err != nil {
+			if err := g.Reader.Get(ctx, key, lease); err != nil {
 				return err
 			}
 		} else if err != nil {
@@ -145,7 +139,7 @@ func (g Gate) Acquire(ctx context.Context, repository *repositories.Repository, 
 		return NotReserved, err
 	}
 	current := new(repositories.Repository)
-	if err := g.reader().Get(ctx, client.ObjectKeyFromObject(repository), current); err != nil {
+	if err := g.Reader.Get(ctx, client.ObjectKeyFromObject(repository), current); err != nil {
 		return Reserved, err
 	}
 	condition := meta.FindStatusCondition(current.Status.Conditions, repositories.RepositoryConditionStorageReady)
@@ -167,7 +161,7 @@ func (g Gate) consumersStopped(ctx context.Context, repository *repositories.Rep
 	// Direct Kubernetes access is outside this protocol; rc never deletes it.
 	if mode == Write || mode == Clone {
 		pods := new(corev1.PodList)
-		if err := g.reader().List(ctx, pods, client.InNamespace(repository.Namespace)); err != nil {
+		if err := g.Reader.List(ctx, pods, client.InNamespace(repository.Namespace)); err != nil {
 			return false, err
 		}
 		for _, pod := range pods.Items {
@@ -183,7 +177,7 @@ func (g Gate) consumersStopped(ctx context.Context, repository *repositories.Rep
 	}
 	if mode == Write {
 		claims := new(corev1.PersistentVolumeClaimList)
-		if err := g.reader().List(ctx, claims, client.InNamespace(repository.Namespace)); err != nil {
+		if err := g.Reader.List(ctx, claims, client.InNamespace(repository.Namespace)); err != nil {
 			return false, err
 		}
 		for _, claim := range claims.Items {
@@ -200,14 +194,14 @@ func (g Gate) consumersStopped(ctx context.Context, repository *repositories.Rep
 // stopped first. Keeping empty gates makes name reuse and concurrent CAS safe.
 func (g Gate) Release(ctx context.Context, namespace, token string) error {
 	leases := new(coordinationv1.LeaseList)
-	if err := g.reader().List(ctx, leases, client.InNamespace(namespace), client.MatchingLabels{gateLabel: "true"}); err != nil {
+	if err := g.Reader.List(ctx, leases, client.InNamespace(namespace), client.MatchingLabels{gateLabel: "true"}); err != nil {
 		return err
 	}
 	for _, item := range leases.Items {
 		key := client.ObjectKeyFromObject(&item)
 		if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 			lease := new(coordinationv1.Lease)
-			if err := g.reader().Get(ctx, key, lease); err != nil {
+			if err := g.Reader.Get(ctx, key, lease); err != nil {
 				return client.IgnoreNotFound(err)
 			}
 			current, err := state(lease)
@@ -235,7 +229,7 @@ func (g Gate) Release(ctx context.Context, namespace, token string) error {
 // before publishing readiness so it cannot overwrite a running sync's status.
 func (g Gate) Busy(ctx context.Context, repository *repositories.Repository, token string) (bool, error) {
 	lease := new(coordinationv1.Lease)
-	if err := g.reader().Get(ctx, leaseKey(repository), lease); err != nil {
+	if err := g.Reader.Get(ctx, leaseKey(repository), lease); err != nil {
 		return false, client.IgnoreNotFound(err)
 	}
 	current, err := state(lease)

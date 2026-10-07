@@ -35,7 +35,7 @@ func TestMountAdmissionLosesCASRaceToDeletionFence(t *testing.T) {
 					if deleting {
 						require.NoError(t, c.Delete(ctx, worktree))
 					} else {
-						drained, err := (MountAccess{Client: c}).Close(ctx, worktree)
+						drained, err := (MountAccess{Client: c, Reader: c}).Close(ctx, worktree)
 						require.NoError(t, err)
 						require.True(t, drained)
 					}
@@ -48,7 +48,7 @@ func TestMountAdmissionLosesCASRaceToDeletionFence(t *testing.T) {
 			}}).Build()
 			// ROOT CAUSE: a read-then-create protocol can accept an obsolete live object.
 			// Both admission and fence must CAS the Worktree, including read-only mounts.
-			admitted, err := (MountAccess{Client: kube}).Admit(t.Context(), worktree, workspace)
+			admitted, err := (MountAccess{Client: kube, Reader: kube}).Admit(t.Context(), worktree, workspace)
 			require.NoError(t, err)
 			assert.True(t, injected)
 			assert.False(t, admitted)
@@ -63,7 +63,7 @@ func TestMountAdmissionLosesCASRaceToDeletionFence(t *testing.T) {
 func TestAdmittedCreatorSurvivesFenceUntilExplicitRelease(t *testing.T) {
 	scheme, worktree, workspace := accessFixture(t)
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree, workspace).Build()
-	gate := MountAccess{Client: kube}
+	gate := MountAccess{Client: kube, Reader: kube}
 	admitted, err := gate.Admit(t.Context(), worktree, workspace)
 	require.NoError(t, err)
 	require.True(t, admitted)
@@ -101,7 +101,7 @@ func TestReleaseOnlyTouchesExplicitCandidatesAndPreservesOtherMounts(t *testing.
 			return nil
 		},
 	}).Build()
-	gate := MountAccess{Client: kube}
+	gate := MountAccess{Client: kube, Reader: kube}
 	for _, worktree := range []*repositoriesv1alpha1.Worktree{removed, kept, unrelated} {
 		admitted, err := gate.Admit(t.Context(), worktree, workspace)
 		require.NoError(t, err)

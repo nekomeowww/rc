@@ -27,15 +27,8 @@ var (
 // that finalizer until their runtime has stopped. No reservation expires.
 type Gate struct {
 	Client client.Client
-	// Reader must bypass the manager cache in production.
+	// Reader is required and must bypass the manager cache in production.
 	Reader client.Reader
-}
-
-func (g Gate) reader() client.Reader {
-	if g.Reader != nil {
-		return g.Reader
-	}
-	return g.Client
 }
 
 // Check rejects a deleting or fenced owner before a client creates resources.
@@ -54,7 +47,7 @@ func Check(workspace *workspaces.Workspace) error {
 // No caller may start the runtime when admission returns an error.
 func (g Gate) Admit(ctx context.Context, expected *workspaces.Workspace, process *workspaces.WorkspaceExec) error {
 	current := new(workspaces.Workspace)
-	if err := g.reader().Get(ctx, client.ObjectKeyFromObject(expected), current); err != nil {
+	if err := g.Reader.Get(ctx, client.ObjectKeyFromObject(expected), current); err != nil {
 		return err
 	}
 	if current.UID != expected.UID {
@@ -92,7 +85,7 @@ func (g Gate) Close(ctx context.Context, workspace *workspaces.Workspace) error 
 	// decoding cannot leave an unpersisted value from the request in memory.
 	// Do not replace the closed snapshot or its DELETE precondition with this read.
 	confirmed := new(workspaces.Workspace)
-	if err := g.reader().Get(ctx, client.ObjectKeyFromObject(workspace), confirmed); err != nil {
+	if err := g.Reader.Get(ctx, client.ObjectKeyFromObject(workspace), confirmed); err != nil {
 		return err
 	}
 	if !confirmed.Status.ExecutionAdmissionClosed || confirmed.UID != workspace.UID || confirmed.ResourceVersion != workspace.ResourceVersion {
@@ -107,7 +100,7 @@ func (g Gate) Close(ctx context.Context, workspace *workspaces.Workspace) error 
 // concurrent DELETE prepared under the old closed state.
 func (g Gate) Reopen(ctx context.Context, expected *workspaces.Workspace) error {
 	current := new(workspaces.Workspace)
-	if err := g.reader().Get(ctx, client.ObjectKeyFromObject(expected), current); err != nil {
+	if err := g.Reader.Get(ctx, client.ObjectKeyFromObject(expected), current); err != nil {
 		return client.IgnoreNotFound(err)
 	}
 	if current.UID != expected.UID || !current.DeletionTimestamp.IsZero() || !current.Status.ExecutionAdmissionClosed {

@@ -54,7 +54,7 @@ func TestWorkspaceReleasesParentBeforeDependencyChecks(t *testing.T) {
 			require.NoError(t, controllerutil.SetControllerReference(workspace, home, scheme))
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: workspace.Name, Namespace: workspace.Namespace}}
 			c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace).WithObjects(parent, workspace, home, pod).Build()
-			gate := repositoryaccess.Gate{Client: c}
+			gate := repositoryaccess.Gate{Client: c, Reader: c}
 			admission, err := gate.Acquire(ctx, parent, repositoryaccess.Token("workspace", workspace), repositoryaccess.Mount, true)
 			require.NoError(t, err)
 			require.Equal(t, repositoryaccess.Admitted, admission)

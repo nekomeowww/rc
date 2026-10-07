@@ -32,7 +32,7 @@ func (r *executionRetentionService) createTranscriptWorker(ctx context.Context, 
 	// Recheck whole-target/volume lifecycle at the dispatch boundary. GC owns
 	// cancellation if deletion races after this read and before Pod creation.
 	current := target.DeepCopyObject().(client.Object)
-	if err := r.retentionReader().Get(ctx, client.ObjectKeyFromObject(target), current); err != nil {
+	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(target), current); err != nil {
 		return client.IgnoreNotFound(err)
 	}
 	if current.GetUID() != target.GetUID() || !current.GetDeletionTimestamp().IsZero() {
@@ -42,7 +42,7 @@ func (r *executionRetentionService) createTranscriptWorker(ctx context.Context, 
 		return errors.New("offline transcript cleanup requires a PVC")
 	}
 	claim := new(corev1.PersistentVolumeClaim)
-	if err := r.retentionReader().Get(ctx, client.ObjectKey{Namespace: target.GetNamespace(), Name: volume.Claim}, claim); err != nil {
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: target.GetNamespace(), Name: volume.Claim}, claim); err != nil {
 		return client.IgnoreNotFound(err)
 	}
 	if string(claim.UID) != claimUID || !claim.DeletionTimestamp.IsZero() {
@@ -85,7 +85,7 @@ func (r *executionRetentionService) createTranscriptWorker(ctx context.Context, 
 	if executionTargetReference(target).Kind == workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment {
 		label = environmentManagedByLabel
 	}
-	if err := r.retentionReader().List(ctx, pods, client.InNamespace(target.GetNamespace()), client.MatchingLabels{label: target.GetName()}); err != nil {
+	if err := r.APIReader.List(ctx, pods, client.InNamespace(target.GetNamespace()), client.MatchingLabels{label: target.GetName()}); err != nil {
 		return err
 	}
 	for _, existing := range pods.Items {
@@ -113,7 +113,7 @@ func (r *executionRetentionService) createTranscriptWorker(ctx context.Context, 
 func (r *executionRetentionService) reconcileTranscriptWorker(ctx context.Context, target client.Object) (bool, error) {
 	pod := new(corev1.Pod)
 	key := client.ObjectKey{Namespace: target.GetNamespace(), Name: transcriptCleanupName(target)}
-	if err := r.retentionReader().Get(ctx, key, pod); err != nil {
+	if err := r.APIReader.Get(ctx, key, pod); err != nil {
 		return false, client.IgnoreNotFound(err)
 	}
 	if !metav1.IsControlledBy(pod, target) {
@@ -130,7 +130,7 @@ func (r *executionRetentionService) reconcileTranscriptWorker(ctx context.Contex
 		return true, err
 	}
 	claim := new(corev1.PersistentVolumeClaim)
-	err := r.retentionReader().Get(ctx, client.ObjectKey{Namespace: target.GetNamespace(), Name: pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName}, claim)
+	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: target.GetNamespace(), Name: pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName}, claim)
 	gone := apierrors.IsNotFound(err)
 	if err != nil && !gone {
 		return true, err

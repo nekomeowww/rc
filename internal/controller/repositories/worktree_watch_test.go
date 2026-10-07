@@ -74,7 +74,7 @@ func TestWorktreeClaimWatch(t *testing.T) {
 			if tt.owner != nil {
 				claim.OwnerReferences = []metav1.OwnerReference{*tt.owner}
 			}
-			r := &WorktreeReconciler{Client: checked}
+			r := &WorktreeReconciler{Client: checked, APIReader: checked}
 			assert.Equal(t, tt.want, r.worktreesForClaim(t.Context(), claim))
 			assert.Equal(t, tt.lists, lists)
 		})

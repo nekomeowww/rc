@@ -60,7 +60,7 @@ var _ = Describe("RepositoryExec Controller", func() {
 		Expect(k8sClient.Create(ctx, exec)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, exec)).To(Succeed()) })
 
-		reconciler := &RepositoryExecReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: runnerImage}
+		reconciler := &RepositoryExecReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: runnerImage}
 		execKey := types.NamespacedName{Name: execName, Namespace: testNamespace}
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: execKey})
 		Expect(err).NotTo(HaveOccurred())
@@ -159,7 +159,7 @@ var _ = Describe("RepositoryExec Controller", func() {
 		Expect(k8sClient.Status().Update(ctx, exec)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, exec)).To(Succeed()) })
 
-		reconciler := &RepositoryExecReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: testRunnerImage}
+		reconciler := &RepositoryExecReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: testRunnerImage}
 		key := types.NamespacedName{Name: exec.Name, Namespace: exec.Namespace}
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 
@@ -203,7 +203,7 @@ var _ = Describe("RepositoryExec Controller", func() {
 			Expect(condition).NotTo(BeNil())
 			Expect(condition.Reason).To(Equal("JobScheduled"))
 		}}
-		reconciler := &RepositoryExecReconciler{Client: observingClient, Scheme: k8sClient.Scheme(), RunnerImage: testRunnerImage}
+		reconciler := &RepositoryExecReconciler{Client: observingClient, APIReader: observingClient, Scheme: k8sClient.Scheme(), RunnerImage: testRunnerImage}
 		key := client.ObjectKeyFromObject(exec)
 
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})

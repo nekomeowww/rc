@@ -71,7 +71,7 @@ func TestExecCannotStartAfterDeletionLeaseDisappears(t *testing.T) {
 				injected = true
 				// ROOT CAUSE: foreground GC can remove the deletion Lease. A writer that
 				// resolved Ready before the fence may now acquire the vacant Lease name.
-				drained, err := (worktreeownership.MountAccess{Client: c}).Close(ctx, worktree)
+				drained, err := (worktreeownership.MountAccess{Client: c, Reader: c}).Close(ctx, worktree)
 				require.NoError(t, err)
 				require.True(t, drained)
 				lease := worktreeclaim.DeletionLease(worktree)

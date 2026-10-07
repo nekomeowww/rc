@@ -28,12 +28,8 @@ func (r *WorkspaceReconciler) admitWorktreeMounts(ctx context.Context, workspace
 
 // hotMountsGone verifies teardown outside the cache before releasing admission.
 func (r *WorkspaceReconciler) hotMountsGone(ctx context.Context, workspace *workspacesv1alpha1.Workspace) (bool, error) {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
 	helpers := new(corev1.PodList)
-	if err := reader.List(ctx, helpers, client.InNamespace(workspace.Namespace), client.MatchingLabels{workspaceManagedByLabel: workspace.Name, hotMountHelperLabel: hotMountLabelValue}); err != nil {
+	if err := r.APIReader.List(ctx, helpers, client.InNamespace(workspace.Namespace), client.MatchingLabels{workspaceManagedByLabel: workspace.Name, hotMountHelperLabel: hotMountLabelValue}); err != nil {
 		return false, err
 	}
 	return len(helpers.Items) == 0, nil
@@ -43,15 +39,11 @@ func (r *WorkspaceReconciler) hotMountsGone(ctx context.Context, workspace *work
 // or runtime teardown. Include old mounts and ambiguous admission successes even
 // when they no longer appear in Workspace spec; ReleaseExcept rechecks their UIDs.
 func (r *WorkspaceReconciler) releaseWorktreeMounts(ctx context.Context, workspace *workspacesv1alpha1.Workspace, keep map[string]bool) error {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
 	candidates := new(repositoriesv1alpha1.WorktreeList)
-	if err := reader.List(ctx, candidates, client.InNamespace(workspace.Namespace)); err != nil {
+	if err := r.APIReader.List(ctx, candidates, client.InNamespace(workspace.Namespace)); err != nil {
 		return err
 	}
-	return (worktreeownership.MountAccess{Client: r.Client, Reader: reader}).ReleaseExcept(ctx, workspace, candidates.Items, keep)
+	return (worktreeownership.MountAccess{Client: r.Client, Reader: r.APIReader}).ReleaseExcept(ctx, workspace, candidates.Items, keep)
 }
 
 // releaseOldWorktreeMounts checkpoints the successfully reconciled mount

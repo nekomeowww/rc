@@ -130,6 +130,8 @@ type hotWorktreeMount struct {
 // WorkspaceReconciler reconciles persistent Workspace storage and runtime Pods.
 type WorkspaceReconciler struct {
 	client.Client
+	// APIReader is required. It bypasses the informer cache; SetupWithManager
+	// sets it from the manager.
 	APIReader           client.Reader
 	Scheme              *runtime.Scheme
 	RunnerImage         string
@@ -154,10 +156,6 @@ type WorkspaceReconciler struct {
 //nolint:gocyclo // Reconcile is an explicit lifecycle state machine with guarded transitions.
 func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
 	workspace := new(workspacesv1alpha1.Workspace)
 	if err := r.Get(ctx, req.NamespacedName, workspace); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -195,7 +193,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	if resolved.runtime.OS() != rcplatform.Darwin {
-		claimName, resolveErr := volumeclaim.Resolve(ctx, reader, workspace, volumeclaim.WorkspaceHome, 0, workspace.Status.HomeVolumeClaimName)
+		claimName, resolveErr := volumeclaim.Resolve(ctx, r.APIReader, workspace, volumeclaim.WorkspaceHome, 0, workspace.Status.HomeVolumeClaimName)
 		if volumeclaim.IsConflict(resolveErr) {
 			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "VolumeClaimConflict", resolveErr.Error())
 		}
@@ -266,7 +264,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return result, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reason, message)
 	}
 
-	active, _, _, err := workspaceProcessState(ctx, reader, workspace)
+	active, _, _, err := workspaceProcessState(ctx, r.APIReader, workspace)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -285,7 +283,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	pod := new(corev1.Pod)
-	err = reader.Get(ctx, req.NamespacedName, pod)
+	err = r.APIReader.Get(ctx, req.NamespacedName, pod)
 	if errors.IsNotFound(err) {
 		if removed, err := r.removeHotMounts(ctx, workspace); err != nil {
 			return ctrl.Result{}, err
@@ -451,10 +449,6 @@ func workspaceInitializationFailure(pod *corev1.Pod) (string, string) {
 }
 
 func (r *WorkspaceReconciler) finalizeWorkspace(ctx context.Context, workspace *workspacesv1alpha1.Workspace) (ctrl.Result, error) {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
 	if !controllerutil.ContainsFinalizer(workspace, workspaceFinalizer) {
 		return ctrl.Result{}, nil
 	}
@@ -489,7 +483,7 @@ func (r *WorkspaceReconciler) finalizeWorkspace(ctx context.Context, workspace *
 		return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, nil
 	}
 	pod := new(corev1.Pod)
-	if err := reader.Get(ctx, client.ObjectKeyFromObject(workspace), pod); err == nil {
+	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(workspace), pod); err == nil {
 		if metav1.IsControlledBy(pod, workspace) {
 			if err := r.Delete(ctx, pod); err != nil && !errors.IsNotFound(err) {
 				return ctrl.Result{}, fmt.Errorf("delete runtime Pod while finalizing Workspace: %w", err)
@@ -584,11 +578,7 @@ func (r *WorkspaceReconciler) releaseWriteClaims(ctx context.Context, workspace 
 // hot-mount helpers are absent, the Workspace releases parent mounts and Worktree
 // write claims. Helper cleanup is checked before relinquishing the writer Lease.
 func (r *WorkspaceReconciler) releaseClaims(ctx context.Context, workspace *workspacesv1alpha1.Workspace) error {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
-	if err := reader.Get(ctx, client.ObjectKeyFromObject(workspace), new(corev1.Pod)); err == nil {
+	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(workspace), new(corev1.Pod)); err == nil {
 		return nil
 	} else if !errors.IsNotFound(err) {
 		return err
@@ -721,11 +711,7 @@ func (r *WorkspaceReconciler) resolveWorkspaceDependencies(ctx context.Context, 
 
 		if mount.WorktreeRef != nil {
 			captured := new(repositoriesv1alpha1.Worktree)
-			reader := r.APIReader
-			if reader == nil {
-				reader = r.Client
-			}
-			if err := reader.Get(ctx, client.ObjectKey{Namespace: workspace.Namespace, Name: mount.WorktreeRef.Name}, captured); err != nil {
+			if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: workspace.Namespace, Name: mount.WorktreeRef.Name}, captured); err != nil {
 				return nil, "", "", err
 			}
 			if captured.Status.VolumeClaimName != volume.PersistentVolumeClaim.ClaimName || worktreeownership.MountsClosed(captured) {

@@ -26,7 +26,7 @@ func TestAdmissionSerializesWritersAndRetainsReaders(t *testing.T) {
 	require.NoError(t, repositories.AddToScheme(scheme))
 	repository := &repositories.Repository{ObjectMeta: metav1.ObjectMeta{Name: testSourceName, Namespace: metav1.NamespaceDefault, UID: testRepositoryUID, Generation: 1}, Status: repositories.RepositoryStatus{ObservedGeneration: 1, VolumeClaimName: testSourceName, Conditions: []metav1.Condition{{Type: repositories.RepositoryConditionStorageReady, Status: metav1.ConditionTrue, ObservedGeneration: 1}}}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repository).Build()
-	gate := Gate{Client: c}
+	gate := Gate{Client: c, Reader: c}
 	// Two controllers must not both pass admission before either creates its Job.
 	var workers sync.WaitGroup
 	results := make(chan string, 2)
@@ -79,7 +79,7 @@ func TestAdmissionRejectsStaleReadiness(t *testing.T) {
 	require.NoError(t, repositories.AddToScheme(scheme))
 	repository := &repositories.Repository{ObjectMeta: metav1.ObjectMeta{Name: testSourceName, Namespace: metav1.NamespaceDefault, UID: testRepositoryUID, Generation: 2}, Status: repositories.RepositoryStatus{ObservedGeneration: 1, VolumeClaimName: testSourceName, Conditions: []metav1.Condition{{Type: repositories.RepositoryConditionStorageReady, Status: metav1.ConditionTrue, ObservedGeneration: 1}}}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repository).Build()
-	gate := Gate{Client: c}
+	gate := Gate{Client: c, Reader: c}
 	acquired, err := gate.Acquire(t.Context(), repository, "clone", Clone, true)
 	require.NoError(t, err)
 	require.Equal(t, NotReserved, acquired)
@@ -98,7 +98,7 @@ func TestOldBootstrapCannotPublishOverNewSyncState(t *testing.T) {
 	stale := repository.DeepCopy()
 	repository.Status.Conditions = []metav1.Condition{{Type: repositories.RepositoryConditionStorageReady, Status: metav1.ConditionFalse, Reason: "SyncFailed", ObservedGeneration: 1}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repository).Build()
-	gate := Gate{Client: c}
+	gate := Gate{Client: c, Reader: c}
 	// A bootstrap reconcile can span an entire sync. Generation alone cannot
 	// distinguish its old result from the newer status at the same generation.
 	acquired, err := gate.Acquire(t.Context(), stale, "bootstrap", Write, false)
@@ -124,7 +124,7 @@ func TestAdmissionRetainsReservationWhileConsumersStop(t *testing.T) {
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repository, pod).Build()
-	gate := Gate{Client: c}
+	gate := Gate{Client: c, Reader: c}
 	admission, err := gate.Acquire(t.Context(), repository, "sync", Write, true)
 	require.NoError(t, err)
 	require.Equal(t, Reserved, admission, "a reservation alone does not permit consumer creation")

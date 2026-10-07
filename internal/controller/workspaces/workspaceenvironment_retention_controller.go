@@ -15,6 +15,8 @@ import (
 // the shared service; its queue contains ordinary Environment names.
 type WorkspaceEnvironmentRetentionReconciler struct {
 	client.Client
+	// APIReader is required. It bypasses the informer cache; SetupWithManager
+	// sets it from the manager.
 	APIReader client.Reader
 	Runtime   processruntime.Runtime
 }

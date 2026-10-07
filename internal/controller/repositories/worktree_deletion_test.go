@@ -42,7 +42,7 @@ func TestWorktreeDeletionWaitsForPendingClaim(t *testing.T) {
 				worktree.Status.VolumeClaimName = scenario.claimName
 			}
 			require.NoError(t, kube.Create(t.Context(), worktree))
-			gate := repositoryaccess.Gate{Client: kube}
+			gate := repositoryaccess.Gate{Client: kube, Reader: kube}
 			admission, err := gate.Acquire(t.Context(), repository, repositoryaccess.Token("clone", worktree), repositoryaccess.Clone, true)
 			require.NoError(t, err)
 			require.Equal(t, repositoryaccess.Admitted, admission)

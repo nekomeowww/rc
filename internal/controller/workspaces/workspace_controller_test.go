@@ -75,7 +75,7 @@ func TestWorkspaceCreatesHomeWhileWorktreeIsProvisioning(t *testing.T) {
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(workspace, worktree, &corev1.PersistentVolumeClaim{}).
 		WithObjects(workspace, worktree).Build()
-	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
+	reconciler := &WorkspaceReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
 	key := client.ObjectKeyFromObject(workspace)
 
 	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
@@ -139,7 +139,7 @@ func TestWorkspaceRuntimeUsesDeferredWorktreeAndLifecycleActions(t *testing.T) {
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(workspace, worktree, home, &corev1.Pod{}).
 		WithObjects(workspace, worktree, home).Build()
-	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
+	reconciler := &WorkspaceReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
 	key := client.ObjectKeyFromObject(workspace)
 
 	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
@@ -199,7 +199,7 @@ func TestWorkspaceMountsExplicitWorktreeMetadataAtStableVolumeRoot(t *testing.T)
 		},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()
-	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
+	reconciler := &WorkspaceReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
 	workspace := &workspacesv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{Name: "explicit-worktree", Namespace: testNamespace},
 		Spec: workspacesv1alpha1.WorkspaceSpec{Mounts: []workspacesv1alpha1.WorkspaceMount{{
@@ -289,7 +289,7 @@ func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 		WithStatusSubresource(workspace, environment, worktree, &workspacesv1alpha1.WorkspaceExec{}, &corev1.PersistentVolumeClaim{}, &corev1.Pod{}).
 		WithObjects(environment, worktree, workspace).
 		Build()
-	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme, RunnerImage: "ghcr.io/example/rc/runner:test"}
+	reconciler := &WorkspaceReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, RunnerImage: "ghcr.io/example/rc/runner:test"}
 	key := types.NamespacedName{Name: workspace.Name, Namespace: workspace.Namespace}
 
 	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
@@ -420,9 +420,9 @@ func TestWorkspaceSuspendsAfterIdleTimeout(t *testing.T) {
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, process, home).WithObjects(workspace, home, process).Build()
 	// Lifecycle decisions run independently; the runtime reconciler applies
 	// the resulting desired state and confirms the compute has stopped.
-	_, retentionErr := (&WorkspaceRetentionReconciler{Client: kubeClient}).Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
+	_, retentionErr := (&WorkspaceRetentionReconciler{Client: kubeClient, APIReader: kubeClient}).Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
 	requirements.NoError(retentionErr)
-	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme}
+	reconciler := &WorkspaceReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme}
 	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: workspace.Name, Namespace: workspace.Namespace}})
 	requirements.NoError(err, "reconcile idle Workspace")
 	persisted := new(workspacesv1alpha1.Workspace)
@@ -475,7 +475,7 @@ func TestWorkspaceNeverMutatesUnownedRuntimePod(t *testing.T) {
 				WithStatusSubresource(workspace, home, foreignPod, &workspacesv1alpha1.WorkspaceExec{}).
 				WithObjects(workspace, home, foreignPod).
 				Build()
-			reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme}
+			reconciler := &WorkspaceReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme}
 			key := client.ObjectKeyFromObject(workspace)
 
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
@@ -511,7 +511,7 @@ func TestWorkspaceDeletionLeavesUnownedSameNamePod(t *testing.T) {
 		WithStatusSubresource(workspace, foreignPod, &workspacesv1alpha1.WorkspaceExec{}).
 		WithObjects(workspace, foreignPod).
 		Build()
-	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme}
+	reconciler := &WorkspaceReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme}
 	key := client.ObjectKeyFromObject(workspace)
 
 	requirements.NoError(kubeClient.Delete(ctx, workspace), "request Workspace deletion")
@@ -548,9 +548,9 @@ func TestWorkspaceSuspendsWithoutExecutions(t *testing.T) {
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, home).WithObjects(workspace, home).Build()
 	// Lifecycle decisions run independently; the runtime reconciler applies
 	// the resulting desired state and confirms the compute has stopped.
-	_, retentionErr := (&WorkspaceRetentionReconciler{Client: kubeClient}).Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
+	_, retentionErr := (&WorkspaceRetentionReconciler{Client: kubeClient, APIReader: kubeClient}).Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
 	requirements.NoError(retentionErr)
-	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme}
+	reconciler := &WorkspaceReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme}
 	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: workspace.Name, Namespace: workspace.Namespace}})
 	requirements.NoError(err, "reconcile idle Workspace")
 	persisted := new(workspacesv1alpha1.Workspace)

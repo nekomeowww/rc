@@ -107,7 +107,7 @@ func TestReadyWorkspaceAdmitsCurrentMountsWithoutListingWorktrees(t *testing.T) 
 	require.NoError(t, kube.Update(ctx, helper))
 	_, err = r.Reconcile(ctx, req)
 	require.NoError(t, err)
-	gate := worktreeownership.MountAccess{Client: kube}
+	gate := worktreeownership.MountAccess{Client: kube, Reader: kube}
 	drained, err := gate.Close(ctx, worktree)
 	require.NoError(t, err)
 	assert.False(t, drained, "terminating helpers retain their admission")
@@ -144,7 +144,7 @@ func TestSuspendingWorkspaceReleasesClosedMount(t *testing.T) {
 	require.NoError(t, controllerutil.SetControllerReference(workspace, home, scheme))
 	require.NoError(t, controllerutil.SetControllerReference(workspace, pod, scheme))
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(worktree, workspace, home).WithObjects(worktree, workspace, home, pod).Build()
-	gate := worktreeownership.MountAccess{Client: kube}
+	gate := worktreeownership.MountAccess{Client: kube, Reader: kube}
 	admitted, err := gate.Admit(ctx, worktree, workspace)
 	require.NoError(t, err)
 	require.True(t, admitted)

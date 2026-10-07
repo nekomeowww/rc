@@ -62,6 +62,8 @@ var repositoryExecStatus = oneShotStatusAdapter[*repositoriesv1alpha1.Repository
 // RepositoryExecReconciler reconciles a RepositoryExec object.
 type RepositoryExecReconciler struct {
 	client.Client
+	// APIReader is required. It bypasses the informer cache; SetupWithManager
+	// sets it from the manager.
 	APIReader   client.Reader
 	Scheme      *runtime.Scheme
 	RunnerImage string
@@ -79,13 +81,9 @@ func (r *RepositoryExecReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	log := logf.FromContext(ctx)
 	// Request status and Job existence must reflect completed API writes, not
 	// informer delivery order. This preserves at-most-once execution.
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
 	exec := new(repositoriesv1alpha1.RepositoryExec)
 
-	err := reader.Get(ctx, req.NamespacedName, exec)
+	err := r.APIReader.Get(ctx, req.NamespacedName, exec)
 	if err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -106,7 +104,7 @@ func (r *RepositoryExecReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 	}
 
-	job, jobState, err := observeOneShotJob(ctx, reader, exec, exec.Status.JobName)
+	job, jobState, err := observeOneShotJob(ctx, r.APIReader, exec, exec.Status.JobName)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("observe Repository Exec Job: %w", err)
 	}

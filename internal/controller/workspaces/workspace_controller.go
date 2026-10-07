@@ -171,6 +171,10 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
+	if result, handled, err := r.reconcileRuntimeRecovery(ctx, workspace); handled {
+		return result, err
+	}
+
 	resolved, reason, message, err := r.resolveWorkspaceBase(ctx, workspace)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -358,9 +362,17 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if !metav1.IsControlledBy(pod, workspace) {
 		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "RuntimePodConflict", "A Pod with the Workspace runtime name exists but is not owned by this Workspace")
 	}
+	// The Pod may have terminated since the early recovery observation. Re-enter
+	// recovery on the next turn rather than running readiness/mount logic on it.
+	if runtimePodTerminal(pod) {
+		return ctrl.Result{Requeue: true}, nil
+	}
 	expectedTopology, err := workspaceTopologyHash(workspace, resolved)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if !pod.DeletionTimestamp.IsZero() {
+		return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Stopping", "Workspace runtime Pod is stopping")
 	}
 	currentClaims := resolved.writeClaims
 	if pod.Annotations[workspaceTopologyAnnotation] != expectedTopology {
@@ -563,8 +575,9 @@ func (r *WorkspaceReconciler) releaseWriteClaims(ctx context.Context, workspace 
 	return nil
 }
 
-// releaseClaims keeps reservations while a runtime Pod exists. Once it is absent,
-// the Workspace releases both parent mounts and Worktree write claims.
+// releaseClaims keeps reservations while a runtime Pod exists. Once it and all
+// hot-mount helpers are absent, the Workspace releases parent mounts and Worktree
+// write claims. Helper cleanup is checked before relinquishing the writer Lease.
 func (r *WorkspaceReconciler) releaseClaims(ctx context.Context, workspace *workspacesv1alpha1.Workspace) error {
 	reader := r.APIReader
 	if reader == nil {
@@ -573,6 +586,13 @@ func (r *WorkspaceReconciler) releaseClaims(ctx context.Context, workspace *work
 	if err := reader.Get(ctx, client.ObjectKeyFromObject(workspace), new(corev1.Pod)); err == nil {
 		return nil
 	} else if !errors.IsNotFound(err) {
+		return err
+	}
+
+	// removeHotMounts verifies helper and cleanup Pod absence through the API
+	// reader; cached absence must not release another writer into an old mount.
+	removed, err := r.removeHotMounts(ctx, workspace)
+	if err != nil || !removed {
 		return err
 	}
 
@@ -1214,6 +1234,12 @@ func (r *WorkspaceReconciler) setWorkspaceStatus(ctx context.Context, key types.
 		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 			Type: workspacesv1alpha1.WorkspaceConditionOutdated, Status: outdatedStatus,
 			ObservedGeneration: current.Generation, Reason: outdatedReason, Message: outdatedMessage,
+		})
+	}
+	if readyStatus == metav1.ConditionTrue || reason == "Suspended" {
+		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type: workspacesv1alpha1.WorkspaceConditionDegraded, Status: metav1.ConditionFalse,
+			ObservedGeneration: current.Generation, Reason: reason, Message: message,
 		})
 	}
 	meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{

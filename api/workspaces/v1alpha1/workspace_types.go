@@ -35,6 +35,7 @@ const (
 	WorkspaceDesiredStateSuspended                   WorkspaceDesiredState    = "Suspended"
 	WorkspaceRetentionPolicyRetain                   WorkspaceRetentionPolicy = "Retain"
 	WorkspaceRetentionPolicyDeleteAfterProcessesExit WorkspaceRetentionPolicy = "DeleteAfterProcessesExit"
+	WorkspaceConditionDegraded                                                = "Degraded"
 	WorkspaceConditionReady                                                   = ConditionReady
 	WorkspaceConditionOutdated                                                = ConditionOutdated
 )

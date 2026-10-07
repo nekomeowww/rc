@@ -3,15 +3,15 @@
 <picture>
   <source
     width="100%"
-    srcset="./docs/images/overview-3x1-dark.webp"
+    srcset="./docs/images/cover-3x1-dark.webp"
     media="(prefers-color-scheme: dark)"
   />
   <source
     width="100%"
-    srcset="./docs/images/overview-3x1-light.webp"
+    srcset="./docs/images/cover-3x1-light.webp"
     media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)"
   />
-  <img width="100%" src="./docs/images/overview-3x1-light.webp" />
+  <img width="100%" src="./docs/images/cover-3x1-light.webp" />
 </picture>
 
 `rc` runs persistent, Kubernetes-backed development workspaces for coding agents.
@@ -429,20 +429,6 @@ kubectl delete -f https://github.com/nekomeowww/rc/releases/latest/download/inst
 
 Removing the CRDs deletes all rc custom resources from the cluster. Review the associated PVC retention behavior before uninstalling a production deployment.
 
-<picture>
-  <source
-    width="100%"
-    srcset="./docs/images/cover-3x1-dark.webp"
-    media="(prefers-color-scheme: dark)"
-  />
-  <source
-    width="100%"
-    srcset="./docs/images/cover-3x1-light.webp"
-    media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)"
-  />
-  <img width="100%" src="./docs/images/cover-3x1-light.webp" />
-</picture>
-
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the Kind development loop, tests, generated-file rules, and pull request checklist.
@@ -459,3 +445,17 @@ Experimental platform guides:
 
 Licensed under the
 [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0).
+
+<picture>
+  <source
+    width="100%"
+    srcset="./docs/images/overview-3x1-dark.webp"
+    media="(prefers-color-scheme: dark)"
+  />
+  <source
+    width="100%"
+    srcset="./docs/images/overview-3x1-light.webp"
+    media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)"
+  />
+  <img width="100%" src="./docs/images/overview-3x1-light.webp" />
+</picture>

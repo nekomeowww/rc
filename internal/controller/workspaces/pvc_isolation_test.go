@@ -49,6 +49,21 @@ var _ = Describe("PVC isolation", func() {
 			Type: repositories.RepositoryConditionStorageReady, Status: metav1.ConditionTrue, Reason: "RepositoryReady", LastTransitionTime: metav1.Now(), ObservedGeneration: repository.Generation,
 		}}}
 		Expect(k8sClient.Status().Update(ctx, repository)).To(Succeed())
+		filesystem := corev1.PersistentVolumeFilesystem
+		storageClass := isolationStorageClass
+		sourceClaim := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: isolationSourceClaim, Namespace: namespace.Name},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				StorageClassName: &storageClass,
+				AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				VolumeMode:       &filesystem,
+				Resources:        corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}},
+			},
+		}
+		Expect(controllerutil.SetControllerReference(repository, sourceClaim, k8sClient.Scheme())).To(Succeed())
+		Expect(k8sClient.Create(ctx, sourceClaim)).To(Succeed())
+		sourceClaim.Status = corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound, Capacity: sourceClaim.Spec.Resources.Requests.DeepCopy()}
+		Expect(k8sClient.Status().Update(ctx, sourceClaim)).To(Succeed())
 
 		claimNames := make([]string, 0, 4)
 		for _, kind := range []string{isolationRepository, isolationWorktree, isolationWorkspace, isolationEnvironment} {
@@ -68,7 +83,7 @@ var _ = Describe("PVC isolation", func() {
 		}
 		claims := new(corev1.PersistentVolumeClaimList)
 		Expect(k8sClient.List(ctx, claims, client.InNamespace(namespace.Name))).To(Succeed())
-		Expect(claims.Items).To(HaveLen(4))
+		Expect(claims.Items).To(HaveLen(5), "include the separate clone source plus four same-name resource claims")
 	})
 
 	It("recovers a legacy Workspace home without adopting it as an Environment draft", func() {

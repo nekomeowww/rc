@@ -66,13 +66,7 @@ func Build(executions []workspacesv1alpha1.WorkspaceExec, policy *workspacesv1al
 	if policy == nil {
 		return plan
 	}
-	ttl, maximum := DefaultTTL, policy.MaxEntries
-	if policy.TTLAfterFinished != nil && policy.TTLAfterFinished.Duration > 0 {
-		ttl = policy.TTLAfterFinished.Duration
-	}
-	if maximum <= 0 {
-		maximum = DefaultMaxEntries
-	}
+	ttl, maximum := Effective(policy)
 	slices.SortFunc(eligible, func(a, b int) int {
 		if order := executions[b].Status.CompletedAt.Compare(executions[a].Status.CompletedAt.Time); order != 0 {
 			return order

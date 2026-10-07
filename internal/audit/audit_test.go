@@ -144,7 +144,7 @@ func TestRepositoryReservationAttributesHolderByRoleToken(t *testing.T) {
 	workspace := &workspaces.Workspace{ObjectMeta: fixtureMeta(testWorkspaceName)}
 	reserved := &coordinationv1.Lease{ObjectMeta: fixtureMeta("rc-repository-reserved")}
 	// Gate tokens use the consumer role ("workspace"), not the Kind ("Workspace").
-	reserved.Annotations = map[string]string{repositoryaccess.StateAnnotation: `{"mode":"mount","holders":{"` + repositoryaccess.Token("workspace", workspace) + `":true}}`}
+	reserved.Annotations = map[string]string{repositoryaccess.StateAnnotation: `{"mode":"mount","holders":{"workspace/` + string(workspace.UID) + "/" + workspace.Name + `":true}}`}
 	malformed := &coordinationv1.Lease{ObjectMeta: fixtureMeta("rc-repository-malformed")}
 	malformed.Annotations = map[string]string{repositoryaccess.StateAnnotation: "{"}
 	unrelated := &coordinationv1.Lease{ObjectMeta: fixtureMeta("rc-repository-unrelated")}

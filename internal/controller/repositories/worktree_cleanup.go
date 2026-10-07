@@ -17,6 +17,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	"github.com/nekomeowww/rc/internal/holdset"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
 	"github.com/nekomeowww/rc/internal/volumeclaim"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
@@ -197,12 +198,13 @@ func (r *WorktreeReconciler) cloneGate() repositoryaccess.Gate {
 	return repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}
 }
 
-// cloneToken identifies a Worktree's clone reservation on its Repository.
-func cloneToken(worktree *repositoriesv1alpha1.Worktree) string {
-	return repositoryaccess.Token("clone", worktree)
+// cloneHolder identifies a Worktree's clone reservation on its Repository.
+func cloneHolder(worktree *repositoriesv1alpha1.Worktree) holdset.Holder {
+	return repositoryaccess.Holder(repositoryaccess.KindWorktree, worktree, repositoryaccess.Clone)
 }
 
 // releaseClone drops a Worktree's clone reservation. It is idempotent.
 func (r *WorktreeReconciler) releaseClone(ctx context.Context, worktree *repositoriesv1alpha1.Worktree) error {
-	return r.cloneGate().Release(ctx, worktree.Namespace, cloneToken(worktree))
+	key := client.ObjectKey{Namespace: worktree.Namespace, Name: worktree.Spec.RepositoryRef.Name}
+	return r.cloneGate().ReleaseNamed(ctx, key, cloneHolder(worktree).Key())
 }

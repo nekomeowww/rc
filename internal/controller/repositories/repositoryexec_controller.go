@@ -90,7 +90,7 @@ func (r *RepositoryExecReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	token := repositoryaccess.Token("repository-exec", exec)
+	holder := repositoryaccess.Holder(repositoryaccess.KindRepositoryExec, exec, repositoryaccess.Write)
 	succeeded := meta.FindStatusCondition(exec.Status.Conditions, repositoriesv1alpha1.RepositoryExecConditionSucceeded)
 	if succeeded != nil && succeeded.Status != metav1.ConditionUnknown && exec.Status.CompletedAt == nil {
 		if err := repositoryExecStatus.backfillCompletedAt(ctx, r.Client, req.NamespacedName); err != nil {
@@ -102,7 +102,7 @@ func (r *RepositoryExecReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 	}
 	if !exec.DeletionTimestamp.IsZero() || (succeeded != nil && succeeded.Status != metav1.ConditionUnknown) {
-		done, err := releaseRepositoryOperation(ctx, r.Client, r.APIReader, exec, token, exec.Status.JobName)
+		done, err := releaseRepositoryOperation(ctx, r.Client, r.APIReader, exec, exec.Spec.RepositoryRef.Name, holder.Key(), exec.Status.JobName)
 		if err != nil || done {
 			return ctrl.Result{}, err
 		}
@@ -149,7 +149,7 @@ func (r *RepositoryExecReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
-	admission, err := (repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}).Acquire(ctx, repository, token, repositoryaccess.Write, true)
+	admission, err := (repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}).Acquire(ctx, repository, holder, true)
 	if err != nil {
 		return ctrl.Result{}, err
 	}

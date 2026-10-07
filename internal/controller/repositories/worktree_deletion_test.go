@@ -43,7 +43,7 @@ func TestWorktreeDeletionWaitsForPendingClaim(t *testing.T) {
 			}
 			require.NoError(t, kube.Create(t.Context(), worktree))
 			gate := repositoryaccess.Gate{Client: kube, Reader: kube}
-			admission, err := gate.Acquire(t.Context(), repository, repositoryaccess.Token("clone", worktree), repositoryaccess.Clone, true)
+			admission, err := gate.Acquire(t.Context(), repository, cloneHolder(worktree), true)
 			require.NoError(t, err)
 			require.Equal(t, repositoryaccess.Admitted, admission)
 			claim := worktreeVolumeClaim(worktree, scenario.claimName, repository.Status.VolumeClaimName, worktreestorage.Plan{StorageClassName: repository.Spec.Storage.StorageClassName, Size: repository.Spec.Storage.Size, AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}})

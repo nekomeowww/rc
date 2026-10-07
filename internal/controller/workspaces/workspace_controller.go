@@ -327,7 +327,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 
 		gate := repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}
-		token := repositoryaccess.Token("workspace", workspace)
+		holder := repositoryaccess.Holder(repositoryaccess.KindWorkspace, workspace, repositoryaccess.Mount)
 		for _, mount := range workspace.Spec.Mounts {
 			if mount.RepositoryRef == nil {
 				continue
@@ -336,12 +336,12 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			if err := r.Get(ctx, client.ObjectKey{Namespace: workspace.Namespace, Name: mount.RepositoryRef.Name}, repository); err != nil {
 				return ctrl.Result{}, err
 			}
-			admission, err := gate.Acquire(ctx, repository, token, repositoryaccess.Mount, true)
+			admission, err := gate.Acquire(ctx, repository, holder, true)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
 			if admission != repositoryaccess.Admitted {
-				if err := gate.Release(ctx, workspace.Namespace, token); err != nil {
+				if err := r.releaseRepositoryMounts(ctx, workspace); err != nil {
 					return ctrl.Result{}, err
 				}
 				return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "RepositoryNotReady", "Repository is busy or not ready for mounting")
@@ -657,11 +657,29 @@ func (r *WorkspaceReconciler) releaseClaims(ctx context.Context, workspace *work
 		return err
 	}
 
-	if err := (repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}).Release(ctx, workspace.Namespace, repositoryaccess.Token("workspace", workspace)); err != nil {
+	if err := r.releaseRepositoryMounts(ctx, workspace); err != nil {
 		return err
 	}
 
 	return r.releaseWriteClaims(ctx, workspace, nil)
+}
+
+// releaseRepositoryMounts drops this Workspace's mount reservations from every
+// Repository in its namespace, including Repositories no longer in its spec.
+// Call only after the runtime and hot-mount helpers are gone.
+func (r *WorkspaceReconciler) releaseRepositoryMounts(ctx context.Context, workspace *workspacesv1alpha1.Workspace) error {
+	repositories := new(repositoriesv1alpha1.RepositoryList)
+	if err := r.APIReader.List(ctx, repositories, client.InNamespace(workspace.Namespace)); err != nil {
+		return fmt.Errorf("list Repositories to release Workspace mounts: %w", err)
+	}
+	gate := repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}
+	key := repositoryaccess.Holder(repositoryaccess.KindWorkspace, workspace, repositoryaccess.Mount).Key()
+	for index := range repositories.Items {
+		if err := gate.Release(ctx, &repositories.Items[index], key); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspace *workspacesv1alpha1.Workspace) (*resolvedWorkspace, string, string, error) {

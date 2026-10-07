@@ -83,8 +83,8 @@ func (r *RepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return r.reconcileDeletionBlocked(ctx, repository)
 	}
 	gate := repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}
-	token := repositoryaccess.Token("bootstrap", repository)
-	if busy, err := gate.Busy(ctx, repository, token); err != nil {
+	holder := repositoryaccess.Holder(repositoryaccess.KindRepository, repository, repositoryaccess.Write)
+	if busy, err := gate.Busy(ctx, repository, holder.Key()); err != nil {
 		return ctrl.Result{}, err
 	} else if busy {
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
@@ -159,7 +159,7 @@ func (r *RepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if ready := meta.FindStatusCondition(repository.Status.Conditions, repositoriesv1alpha1.RepositoryConditionStorageReady); ready != nil &&
 		ready.Status == metav1.ConditionTrue && repository.Status.ObservedGeneration == repository.Generation &&
 		claim.Status.Phase == corev1.ClaimBound {
-		if err := gate.Release(ctx, repository.Namespace, token); err != nil {
+		if err := gate.Release(ctx, repository, holder.Key()); err != nil {
 			return ctrl.Result{}, err
 		}
 		if repository.Status.LastUpdatedAt != nil {
@@ -174,7 +174,7 @@ func (r *RepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if err == nil {
 			if completionTime := completedJob.Status.CompletionTime; completionTime != nil {
 				if condition := jobCondition(completedJob, batchv1.JobComplete); condition != nil && condition.Status == corev1.ConditionTrue {
-					admission, err := gate.Acquire(ctx, repository, token, repositoryaccess.Write, true)
+					admission, err := gate.Acquire(ctx, repository, holder, true)
 					if err != nil {
 						return ctrl.Result{}, err
 					}
@@ -184,7 +184,7 @@ func (r *RepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 					if err := setRepositoryStorageReady(ctx, r.Client, repository, metav1.ConditionTrue, "RepositoryReady", "Repository Git content is ready", claim.Name, completionTime); err != nil {
 						return ctrl.Result{}, err
 					}
-					return ctrl.Result{}, gate.Release(ctx, repository.Namespace, token)
+					return ctrl.Result{}, gate.Release(ctx, repository, holder.Key())
 				}
 			}
 		} else if !errors.IsNotFound(err) {
@@ -199,7 +199,7 @@ func (r *RepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	err = r.Get(ctx, jobKey, job)
 	if errors.IsNotFound(err) {
-		admission, err := gate.Acquire(ctx, repository, token, repositoryaccess.Write, false)
+		admission, err := gate.Acquire(ctx, repository, holder, false)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -233,7 +233,7 @@ func (r *RepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, setRepositoryStorageReady(ctx, r.Client, repository, metav1.ConditionFalse, "BootstrapJobConflict", "A bootstrap Job with the expected name is not owned by this Repository", claim.Name, nil)
 	}
 	if jobFinished(job) {
-		admission, err := gate.Acquire(ctx, repository, token, repositoryaccess.Write, false)
+		admission, err := gate.Acquire(ctx, repository, holder, false)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -249,13 +249,13 @@ func (r *RepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if err := setRepositoryStorageReady(ctx, r.Client, repository, metav1.ConditionFalse, "BootstrapFailed", message, claim.Name, nil); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, gate.Release(ctx, repository.Namespace, token)
+		return ctrl.Result{}, gate.Release(ctx, repository, holder.Key())
 	}
 	if condition := jobCondition(job, batchv1.JobComplete); condition != nil && condition.Status == corev1.ConditionTrue {
 		if err := setRepositoryStorageReady(ctx, r.Client, repository, metav1.ConditionTrue, "RepositoryReady", "Repository Git content is ready", claim.Name, job.Status.CompletionTime); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, gate.Release(ctx, repository.Namespace, token)
+		return ctrl.Result{}, gate.Release(ctx, repository, holder.Key())
 	}
 
 	return ctrl.Result{}, setRepositoryStorageReady(ctx, r.Client, repository, metav1.ConditionFalse, "Initializing", "Repository bootstrap Job is running", claim.Name, nil)

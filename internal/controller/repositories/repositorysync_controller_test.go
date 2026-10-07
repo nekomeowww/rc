@@ -11,6 +11,7 @@ import (
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/holdset"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
 	"github.com/nekomeowww/rc/internal/worktreestorage"
 	"github.com/stretchr/testify/require"
@@ -60,7 +61,7 @@ func TestSyncRetainsResultAndBlocksExecAndClones(t *testing.T) {
 	require.Nil(t, job.Spec.TTLSecondsAfterFinished, "an unrecorded result must survive long controller outages")
 	require.Contains(t, job.Spec.Template.Spec.Containers[0].Args, "refs/heads/main")
 	gate := repositoryaccess.Gate{Client: c, Reader: c}
-	admitted, err := gate.Acquire(t.Context(), repository, "new-clone", repositoryaccess.Clone, true)
+	admitted, err := gate.Acquire(t.Context(), repository, holdset.Holder{Kind: repositoryaccess.KindWorktree, Name: "new-clone", UID: "new-clone-uid", Mode: repositoryaccess.Clone}, true)
 	require.NoError(t, err)
 	require.Equal(t, repositoryaccess.NotReserved, admitted)
 	exec := &repositoriesv1alpha1.RepositoryExec{ObjectMeta: metav1.ObjectMeta{Name: "other-command", Namespace: repository.Namespace, UID: "other-command"}, Spec: repositoriesv1alpha1.RepositoryExecSpec{RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: repository.Name}, Command: []string{"git", "status"}}}
@@ -87,7 +88,7 @@ func TestSyncRetainsResultAndBlocksExecAndClones(t *testing.T) {
 	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(repository), repository))
 	require.True(t, meta.IsStatusConditionTrue(repository.Status.Conditions, repositoriesv1alpha1.RepositoryConditionStorageReady))
 	require.NotNil(t, repository.Status.LastUpdatedAt)
-	admitted, err = gate.Acquire(t.Context(), repository, "new-clone", repositoryaccess.Clone, true)
+	admitted, err = gate.Acquire(t.Context(), repository, holdset.Holder{Kind: repositoryaccess.KindWorktree, Name: "new-clone", UID: "new-clone-uid", Mode: repositoryaccess.Clone}, true)
 	require.NoError(t, err)
 	require.Equal(t, repositoryaccess.Admitted, admitted)
 	require.NoError(t, c.Delete(t.Context(), job))
@@ -101,14 +102,15 @@ func TestSyncWaitsForAdmittedCloneAndRetryUsesNewRequest(t *testing.T) {
 	t.Parallel()
 	c, repository, request := syncFixture(t)
 	gate := repositoryaccess.Gate{Client: c, Reader: c}
-	acquired, err := gate.Acquire(t.Context(), repository, "pending-clone", repositoryaccess.Clone, true)
+	clone := holdset.Holder{Kind: repositoryaccess.KindWorktree, Name: "pending-clone", UID: "pending-clone-uid", Mode: repositoryaccess.Clone}
+	acquired, err := gate.Acquire(t.Context(), repository, clone, true)
 	require.NoError(t, err)
 	require.Equal(t, repositoryaccess.Admitted, acquired)
 	reconcileSync(t, c, request)
 	jobs := new(batchv1.JobList)
 	require.NoError(t, c.List(t.Context(), jobs))
 	require.Empty(t, jobs.Items)
-	require.NoError(t, gate.Release(t.Context(), repository.Namespace, "pending-clone"))
+	require.NoError(t, gate.Release(t.Context(), repository, clone.Key()))
 	reconcileSync(t, c, request)
 	job := new(batchv1.Job)
 	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(request), job))

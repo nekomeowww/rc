@@ -144,7 +144,7 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			return ctrl.Result{}, fmt.Errorf("get Repository: %w", err)
 		}
 
-		admission, err := r.cloneGate().Acquire(ctx, repository, cloneToken(worktree), repositoryaccess.Clone, true)
+		admission, err := r.cloneGate().Acquire(ctx, repository, cloneHolder(worktree), true)
 		if err != nil {
 			return ctrl.Result{}, err
 		}

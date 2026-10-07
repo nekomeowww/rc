@@ -49,7 +49,7 @@ func (r *RepositorySyncReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if err := r.APIReader.Get(ctx, req.NamespacedName, request); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	token := repositoryaccess.Token("sync", request)
+	holder := repositoryaccess.Holder(repositoryaccess.KindRepositorySync, request, repositoryaccess.Write)
 	terminal := meta.FindStatusCondition(request.Status.Conditions, repositoriesv1alpha1.RepositorySyncConditionSucceeded)
 	if !request.DeletionTimestamp.IsZero() || (terminal != nil && terminal.Status != metav1.ConditionUnknown) {
 		if !request.DeletionTimestamp.IsZero() && request.Status.JobName != "" && (terminal == nil || terminal.Status == metav1.ConditionUnknown) {
@@ -64,7 +64,7 @@ func (r *RepositorySyncReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 				}
 			}
 		}
-		done, err := releaseRepositoryOperation(ctx, r.Client, r.APIReader, request, token, request.Status.JobName)
+		done, err := releaseRepositoryOperation(ctx, r.Client, r.APIReader, request, request.Spec.RepositoryRef.Name, holder.Key(), request.Status.JobName)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -116,7 +116,7 @@ func (r *RepositorySyncReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, r.setResult(ctx, request, metav1.ConditionUnknown, "RepositoryNotReady", "Waiting for Repository bootstrap", nil)
 	}
 	gate := repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}
-	admission, err := gate.Acquire(ctx, repository, token, repositoryaccess.Write, false)
+	admission, err := gate.Acquire(ctx, repository, holder, false)
 	if err != nil {
 		return ctrl.Result{}, err
 	}

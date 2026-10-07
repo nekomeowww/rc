@@ -23,7 +23,7 @@ const repositoryOperationFinalizer = "repositories.rc.ayaka.io/parent-access"
 // releaseRepositoryOperation waits for consumers to stop before releasing the
 // parent. A lost Job alone is not proof that its Pods have stopped. Deletion
 // uses foreground propagation, then removes the operation's finalizer last.
-func releaseRepositoryOperation(ctx context.Context, c client.Client, reader client.Reader, owner client.Object, token, jobName string) (bool, error) {
+func releaseRepositoryOperation(ctx context.Context, c client.Client, reader client.Reader, owner client.Object, repositoryName, key, jobName string) (bool, error) {
 	if jobName != "" {
 		job := new(batchv1.Job)
 		err := reader.Get(ctx, client.ObjectKey{Namespace: owner.GetNamespace(), Name: jobName}, job)
@@ -60,7 +60,7 @@ func releaseRepositoryOperation(ctx context.Context, c client.Client, reader cli
 			}
 		}
 	}
-	if err := (repositoryaccess.Gate{Client: c, Reader: reader}).Release(ctx, owner.GetNamespace(), token); err != nil {
+	if err := (repositoryaccess.Gate{Client: c, Reader: reader}).ReleaseNamed(ctx, client.ObjectKey{Namespace: owner.GetNamespace(), Name: repositoryName}, key); err != nil {
 		return false, err
 	}
 	if controllerutil.ContainsFinalizer(owner, repositoryOperationFinalizer) {

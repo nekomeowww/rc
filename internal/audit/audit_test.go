@@ -27,6 +27,7 @@ import (
 )
 
 const testWorktree = "code"
+const testWorkspaceName = "dev"
 const testNamespace = "audit"
 const unrelatedCase = "unrelated"
 const targetRBACCase = "target-rbac"
@@ -51,14 +52,18 @@ func fixtureMeta(name string) metav1.ObjectMeta {
 
 func terminalRecord(name string) *workspaces.WorkspaceExec {
 	finished := metav1.NewTime(auditNow.Add(-14 * 24 * time.Hour))
-	return &workspaces.WorkspaceExec{ObjectMeta: fixtureMeta(name), Spec: workspaces.WorkspaceExecSpec{TargetRef: workspaces.WorkspaceExecTargetReference{Kind: workspaces.WorkspaceExecTargetWorkspace, Name: "dev"}}, Status: workspaces.WorkspaceExecStatus{Phase: workspaces.WorkspaceExecPhaseSucceeded, CompletedAt: &finished}}
+	metadata := fixtureMeta(name)
+	controller := true
+	metadata.Finalizers = []string{workspaceExecFinalizer}
+	metadata.OwnerReferences = []metav1.OwnerReference{{APIVersion: workspaceAPI, Kind: workspaceKind, Name: testWorkspaceName, UID: "dev-uid", Controller: &controller}}
+	return &workspaces.WorkspaceExec{ObjectMeta: metadata, Spec: workspaces.WorkspaceExecSpec{TargetRef: workspaces.WorkspaceExecTargetReference{Kind: workspaces.WorkspaceExecTargetWorkspace, Name: testWorkspaceName}}, Status: workspaces.WorkspaceExecStatus{Phase: workspaces.WorkspaceExecPhaseSucceeded, CompletedAt: &finished}}
 }
 
 // allowHistory is a test adapter, not an implementation of retention policy.
 func allowHistory(records []workspaces.WorkspaceExec, target client.Object, _ time.Time) (executionretention.Plan, error) {
 	plan := executionretention.Plan{}
 	for i := range records {
-		if records[i].GetAnnotations()["test/deny"] == "" && (target == nil || target.GetAnnotations()["test/deny"] == "") {
+		if !records[i].Spec.Retain && records[i].GetAnnotations()["test/deny"] == "" && (target == nil || target.GetAnnotations()["test/deny"] == "") {
 			plan.Remove = append(plan.Remove, i)
 		} else {
 			plan.Keep = append(plan.Keep, i)
@@ -69,6 +74,10 @@ func allowHistory(records []workspaces.WorkspaceExec, target client.Object, _ ti
 
 func reviewPlan(t *testing.T, kube client.Client) ReviewedPlan {
 	t.Helper()
+	target := &workspaces.Workspace{ObjectMeta: fixtureMeta(testWorkspaceName)}
+	if err := kube.Create(t.Context(), target); err != nil && !apierrors.IsAlreadyExists(err) {
+		require.NoError(t, err)
+	}
 	review, err := Review(t.Context(), kube, testNamespace, HistoryPolicy{HistoryFor: DefaultPolicy().HistoryFor}, nil, allowHistory, auditNow)
 	require.NoError(t, err)
 	return review
@@ -104,7 +113,7 @@ func TestPartialVisibilityIsUnknownAndBlocksPrune(t *testing.T) {
 func TestWorktreeSafetyExcludesRecentExecLocksLeasesAndMounts(t *testing.T) {
 	worktree := &repositories.Worktree{ObjectMeta: fixtureMeta(testWorktree)}
 	for name, related := range map[string]client.Object{
-		"mount":       &workspaces.Workspace{ObjectMeta: fixtureMeta("dev"), Spec: workspaces.WorkspaceSpec{Mounts: []workspaces.WorkspaceMount{{Name: testWorktree, WorktreeRef: &workspaces.LocalReference{Name: testWorktree}}}}},
+		"mount":       &workspaces.Workspace{ObjectMeta: fixtureMeta(testWorkspaceName), Spec: workspaces.WorkspaceSpec{Mounts: []workspaces.WorkspaceMount{{Name: testWorktree, WorktreeRef: &workspaces.LocalReference{Name: testWorktree}}}}},
 		"active-exec": &repositories.WorktreeExec{ObjectMeta: fixtureMeta("exec"), Spec: repositories.WorktreeExecSpec{WorktreeRef: repositories.WorktreeReference{Name: testWorktree}}},
 		"recent-exec": &repositories.WorktreeExec{ObjectMeta: fixtureMeta("exec"), Spec: repositories.WorktreeExecSpec{WorktreeRef: repositories.WorktreeReference{Name: testWorktree}}, Status: repositories.WorktreeExecStatus{Conditions: []metav1.Condition{{Type: repositories.WorktreeExecConditionSucceeded, Status: metav1.ConditionFalse, LastTransitionTime: metav1.NewTime(auditNow)}}}},
 		"lease":       worktreeclaim.DeletionLease(worktree),
@@ -145,7 +154,7 @@ func TestLongUnhealthyAndLargeStorageAreEvidenceNotDeletePermission(t *testing.T
 }
 
 func TestDataResourcesStayInDoctorOnly(t *testing.T) {
-	workspace := &workspaces.Workspace{ObjectMeta: fixtureMeta("dev")}
+	workspace := &workspaces.Workspace{ObjectMeta: fixtureMeta(testWorkspaceName)}
 	worktree := &repositories.Worktree{ObjectMeta: fixtureMeta(testWorktree)}
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: fixtureMeta(testWorktree), Spec: corev1.PersistentVolumeClaimSpec{Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("40Gi")}}}}
 	kube := fixtureClient(t, workspace, worktree, pvc)
@@ -156,7 +165,7 @@ func TestDataResourcesStayInDoctorOnly(t *testing.T) {
 }
 
 func TestReviewRequiresCanonicalPolicyAndOnlyTightensAge(t *testing.T) {
-	kube := fixtureClient(t, terminalRecord("done"))
+	kube := fixtureClient(t, terminalRecord("done"), &workspaces.Workspace{ObjectMeta: fixtureMeta(testWorkspaceName)})
 	for _, tc := range []struct {
 		name     string
 		age      time.Duration
@@ -186,7 +195,7 @@ func TestReviewUsesTargetScopedCountPolicy(t *testing.T) {
 	newer.Status.CompletedAt = new(metav1.NewTime(auditNow.Add(-8 * 24 * time.Hour)))
 	older.Status.CompletedAt = new(metav1.NewTime(auditNow.Add(-9 * 24 * time.Hour)))
 	target := &workspaces.Workspace{
-		ObjectMeta: fixtureMeta("dev"),
+		ObjectMeta: fixtureMeta(testWorkspaceName),
 		Spec: workspaces.WorkspaceSpec{ExecutionRetention: &workspaces.ExecutionRetentionPolicy{
 			TTLAfterFinished: &metav1.Duration{Duration: 365 * 24 * time.Hour},
 			MaxEntries:       1,
@@ -203,14 +212,29 @@ func TestCanonicalReviewFailsClosedWithoutTarget(t *testing.T) {
 	require.ErrorContains(t, err, "target is absent")
 }
 
+func TestCanonicalReviewRetainsUnprovenOwnerIdentity(t *testing.T) {
+	for _, mutate := range []func(*workspaces.WorkspaceExec){
+		func(record *workspaces.WorkspaceExec) { record.OwnerReferences = nil },
+		func(record *workspaces.WorkspaceExec) { record.OwnerReferences[0].UID = "" },
+		func(record *workspaces.WorkspaceExec) { record.OwnerReferences[0].UID = "previous-target" },
+	} {
+		record := terminalRecord("unproven")
+		mutate(record)
+		target := &workspaces.Workspace{ObjectMeta: fixtureMeta(testWorkspaceName), Spec: workspaces.WorkspaceSpec{ExecutionRetention: &workspaces.ExecutionRetentionPolicy{}}}
+		review, err := Review(t.Context(), fixtureClient(t, record, target), testNamespace, HistoryPolicy{HistoryFor: 7 * 24 * time.Hour}, nil, executionretention.BuildForTarget, auditNow)
+		require.NoError(t, err)
+		assert.Empty(t, review.Plan().Candidates)
+	}
+}
+
 func TestHistorySafetyBeforeAndAfterConfirmation(t *testing.T) {
 	// ROOT CAUSE: an age-only plan ignored policy, and its full snapshot check
 	// unnecessarily rejected unrelated objects. Reevaluate only the selected
 	// record and direct target after review; canonical denials remain authoritative.
-	for _, change := range []string{"active", "undated", "recent", "finalizer", "attachment", "retain", targetPolicyCase, targetRBACCase, replacementCase} {
+	for _, change := range []string{"active", "undated", "recent", "finalizer", "attachment", "retain", "owner", targetPolicyCase, targetRBACCase, replacementCase} {
 		t.Run(change, func(t *testing.T) {
 			record := terminalRecord("done")
-			target := &workspaces.Workspace{ObjectMeta: fixtureMeta("dev")}
+			target := &workspaces.Workspace{ObjectMeta: fixtureMeta(testWorkspaceName)}
 			kube := fixtureClient(t, record, target)
 			review := reviewPlan(t, kube)
 			require.Len(t, review.Plan().Candidates, 1)
@@ -228,6 +252,8 @@ func TestHistorySafetyBeforeAndAfterConfirmation(t *testing.T) {
 				record.Status.AttachedClients = 1
 			case "retain":
 				record.Annotations = map[string]string{"test/deny": "canonical-decision"}
+			case "owner":
+				record.OwnerReferences = nil
 			case replacementCase:
 				record.UID = replacementCase
 			case targetPolicyCase:
@@ -273,6 +299,8 @@ func TestSavedSelectionRevalidation(t *testing.T) {
 				record.Labels = map[string]string{"updated": "yes"}
 				require.NoError(t, kube.Update(t.Context(), record))
 			case absentCase:
+				record.Finalizers = nil
+				require.NoError(t, kube.Update(t.Context(), record))
 				require.NoError(t, kube.Delete(t.Context(), record))
 			case "duplicate":
 				saved.Candidates = append(saved.Candidates, saved.Candidates[0])
@@ -313,7 +341,7 @@ func TestPartialPruneCanResumeWithoutRepeatingDeletes(t *testing.T) {
 	result, err = Prune(t.Context(), base, review, auditNow)
 	require.NoError(t, err)
 	assert.Len(t, result.Requested, 1)
-	assert.Len(t, result.Absent, 2)
+	assert.Len(t, result.Pending, 2)
 }
 
 func TestReviewBlocksLeaseAndLeavesLegacyHistoryDiagnosticOnly(t *testing.T) {

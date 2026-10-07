@@ -100,8 +100,13 @@ func Review(ctx context.Context, reader client.Reader, namespace string, policy 
 // historyEligible adds transport safety and the CLI's age floor to the canonical
 // decision. No retention/target policy is inferred from diagnostic projections.
 func historyEligible(r Resource, policy HistoryPolicy, now time.Time) bool {
-	if !isHistory(r) || !r.Terminal || r.CompletedAt == nil || !older(*r.CompletedAt, now, policy.HistoryFor) || r.UID == "" || r.ResourceVersion == "" || r.DeletingAt != nil || len(r.Finalizers) > 0 || r.AttachedClients > 0 {
+	if !isHistory(r) || !r.Terminal || r.CompletedAt == nil || !older(*r.CompletedAt, now, policy.HistoryFor) || r.UID == "" || r.ResourceVersion == "" || r.DeletingAt != nil || r.AttachedClients > 0 {
 		return false
+	}
+	for _, finalizer := range r.Finalizers {
+		if finalizer != workspaceExecFinalizer {
+			return false
+		}
 	}
 	return true
 }
@@ -117,7 +122,7 @@ func evaluateHistory(records []Resource, target client.Object, now time.Time, ev
 			return nil, fmt.Errorf("unsupported history object %T", records[i].object)
 		}
 		typed[i] = *record.DeepCopy()
-		if ownerUIDMismatch(&typed[i], target) {
+		if ownerIdentityMismatch(&typed[i], target) {
 			typed[i].Spec.Retain = true
 		}
 	}
@@ -135,16 +140,12 @@ func evaluateHistory(records []Resource, target client.Object, now time.Time, ev
 	return removable, nil
 }
 
-func ownerUIDMismatch(record *workspacesv1alpha1.WorkspaceExec, target client.Object) bool {
-	if target == nil {
-		return false
+func ownerIdentityMismatch(record *workspacesv1alpha1.WorkspaceExec, target client.Object) bool {
+	if target == nil || target.GetUID() == "" {
+		return true
 	}
-	for _, owner := range record.OwnerReferences {
-		if owner.Controller != nil && *owner.Controller && owner.Kind == string(record.Spec.TargetRef.Kind) && owner.Name == record.Spec.TargetRef.Name {
-			return owner.UID != "" && target.GetUID() != "" && owner.UID != target.GetUID()
-		}
-	}
-	return false
+	owner := metav1.GetControllerOf(record)
+	return owner == nil || owner.APIVersion != workspaceAPI || owner.Kind != string(record.Spec.TargetRef.Kind) || owner.Name != record.Spec.TargetRef.Name || owner.UID == "" || owner.UID != target.GetUID()
 }
 
 func historyReferenced(r Resource, g graph) bool {

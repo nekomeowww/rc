@@ -100,11 +100,15 @@ current-context: fixture
 		// Explicitly injected test approval keeps fixture policy independent from
 		// the production canonical evaluator.
 		var evaluate audit.HistoryEvaluator = func(records []workspaces.WorkspaceExec, _ client.Object, _ time.Time) (executionretention.Plan, error) {
-			remove := make([]int, len(records))
+			plan := executionretention.Plan{}
 			for i := range records {
-				remove[i] = i
+				if records[i].Spec.Retain {
+					plan.Keep = append(plan.Keep, i)
+				} else {
+					plan.Remove = append(plan.Remove, i)
+				}
 			}
-			return executionretention.Plan{Remove: remove}, nil
+			return plan, nil
 		}
 		if options.missingEvaluator {
 			evaluate = nil

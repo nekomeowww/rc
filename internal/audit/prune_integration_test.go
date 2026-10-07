@@ -31,10 +31,13 @@ func TestAPIConditionalDeletion(t *testing.T) {
 	kube, err := client.NewWithWatch(config, client.Options{Scheme: fixtureClient(t).Scheme()})
 	require.NoError(t, err)
 	require.NoError(t, kube.Create(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNamespace}}))
+	target := &workspaces.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testNamespace}}
+	require.NoError(t, kube.Create(t.Context(), target))
+	controller := true
 	now := time.Now().UTC().Truncate(time.Second)
 	for _, race := range []string{"version", "uid", "none"} {
 		t.Run(race, func(t *testing.T) {
-			record := &workspaces.WorkspaceExec{ObjectMeta: metav1.ObjectMeta{Name: "completed-" + race, Namespace: testNamespace}, Spec: workspaces.WorkspaceExecSpec{TargetRef: workspaces.WorkspaceExecTargetReference{Kind: workspaces.WorkspaceExecTargetWorkspace, Name: "dev"}, Command: []string{"true"}}}
+			record := &workspaces.WorkspaceExec{ObjectMeta: metav1.ObjectMeta{Name: "completed-" + race, Namespace: testNamespace, Finalizers: []string{workspaceExecFinalizer}, OwnerReferences: []metav1.OwnerReference{{APIVersion: workspaceAPI, Kind: workspaceKind, Name: target.Name, UID: target.UID, Controller: &controller}}}, Spec: workspaces.WorkspaceExecSpec{TargetRef: workspaces.WorkspaceExecTargetReference{Kind: workspaces.WorkspaceExecTargetWorkspace, Name: testWorkspaceName}, Command: []string{"true"}}}
 			require.NoError(t, kube.Create(t.Context(), record))
 			record.Status.Phase = workspaces.WorkspaceExecPhaseSucceeded
 			record.Status.CompletedAt = new(metav1.NewTime(now.Add(-30 * 24 * time.Hour)))

@@ -3,6 +3,7 @@ package workspaces
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -83,7 +84,7 @@ func TestRetentionRevalidatesConcurrentChanges(t *testing.T) {
 					return base.Update(ctx, a)
 				}
 			}})
-			_, err := (&executionRetentionService{Client: kube}).reconcileExecutionHistory(t.Context(), ws.Namespace, executionTargetReference(ws), ws.Spec.ExecutionRetention)
+			_, err := (&executionRetentionService{Client: kube}).reconcileExecutionHistory(t.Context(), ws.Namespace, executionTargetReference(ws), ws.UID, ws.Spec.ExecutionRetention)
 			require.NoError(t, err)
 			require.NoError(t, base.Get(t.Context(), client.ObjectKeyFromObject(a), a))
 			require.NoError(t, base.Get(t.Context(), client.ObjectKeyFromObject(b), b))
@@ -108,7 +109,7 @@ func TestRetentionConflictDoesNotAbortBatch(t *testing.T) {
 		}
 		return c.Update(ctx, obj, opts...)
 	}})
-	_, err := (&executionRetentionService{Client: kube}).reconcileExecutionHistory(t.Context(), ws.Namespace, executionTargetReference(ws), ws.Spec.ExecutionRetention)
+	_, err := (&executionRetentionService{Client: kube}).reconcileExecutionHistory(t.Context(), ws.Namespace, executionTargetReference(ws), ws.UID, ws.Spec.ExecutionRetention)
 	require.NoError(t, err)
 	require.NoError(t, base.Get(t.Context(), client.ObjectKeyFromObject(a), a))
 	require.NoError(t, base.Get(t.Context(), client.ObjectKeyFromObject(b), b))
@@ -175,7 +176,7 @@ func TestRetentionRechecksAfterFinalizerAndCountChanges(t *testing.T) {
 				},
 			})
 			r := &executionRetentionService{Client: kube}
-			result, err := r.reconcileExecutionHistory(ctx, ws.Namespace, executionTargetReference(ws), ws.Spec.ExecutionRetention)
+			result, err := r.reconcileExecutionHistory(ctx, ws.Namespace, executionTargetReference(ws), ws.UID, ws.Spec.ExecutionRetention)
 			require.NoError(t, err)
 			require.Positive(t, result.RequeueAfter)
 			require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(b), b))
@@ -196,7 +197,7 @@ func TestRetentionUsesAPIReaderInsteadOfStaleCache(t *testing.T) {
 	process.Spec.Retain = true
 	api := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ws, process).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	r := &executionRetentionService{Client: cache, APIReader: api}
-	_, err := r.reconcileExecutionHistory(ctx, ws.Namespace, executionTargetReference(ws), ws.Spec.ExecutionRetention)
+	_, err := r.reconcileExecutionHistory(ctx, ws.Namespace, executionTargetReference(ws), ws.UID, ws.Spec.ExecutionRetention)
 	require.NoError(t, err)
 	require.NoError(t, cache.Get(ctx, client.ObjectKeyFromObject(process), process))
 	require.True(t, process.DeletionTimestamp.IsZero())
@@ -221,8 +222,31 @@ func TestRetentionCountIgnoresPreviousTargetIdentity(t *testing.T) {
 	newer := metav1.NewTime(now.Add(time.Minute))
 	previous.Status.CompletedAt = &newer
 	require.NoError(t, kube.Create(ctx, previous))
-	_, err := (&executionRetentionService{Client: kube}).reconcileExecutionHistory(ctx, ws.Namespace, executionTargetReference(ws), ws.Spec.ExecutionRetention)
+	_, err := (&executionRetentionService{Client: kube}).reconcileExecutionHistory(ctx, ws.Namespace, executionTargetReference(ws), ws.UID, ws.Spec.ExecutionRetention)
 	require.NoError(t, err)
 	require.NoError(t, kube.Get(ctx, client.ObjectKeyFromObject(current), current))
 	require.True(t, current.DeletionTimestamp.IsZero(), "an old target's newer result must not evict this target's sole record")
+}
+
+func TestRetentionBatchIgnoresDeletingPreviousTargetIdentity(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	kube, ws, current := retentionFixture(t)
+	controller := true
+	current.OwnerReferences = []metav1.OwnerReference{{APIVersion: workspacesv1alpha1.GroupVersion.String(), Kind: "Workspace", Name: ws.Name, UID: ws.UID, Controller: &controller}}
+	require.NoError(t, kube.Update(ctx, current))
+	for i := 0; i < executionCleanupBatch; i++ {
+		previous := current.DeepCopy()
+		previous.Name = fmt.Sprintf("previous-%02d", i)
+		previous.UID, previous.ResourceVersion = "", ""
+		previous.Finalizers = []string{"test/hold"}
+		previous.OwnerReferences[0].UID = "previous-target"
+		require.NoError(t, kube.Create(ctx, previous))
+		require.NoError(t, kube.Delete(ctx, previous))
+	}
+
+	_, err := (&executionRetentionService{Client: kube}).reconcileExecutionHistory(ctx, ws.Namespace, executionTargetReference(ws), ws.UID, ws.Spec.ExecutionRetention)
+	require.NoError(t, err)
+	require.NoError(t, kube.Get(ctx, client.ObjectKeyFromObject(current), current))
+	require.False(t, current.DeletionTimestamp.IsZero(), "old target cleanup must not exhaust the current target's batch")
 }

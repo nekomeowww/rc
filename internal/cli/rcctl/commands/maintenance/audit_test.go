@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	workspaces "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/executionretention"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	"github.com/spf13/cobra"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -95,9 +97,15 @@ current-context: fixture
 		cmd := &cobra.Command{Use: "rcctl", SilenceErrors: true, SilenceUsage: true}
 		flags := kubeconfig.NewFlags()
 		flags.AddFlags(cmd.PersistentFlags())
-		// Explicitly injected test approval. Production Register passes nil until
-		// T-663 is integrated; this fixture does not implement retention policy.
-		var evaluate audit.HistoryEvaluator = func(client.Object, client.Object, time.Time) (bool, error) { return true, nil }
+		// Explicitly injected test approval keeps fixture policy independent from
+		// the production canonical evaluator.
+		var evaluate audit.HistoryEvaluator = func(records []workspaces.WorkspaceExec, _ client.Object, _ time.Time) (executionretention.Plan, error) {
+			remove := make([]int, len(records))
+			for i := range records {
+				remove[i] = i
+			}
+			return executionretention.Plan{Remove: remove}, nil
+		}
 		if options.missingEvaluator {
 			evaluate = nil
 		}

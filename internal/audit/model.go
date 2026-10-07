@@ -5,6 +5,8 @@ package audit
 import (
 	"time"
 
+	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/executionretention"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -122,15 +124,11 @@ type CleanupPlan struct {
 	Candidates []ObjectRef   `json:"candidates"`
 }
 
-// HistoryEvaluator is the integration boundary for T-663's canonical evaluator.
-// The adapter must use that evaluator, not reimplement retention defaults,
-// retain intent, target policy or completion rules. Inputs are typed, uncached
-// objects; target is nil only after confirmed absence. Missing targets and
-// unsupported kinds must fail closed unless the canonical policy permits them.
-// It must be pure (no I/O), reject active/undated/attached records, and evaluate
-// the effective target policy at now. False means retained; errors mean unknown.
-// A nil evaluator disables pruning until the canonical implementation is wired.
-type HistoryEvaluator func(record, target client.Object, now time.Time) (bool, error)
+// HistoryEvaluator applies the canonical target-scoped retention policy to a
+// complete WorkspaceExec snapshot. Count limits cannot be evaluated one record
+// at a time. Inputs are typed, uncached objects; target is nil only after
+// confirmed absence. Missing targets and unsupported kinds fail closed.
+type HistoryEvaluator func(records []workspacesv1alpha1.WorkspaceExec, target client.Object, now time.Time) (executionretention.Plan, error)
 
 // ReviewedPlan can only be obtained through Review's fresh scan. Its private
 // selection cannot be widened by editing a returned JSON plan after confirmation.

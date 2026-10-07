@@ -1,10 +1,13 @@
 package audit
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
+	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -52,21 +55,28 @@ func Review(ctx context.Context, reader client.Reader, namespace string, policy 
 	}
 	g := newGraph(inventory)
 	eligible := map[string]ObjectRef{}
+	groups := map[string][]Resource{}
 	for _, r := range inventory.Resources {
-		if !isHistory(r) || !r.Terminal {
+		if r.Kind != workspaceExecKind {
 			continue
 		}
-		target, _ := g.resolve(executionTarget(r))
-		allowed, err := historyEligible(r, target.object, policy, now, evaluate)
-		if err != nil {
-			return review, fmt.Errorf("retention unknown for %s: %w", key(r.ObjectRef), err)
-		}
-		if !allowed || historyReferenced(r, g) {
-			continue
-		}
-		eligible[key(r.ObjectRef)] = r.ObjectRef
-		review.plan.Candidates = append(review.plan.Candidates, r.ObjectRef)
+		groups[key(executionTarget(r))] = append(groups[key(executionTarget(r))], r)
 	}
+	for _, records := range groups {
+		target, _ := g.resolve(executionTarget(records[0]))
+		removable, err := evaluateHistory(records, target.object, now, evaluate)
+		if err != nil {
+			return review, fmt.Errorf("retention unknown for %s: %w", key(executionTarget(records[0])), err)
+		}
+		for i, r := range records {
+			if !removable[i] || !historyEligible(r, policy, now) || historyReferenced(r, g) {
+				continue
+			}
+			eligible[key(r.ObjectRef)] = r.ObjectRef
+			review.plan.Candidates = append(review.plan.Candidates, r.ObjectRef)
+		}
+	}
+	slices.SortFunc(review.plan.Candidates, func(a, b ObjectRef) int { return cmp.Compare(key(a), key(b)) })
 	if saved != nil {
 		for _, ref := range saved.Candidates {
 			current, exists := g.byKey[key(ref)]
@@ -89,14 +99,52 @@ func Review(ctx context.Context, reader client.Reader, namespace string, policy 
 
 // historyEligible adds transport safety and the CLI's age floor to the canonical
 // decision. No retention/target policy is inferred from diagnostic projections.
-func historyEligible(r Resource, target client.Object, policy HistoryPolicy, now time.Time, evaluate HistoryEvaluator) (bool, error) {
+func historyEligible(r Resource, policy HistoryPolicy, now time.Time) bool {
 	if !isHistory(r) || !r.Terminal || r.CompletedAt == nil || !older(*r.CompletedAt, now, policy.HistoryFor) || r.UID == "" || r.ResourceVersion == "" || r.DeletingAt != nil || len(r.Finalizers) > 0 || r.AttachedClients > 0 {
-		return false, nil
+		return false
 	}
+	return true
+}
+
+func evaluateHistory(records []Resource, target client.Object, now time.Time, evaluate HistoryEvaluator) (map[int]bool, error) {
 	if evaluate == nil {
-		return false, fmt.Errorf("canonical history evaluator unavailable")
+		return nil, fmt.Errorf("canonical history evaluator unavailable")
 	}
-	return evaluate(r.object, target, now)
+	typed := make([]workspacesv1alpha1.WorkspaceExec, len(records))
+	for i := range records {
+		record, ok := records[i].object.(*workspacesv1alpha1.WorkspaceExec)
+		if !ok {
+			return nil, fmt.Errorf("unsupported history object %T", records[i].object)
+		}
+		typed[i] = *record.DeepCopy()
+		if ownerUIDMismatch(&typed[i], target) {
+			typed[i].Spec.Retain = true
+		}
+	}
+	plan, err := evaluate(typed, target, now)
+	if err != nil {
+		return nil, err
+	}
+	removable := make(map[int]bool, len(plan.Remove))
+	for _, i := range plan.Remove {
+		if i < 0 || i >= len(records) || removable[i] {
+			return nil, fmt.Errorf("canonical evaluator returned invalid removal index %d", i)
+		}
+		removable[i] = true
+	}
+	return removable, nil
+}
+
+func ownerUIDMismatch(record *workspacesv1alpha1.WorkspaceExec, target client.Object) bool {
+	if target == nil {
+		return false
+	}
+	for _, owner := range record.OwnerReferences {
+		if owner.Controller != nil && *owner.Controller && owner.Kind == string(record.Spec.TargetRef.Kind) && owner.Name == record.Spec.TargetRef.Name {
+			return owner.UID != "" && target.GetUID() != "" && owner.UID != target.GetUID()
+		}
+	}
+	return false
 }
 
 func historyReferenced(r Resource, g graph) bool {
@@ -140,7 +188,7 @@ func validatePlan(plan CleanupPlan, now time.Time) error {
 	}
 	seen := map[string]bool{}
 	for _, ref := range plan.Candidates {
-		if !isHistory(Resource{ObjectRef: ref}) || ref.Namespace == "" || ref.Name == "" || ref.UID == "" || ref.ResourceVersion == "" || (plan.Namespace != "" && ref.Namespace != plan.Namespace) || seen[key(ref)] {
+		if ref.APIVersion != workspaceAPI || ref.Kind != workspaceExecKind || ref.Namespace == "" || ref.Name == "" || ref.UID == "" || ref.ResourceVersion == "" || (plan.Namespace != "" && ref.Namespace != plan.Namespace) || seen[key(ref)] {
 			return fmt.Errorf("invalid or duplicate terminal-history identity: %s", key(ref))
 		}
 		seen[key(ref)] = true

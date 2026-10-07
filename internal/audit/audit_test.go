@@ -22,6 +22,7 @@ import (
 
 	repositories "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspaces "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/executionretention"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
 )
 
@@ -54,8 +55,16 @@ func terminalRecord(name string) *workspaces.WorkspaceExec {
 }
 
 // allowHistory is a test adapter, not an implementation of retention policy.
-func allowHistory(record, target client.Object, _ time.Time) (bool, error) {
-	return record.GetAnnotations()["test/deny"] == "" && (target == nil || target.GetAnnotations()["test/deny"] == ""), nil
+func allowHistory(records []workspaces.WorkspaceExec, target client.Object, _ time.Time) (executionretention.Plan, error) {
+	plan := executionretention.Plan{}
+	for i := range records {
+		if records[i].GetAnnotations()["test/deny"] == "" && (target == nil || target.GetAnnotations()["test/deny"] == "") {
+			plan.Remove = append(plan.Remove, i)
+		} else {
+			plan.Keep = append(plan.Keep, i)
+		}
+	}
+	return plan, nil
 }
 
 func reviewPlan(t *testing.T, kube client.Client) ReviewedPlan {
@@ -156,7 +165,9 @@ func TestReviewRequiresCanonicalPolicyAndOnlyTightensAge(t *testing.T) {
 		unknown  bool
 	}{
 		{"not-integrated", time.Hour, nil, 0, true},
-		{"canonical-retain", time.Hour, func(client.Object, client.Object, time.Time) (bool, error) { return false, nil }, 0, false},
+		{"canonical-retain", time.Hour, func(records []workspaces.WorkspaceExec, _ client.Object, _ time.Time) (executionretention.Plan, error) {
+			return executionretention.Plan{Keep: []int{0}}, nil
+		}, 0, false},
 		{"canonical-permit", time.Hour, allowHistory, 1, false},
 		{"stricter-cli-age", 30 * 24 * time.Hour, allowHistory, 0, false},
 	} {
@@ -167,6 +178,29 @@ func TestReviewRequiresCanonicalPolicyAndOnlyTightensAge(t *testing.T) {
 			assert.Equal(t, tc.unknown, len(review.Unknowns) > 0)
 		})
 	}
+}
+
+func TestReviewUsesTargetScopedCountPolicy(t *testing.T) {
+	newer := terminalRecord("newer")
+	older := terminalRecord("older")
+	newer.Status.CompletedAt = new(metav1.NewTime(auditNow.Add(-8 * 24 * time.Hour)))
+	older.Status.CompletedAt = new(metav1.NewTime(auditNow.Add(-9 * 24 * time.Hour)))
+	target := &workspaces.Workspace{
+		ObjectMeta: fixtureMeta("dev"),
+		Spec: workspaces.WorkspaceSpec{ExecutionRetention: &workspaces.ExecutionRetentionPolicy{
+			TTLAfterFinished: &metav1.Duration{Duration: 365 * 24 * time.Hour},
+			MaxEntries:       1,
+		}},
+	}
+	review, err := Review(t.Context(), fixtureClient(t, newer, older, target), testNamespace, HistoryPolicy{HistoryFor: 7 * 24 * time.Hour}, nil, executionretention.BuildForTarget, auditNow)
+	require.NoError(t, err)
+	require.Len(t, review.Plan().Candidates, 1)
+	assert.Equal(t, older.Name, review.Plan().Candidates[0].Name)
+}
+
+func TestCanonicalReviewFailsClosedWithoutTarget(t *testing.T) {
+	_, err := Review(t.Context(), fixtureClient(t, terminalRecord("orphan")), testNamespace, HistoryPolicy{HistoryFor: 7 * 24 * time.Hour}, nil, executionretention.BuildForTarget, auditNow)
+	require.ErrorContains(t, err, "target is absent")
 }
 
 func TestHistorySafetyBeforeAndAfterConfirmation(t *testing.T) {
@@ -233,7 +267,7 @@ func TestSavedSelectionRevalidation(t *testing.T) {
 			case unrelatedCase:
 				require.NoError(t, kube.Create(t.Context(), terminalRecord("new-eligible")))
 			case "reference":
-				require.NoError(t, kube.Create(t.Context(), &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "consumer", Namespace: testNamespace, OwnerReferences: []metav1.OwnerReference{{APIVersion: workspaceAPI, Kind: "WorkspaceExec", Name: record.Name, UID: record.UID}}}}))
+				require.NoError(t, kube.Create(t.Context(), &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "consumer", Namespace: testNamespace, OwnerReferences: []metav1.OwnerReference{{APIVersion: workspaceAPI, Kind: workspaceExecKind, Name: record.Name, UID: record.UID}}}}))
 			case "changed":
 				require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(record), record))
 				record.Labels = map[string]string{"updated": "yes"}
@@ -282,19 +316,15 @@ func TestPartialPruneCanResumeWithoutRepeatingDeletes(t *testing.T) {
 	assert.Len(t, result.Absent, 2)
 }
 
-func TestReviewBlocksLeaseAndExecutionJob(t *testing.T) {
+func TestReviewBlocksLeaseAndLeavesLegacyHistoryDiagnosticOnly(t *testing.T) {
 	record := terminalRecord("reserved")
 	lease := &coordinationv1.Lease{ObjectMeta: fixtureMeta("reservation"), Spec: coordinationv1.LeaseSpec{HolderIdentity: new(string(record.UID))}}
 	assert.Empty(t, reviewPlan(t, fixtureClient(t, record, lease)).Plan().Candidates)
 	syncRecord := &repositories.RepositorySync{ObjectMeta: fixtureMeta("sync"), Spec: repositories.RepositorySyncSpec{RepositoryRef: repositories.RepositoryReference{Name: "source"}}, Status: repositories.RepositorySyncStatus{JobName: "sync-job", CompletedAt: record.Status.CompletedAt, Conditions: []metav1.Condition{{Type: repositories.WorktreeExecConditionSucceeded, Status: metav1.ConditionTrue, LastTransitionTime: *record.Status.CompletedAt}}}}
 	kube := fixtureClient(t, syncRecord)
-	review := reviewPlan(t, kube)
-	require.Len(t, review.Plan().Candidates, 1)
+	assert.Empty(t, reviewPlan(t, kube).Plan().Candidates)
 	require.NoError(t, kube.Create(t.Context(), &batchv1.Job{ObjectMeta: fixtureMeta("sync-job")}))
 	assert.Empty(t, reviewPlan(t, kube).Plan().Candidates)
-	result, err := Prune(t.Context(), kube, review, auditNow)
-	require.ErrorContains(t, err, "Job still exists")
-	assert.Empty(t, result.Requested)
 }
 
 func TestConfirmationCannotExtendPlanLifetime(t *testing.T) {

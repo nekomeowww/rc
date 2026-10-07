@@ -5,15 +5,17 @@ import (
 	"fmt"
 	"time"
 
+	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Prune applies the pre-confirmation Review, without any further LISTs.
-// Each selected record and its direct dependencies are GET again, then canonical
-// eligibility is reevaluated. UID/resourceVersion fence the DELETE itself.
+// Prune applies the pre-confirmation Review. Each selected record and its direct
+// dependencies are read again, then the complete target-scoped WorkspaceExec
+// set is listed so count-based canonical eligibility is reevaluated. UID and
+// resourceVersion fence the DELETE itself.
 // Cross-object references cannot be atomically fenced; orphan propagation keeps
 // late or unknown dependents and their data intact. Progress survives errors.
 func Prune(ctx context.Context, kube client.Client, review ReviewedPlan, now time.Time) (PruneResult, error) {
@@ -62,10 +64,29 @@ func Prune(ctx context.Context, kube client.Client, review ReviewedPlan, now tim
 				return result, fmt.Errorf("execution Job still exists for %s", key(ref))
 			}
 		}
+		var peers workspacesv1alpha1.WorkspaceExecList
+		if err := kube.List(ctx, &peers, client.InNamespace(ref.Namespace)); err != nil {
+			return result, fmt.Errorf("list WorkspaceExec peers for %s: %w", key(ref), err)
+		}
+		resources := make([]Resource, 0, len(peers.Items))
+		for i := range peers.Items {
+			peer := &peers.Items[i]
+			if peer.Spec.TargetRef != object.(*workspacesv1alpha1.WorkspaceExec).Spec.TargetRef {
+				continue
+			}
+			resources = append(resources, project(peer, ref.APIVersion, ref.Kind))
+		}
 		currentTime := now.Add(time.Since(started))
-		allowed, err := historyEligible(r, target, plan.Policy, currentTime, review.evaluate)
+		removable, err := evaluateHistory(resources, target, currentTime, review.evaluate)
 		if err != nil {
 			return result, fmt.Errorf("retention unknown for %s: %w", key(ref), err)
+		}
+		allowed := false
+		for i := range resources {
+			if resources[i].UID == ref.UID && removable[i] && historyEligible(resources[i], plan.Policy, currentTime) {
+				allowed = true
+				break
+			}
 		}
 		if !allowed {
 			return result, fmt.Errorf("history is no longer eligible: %s", key(ref))

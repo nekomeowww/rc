@@ -12,7 +12,8 @@ import (
 
 func TestPruneRequestBudget(t *testing.T) {
 	// ROOT CAUSE: two candidates triggered 39 LISTs after review (13*(N+1)).
-	// Review now scans once; execution only GETs each record, target and result.
+	// Review scans once; execution adds one target-scoped peer LIST per candidate
+	// so count-based retention is recomputed at the deletion boundary.
 	for _, count := range []int{1, 2, 100} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			objects := make([]client.Object, count)
@@ -41,7 +42,7 @@ func TestPruneRequestBudget(t *testing.T) {
 			_, err := Prune(t.Context(), kube, review, auditNow)
 			require.NoError(t, err)
 			t.Logf("review + prune: N=%d LIST=%d GET=%d DELETE=%d", count, lists, gets, deletes)
-			require.Equal(t, 13, lists, "candidate revalidation must not scan the inventory")
+			require.Equal(t, 13+count, lists, "candidate revalidation lists only WorkspaceExec peers")
 			require.Equal(t, 3*count, gets)
 			require.Equal(t, count, deletes)
 		})

@@ -43,7 +43,7 @@ func TestAPIConditionalDeletion(t *testing.T) {
 			require.NoError(t, err)
 			// Limit this API race to the current subtest's reviewed identity.
 			saved := review.Plan()
-			saved.Candidates = []ObjectRef{project(record, workspaceAPI, "WorkspaceExec").ObjectRef}
+			saved.Candidates = []ObjectRef{project(record, workspaceAPI, workspaceExecKind).ObjectRef}
 			review, err = Review(t.Context(), kube, testNamespace, saved.Policy, &saved, allowHistory, now)
 			require.NoError(t, err)
 			// ROOT CAUSE: GET alone cannot protect the subsequent DELETE. Mutate or

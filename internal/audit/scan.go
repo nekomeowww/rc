@@ -21,18 +21,19 @@ import (
 )
 
 const (
-	repoAPI         = "repositories.rc.ayaka.io/v1alpha1"
-	workspaceAPI    = "workspaces.rc.ayaka.io/v1alpha1"
-	pvcKind         = "PersistentVolumeClaim"
-	worktreeKind    = "Worktree"
-	workspaceKind   = "Workspace"
-	leaseKind       = "Lease"
-	podKind         = "Pod"
-	jobKind         = "Job"
-	ownerRelation   = "owner"
-	pvcRelation     = "storage"
-	runtimeRelation = "runtime"
-	mountRelation   = "mount"
+	repoAPI           = "repositories.rc.ayaka.io/v1alpha1"
+	workspaceAPI      = "workspaces.rc.ayaka.io/v1alpha1"
+	pvcKind           = "PersistentVolumeClaim"
+	worktreeKind      = "Worktree"
+	workspaceKind     = "Workspace"
+	workspaceExecKind = "WorkspaceExec"
+	leaseKind         = "Lease"
+	podKind           = "Pod"
+	jobKind           = "Job"
+	ownerRelation     = "owner"
+	pvcRelation       = "storage"
+	runtimeRelation   = "runtime"
+	mountRelation     = "mount"
 )
 
 // Scan reads all evidence in a namespace (or all namespaces when empty).

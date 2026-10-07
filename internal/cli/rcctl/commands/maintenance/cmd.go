@@ -15,6 +15,7 @@ import (
 
 	"github.com/nekomeowww/rc/internal/audit"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/cluster"
+	"github.com/nekomeowww/rc/internal/executionretention"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	clioutput "github.com/nekomeowww/rc/pkg/output"
 )
@@ -38,9 +39,7 @@ type pruneOptions struct {
 
 // Register attaches read-only doctor and previewable, confirmed history pruning.
 func Register(root *cobra.Command, flags *kubeconfig.Flags) {
-	// T-663 is not integrated at this baseline. A nil adapter keeps previews
-	// explicit about unknown retention and execution fails closed.
-	root.AddCommand(newDoctorCommand(flags), newPruneCommand(flags, nil))
+	root.AddCommand(newDoctorCommand(flags), newPruneCommand(flags, executionretention.BuildForTarget))
 }
 
 func newDoctorCommand(flags *kubeconfig.Flags) *cobra.Command {

@@ -47,7 +47,7 @@ func (g graph) resolve(ref ObjectRef) (Resource, bool) {
 func isRC(r Resource) bool { return r.APIVersion == repoAPI || r.APIVersion == workspaceAPI }
 
 func isHistory(r Resource) bool {
-	return (r.APIVersion == workspaceAPI && r.Kind == "WorkspaceExec") || (r.APIVersion == repoAPI && slices.Contains([]string{"WorktreeExec", "RepositoryExec", "RepositorySync"}, r.Kind))
+	return (r.APIVersion == workspaceAPI && r.Kind == workspaceExecKind) || (r.APIVersion == repoAPI && slices.Contains([]string{"WorktreeExec", "RepositoryExec", "RepositorySync"}, r.Kind))
 }
 
 func older(timestamp metav1.Time, now time.Time, age time.Duration) bool {

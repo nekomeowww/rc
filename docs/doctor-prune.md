@@ -1,24 +1,17 @@
 # Doctor and safe pruning (T-665)
 
 This replaces the uncommitted T-664 implementation at baseline
-`51d9ce86f84d9a704e4a23fde3546712589d9347`, in worktree `t664` on
-`codex/t664-doctor-gc`. No commits, deployment or real-cluster access are required.
+`51d9ce86f84d9a704e4a23fde3546712589d9347`.
 
 ## Current integration status
 
-T-663's canonical retention evaluator is **not present in this worktree**.
-`audit.HistoryEvaluator` defines the integration boundary; production registration
-passes nil. `doctor` works normally. A fresh `prune --dry-run` prints an empty plan
-and an explicit `UNKNOWN` warning on stderr; execution fails closed. The execution
-pipeline is tested using injected decisions, not a second retention implementation.
-
-The adapter must delegate to the canonical evaluator for terminal/completedAt,
-retain intent, effective target policy and attachment semantics. It receives typed
-record and target objects plus the evaluation time, performs no I/O, returns false
-for retained records and an error for unknown policy. A nil target means confirmed
-absence, not permission to delete. Unsupported kinds must remain ineligible unless
-an applicable canonical evaluator exists. Wire that adapter at `maintenance.Register`
-when T-663 is integrated; use the same adapter for review and deletion.
+T-663's canonical target-scoped retention evaluator is wired into production.
+Review groups a complete WorkspaceExec snapshot by target and evaluates TTL,
+retain intent and count limits together. Immediately before every DELETE, prune
+lists that target's current peers and runs the same evaluator again. Missing or
+deleting targets, unsupported history kinds, stale owner UIDs and unavailable
+policy evidence fail closed. Legacy Repository/Worktree execution records remain
+doctor evidence; prune only accepts WorkspaceExec identities.
 
 `--history-for` is an **additional** age floor (default 168h). Shortening it can
 never turn a canonical rejection into permission. Doctor's lifecycle projections
@@ -31,7 +24,7 @@ rcctl -n development doctor
 rcctl doctor -A -o json
 rcctl -n development prune --dry-run --history-for 336h
 rcctl -n development prune --dry-run -o json > plan.json
-# With the canonical adapter integrated, review the selected identities:
+# Review the selected identities:
 rcctl -n development prune
 rcctl prune --from-plan plan.json --yes
 ```
@@ -64,11 +57,12 @@ lifetime is never renewed. Expiry is checked again after confirmation and before
 DELETE. Partial visibility yields a non-executable fresh preview; saved-plan
 revalidation and execution fail when safety evidence is unknown.
 
-After confirmation, each candidate gets a fresh GET of itself, its direct target
-and any named execution Job. Eligibility, completion age, finalizers, attachment
-and canonical retain/target policy are rechecked. Every DELETE carries UID and
-resourceVersion preconditions with orphan propagation. The result distinguishes
-requested, observed absent, and pending deletion, including partial failures.
+After confirmation, each candidate gets a fresh GET of itself and its direct
+target, plus one WorkspaceExec LIST for that target. Eligibility, completion age,
+finalizers, attachment, retain intent, TTL and count rank are rechecked. Every
+DELETE carries UID and resourceVersion preconditions with orphan propagation. The
+result distinguishes requested, observed absent, and pending deletion, including
+partial failures.
 
 Kubernetes cannot atomically fence changes to a different object between GET and
 DELETE. New incoming references after review and target-policy changes after the
@@ -83,15 +77,15 @@ The before/after request regression uses a counting client, excluding API discov
 
 | Two eligible WorkspaceExec records, after review | Before | After |
 | --- | ---: | ---: |
-| LIST | 39 | 0 |
+| LIST | 39 | 2 |
 | GET | 4 | 6 |
 | DELETE | 2 | 2 |
 
 The two extra GETs reread target policy. The old execution rescanned all 13 kinds
-`N + 1` times after review. The new whole review/execution path uses 13 LISTs,
-`3N` GETs and `N` DELETEs for WorkspaceExec records that disappear immediately.
-Named execution Jobs add at most one GET per candidate. Already absent/pending
-records need only their own GET. The regression covers N = 1, 2 and 100.
+`N + 1` times after review. The new whole review/execution path uses `13 + N`
+LISTs, `3N` GETs and `N` DELETEs for WorkspaceExec records that disappear
+immediately. Already absent/pending records need only their own GET. The regression
+covers N = 1, 2 and 100.
 
 Removed: capability-gap baseline test, old command-name negative assertion,
 fake-client conditional-delete duplication, data-impact planning and full-snapshot
@@ -100,19 +94,9 @@ races use the isolated envtest API; one CLI happy path covers confirmation, save
 selection and retry. Detailed doctor graphs stay in unit tests, while the HTTP
 fixture contains only five objects.
 
-Measured source sizes (line/byte counts include comments; no generated code):
-
-| Scope | Before lines / bytes | After lines / bytes |
-| --- | ---: | ---: |
-| Audit + maintenance production Go (8 files) | 1,467 / 57,306 | 1,405 / 54,428 |
-| Audit + maintenance/root tests | 857 / 36,790 | 886 / 37,297 |
-| CLI fixture (13 objects → 5) | 692 / 16,929 | 22 / 6,880 |
-
-Production shrank by 62 lines / 2,878 bytes; fixture bytes fell 59.4%. Tests grew
-slightly because the smaller set of conditional-delete tests now includes both
-real API races, bounded-request regression and canonical-policy boundary coverage.
-The fixture stores one compact JSON response per line; the object reduction is
-separate from formatting. Measurements were taken after all code checks.
+The smaller test set retains real API races, bounded-request regression and
+canonical target-scoped policy coverage. The HTTP fixture stores five compact
+objects and does not duplicate the detailed doctor graph tests.
 
 
 ```sh

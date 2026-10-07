@@ -14,6 +14,11 @@ import (
 type TranscriptVolume struct {
 	Claim, Image string
 	Runtime      rcplatform.Runtime
+	// ClaimUID and ClaimDeleting describe the pinned PVC read during
+	// resolution. ClaimUID is empty when no PVC was read, for example for a
+	// legacy execution that only follows its target's current claim.
+	ClaimUID      string
+	ClaimDeleting bool
 }
 
 // ResolveTranscriptVolume shares volume resolution between logs and cleanup.
@@ -53,6 +58,7 @@ func ResolveTranscriptVolume(ctx context.Context, reader client.Reader, process 
 		if process.Status.TranscriptVolumeClaimUID != "" && string(claim.UID) != process.Status.TranscriptVolumeClaimUID {
 			return volume, fmt.Errorf("original transcript PVC was replaced")
 		}
+		volume.ClaimUID, volume.ClaimDeleting = string(claim.UID), !claim.DeletionTimestamp.IsZero()
 	}
 	platform, err := rcplatform.Resolve(target)
 	volume.Runtime = platform

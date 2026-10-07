@@ -30,6 +30,13 @@ spec:
     - jsonPath: .status.volumeClaimName
       name: Volume
       type: string
+    - jsonPath: .status.access.mode
+      name: Access
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='DeletionBlocked')].reason
+      name: Blocked
+      priority: 1
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -134,6 +141,51 @@ spec:
           status:
             description: status defines the observed state of Repository
             properties:
+              access:
+                description: |-
+                  access mirrors the parent volume's reservations. It is written by the
+                  Repository controller and is not a lock.
+                properties:
+                  holders:
+                    description: holders lists the resources that reserve the parent
+                      volume.
+                    items:
+                      description: |-
+                        UsageReference identifies one resource that holds a Worktree or Repository
+                        volume. It mirrors the controller's hold set; it is not a lock.
+                      properties:
+                        kind:
+                          description: kind is the holder's Kubernetes kind, for example
+                            Workspace or WorktreeExec.
+                          type: string
+                        mode:
+                          description: |-
+                            mode is the access mode: read or write on a Worktree; mount, clone or
+                            write on a Repository.
+                          type: string
+                        name:
+                          description: name is the holder's name in the same namespace.
+                          type: string
+                        since:
+                          description: since is when the holder was admitted.
+                          format: date-time
+                          type: string
+                        uid:
+                          description: uid is the holder incarnation; a same-name
+                            replacement is a different holder.
+                          type: string
+                      required:
+                      - kind
+                      - mode
+                      - name
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  mode:
+                    description: mode is the shared mode of the current holders, empty
+                      when idle.
+                    type: string
+                type: object
               conditions:
                 description: |-
                   conditions represent the current state of the Repository resource.

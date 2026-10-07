@@ -261,7 +261,7 @@ func TestEnvironmentRejectsForeignDraftBeforeMountOrCommit(t *testing.T) {
 	draft.Status.Phase = corev1.ClaimBound
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(environment).WithObjects(environment, draft).Build()
 	// Matching clone metadata used to be enough to mount another owner's draft.
-	_, reason, message, err := (&WorkspaceExecReconciler{Client: kube, Scheme: scheme}).resolveEnvironmentProcessTarget(t.Context(), &workspacesv1alpha1.WorkspaceExec{
+	_, reason, message, err := (&WorkspaceExecReconciler{Client: kube, APIReader: kube, Scheme: scheme}).resolveEnvironmentProcessTarget(t.Context(), &workspacesv1alpha1.WorkspaceExec{
 		ObjectMeta: metav1.ObjectMeta{Namespace: environment.Namespace}, Spec: workspacesv1alpha1.WorkspaceExecSpec{TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Name: environment.Name}},
 	})
 	require.NoError(t, err)

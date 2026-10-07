@@ -29,7 +29,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -42,7 +41,6 @@ import (
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
@@ -50,12 +48,12 @@ import (
 	"github.com/nekomeowww/rc/internal/cli/rcctl/cluster"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/command"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/progress"
+	"github.com/nekomeowww/rc/internal/conditions"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	repositoryservice "github.com/nekomeowww/rc/internal/repositories"
 	"github.com/nekomeowww/rc/internal/volumeclaim"
 	workspaceservice "github.com/nekomeowww/rc/internal/workspaces"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
 	"github.com/nekomeowww/rc/internal/worktreeownership"
 	clioutput "github.com/nekomeowww/rc/pkg/output"
 )
@@ -94,6 +92,9 @@ type workspaceStopper func(context.Context, *workspacesv1alpha1.Workspace) ([]st
 type workspaceMountResult struct {
 	workspace        *workspacesv1alpha1.Workspace
 	stoppedProcesses []string
+	// writers lists other writers observed on a newly mounted writable
+	// Worktree. The controller admits the mount after they release it.
+	writers []string
 }
 
 type listOptions struct {
@@ -134,11 +135,7 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			clusterClient, err := cluster.New(config)
+			clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 			if err != nil {
 				return err
 			}
@@ -147,8 +144,8 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 				Spec: workspacesv1alpha1.WorkspaceSpec{
 					DesiredState:         workspacesv1alpha1.WorkspaceDesiredStateRunning,
 					RetentionPolicy:      workspacesv1alpha1.WorkspaceRetentionPolicyRetain,
-					IdleTimeout:          &metav1.Duration{Duration: options.lifecycle.IdleTimeout},
-					DeleteAfterSuspended: &metav1.Duration{Duration: options.lifecycle.DeleteAfterSuspended},
+					IdleTimeout:          command.Duration(options.lifecycle.IdleTimeout),
+					DeleteAfterSuspended: command.Duration(options.lifecycle.DeleteAfterSuspended),
 					OS:                   osName, NodeSelector: options.placement.NodeSelector, Tolerations: tolerations,
 					Image: options.image, DefaultWorkingDirectory: options.defaultCwd,
 					ServiceAccountName: options.serviceAccount,
@@ -520,69 +517,53 @@ func applyWorkspaceMount(
 		return workspaceMountResult{}, fmt.Errorf("get updated Workspace generation: %w", err)
 	}
 	if err := validateWorkspaceMountSource(ctx, kubeClient, current, mount); err != nil {
-		return workspaceMountResult{}, rollbackWorkspaceMount(ctx, kubeClient, key, mount, nil, false, err)
+		return workspaceMountResult{}, rollbackWorkspaceMount(ctx, kubeClient, key, mount, err)
 	}
-	lease, createdLease, err := reserveWorkspaceMountLease(ctx, kubeClient, current, mount)
+	writers, err := otherWorktreeWriters(ctx, kubeClient, current, mount)
 	if err != nil {
-		return workspaceMountResult{}, rollbackWorkspaceMount(ctx, kubeClient, key, mount, nil, false, err)
+		return workspaceMountResult{}, rollbackWorkspaceMount(ctx, kubeClient, key, mount, err)
 	}
 
 	if (current.Spec.OS == "" || current.Spec.OS == corev1.Linux) && mount.WorktreeRef != nil {
 		worktree := new(repositoriesv1alpha1.Worktree)
 		if err := kubeClient.Get(ctx, client.ObjectKey{Name: mount.WorktreeRef.Name, Namespace: current.Namespace}, worktree); err != nil {
-			return workspaceMountResult{}, rollbackWorkspaceMount(ctx, kubeClient, key, mount, lease, createdLease, err)
+			return workspaceMountResult{}, rollbackWorkspaceMount(ctx, kubeClient, key, mount, err)
 		}
 		if meta.IsStatusConditionTrue(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady) && !worktreebootstrap.Deferred(worktree) {
-			return workspaceMountResult{workspace: current}, nil
+			return workspaceMountResult{workspace: current, writers: writers}, nil
 		}
 	}
 	stopped, err := stop(ctx, current)
-	result := workspaceMountResult{workspace: current, stoppedProcesses: stopped}
+	result := workspaceMountResult{workspace: current, stoppedProcesses: stopped, writers: writers}
 	if err != nil {
-		return result, rollbackWorkspaceMount(ctx, kubeClient, key, mount, lease, createdLease, err)
+		return result, rollbackWorkspaceMount(ctx, kubeClient, key, mount, err)
 	}
 
-	return workspaceMountResult{workspace: current, stoppedProcesses: stopped}, nil
+	return result, nil
 }
 
-func reserveWorkspaceMountLease(
-	ctx context.Context,
-	kubeClient client.Client,
-	workspace *workspacesv1alpha1.Workspace,
-	mount workspacesv1alpha1.WorkspaceMount,
-) (*coordinationv1.Lease, bool, error) {
+// otherWorktreeWriters reports, without reserving anything, the writers that
+// currently hold a Worktree this mount would write. Admission happens in the
+// Workspace controller; a conflict surfaces there as Ready=False WorktreeInUse.
+func otherWorktreeWriters(ctx context.Context, kubeClient client.Client, workspace *workspacesv1alpha1.Workspace, mount workspacesv1alpha1.WorkspaceMount) ([]string, error) {
 	if mount.ReadOnly || mount.WorktreeRef == nil {
-		return nil, false, nil
+		return nil, nil
 	}
 	worktree := new(repositoriesv1alpha1.Worktree)
 	if err := kubeClient.Get(ctx, client.ObjectKey{Name: mount.WorktreeRef.Name, Namespace: workspace.Namespace}, worktree); err != nil {
-		return nil, false, fmt.Errorf("get Worktree %q before reserving its write Lease: %w", mount.WorktreeRef.Name, err)
+		return nil, fmt.Errorf("get Worktree %q holders: %w", mount.WorktreeRef.Name, err)
 	}
-	holder := string(workspace.UID)
-	lease := &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{Name: worktreeclaim.LeaseName(worktree), Namespace: workspace.Namespace, Labels: map[string]string{worktreeclaim.HolderLabel: workspace.Name}},
-		Spec:       coordinationv1.LeaseSpec{HolderIdentity: &holder},
+	state, err := worktreeownership.Decode(worktree)
+	if err != nil {
+		return nil, err
 	}
-	if err := controllerutil.SetControllerReference(workspace, lease, kubeClient.Scheme()); err != nil {
-		return nil, false, fmt.Errorf("set Workspace owner on Worktree write Lease: %w", err)
-	}
-	if err := kubeClient.Create(ctx, lease); err == nil {
-		return lease, true, nil
-	} else if !apierrors.IsAlreadyExists(err) {
-		return nil, false, fmt.Errorf("reserve Worktree %q write Lease: %w", worktree.Name, err)
-	}
-	current := new(coordinationv1.Lease)
-	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(lease), current); err != nil {
-		return nil, false, fmt.Errorf("get Worktree %q write Lease: %w", worktree.Name, err)
-	}
-	if current.Spec.HolderIdentity == nil || *current.Spec.HolderIdentity != holder {
-		activeHolder := current.Labels[worktreeclaim.HolderLabel]
-		if activeHolder == "" && current.Spec.HolderIdentity != nil {
-			activeHolder = *current.Spec.HolderIdentity
+	writers := make([]string, 0)
+	for _, holder := range state.Holders {
+		if holder.Mode == worktreeownership.Write && holder.UID != workspace.UID {
+			writers = append(writers, holder.Kind+"/"+holder.Name)
 		}
-		return nil, false, fmt.Errorf("worktree %q has an active writer %q", worktree.Name, activeHolder)
 	}
-	return current, false, nil
+	return writers, nil
 }
 
 func rollbackWorkspaceMount(
@@ -590,8 +571,6 @@ func rollbackWorkspaceMount(
 	kubeClient client.Client,
 	key client.ObjectKey,
 	mount workspacesv1alpha1.WorkspaceMount,
-	lease *coordinationv1.Lease,
-	createdLease bool,
 	cause error,
 ) error {
 	current := new(workspacesv1alpha1.Workspace)
@@ -608,11 +587,6 @@ func rollbackWorkspaceMount(
 	if err := kubeClient.Update(ctx, current); err != nil {
 		return errors.Join(cause, fmt.Errorf("roll back Workspace mount: %w", err))
 	}
-	if createdLease && lease != nil {
-		if err := kubeClient.Delete(ctx, lease); err != nil && !apierrors.IsNotFound(err) {
-			return errors.Join(cause, fmt.Errorf("release reserved Worktree write Lease: %w", err))
-		}
-	}
 	return cause
 }
 
@@ -623,8 +597,7 @@ func validateWorkspaceMountSource(ctx context.Context, kubeClient client.Client,
 		if err := kubeClient.Get(ctx, key, repository); err != nil {
 			return fmt.Errorf("get mounted Repository %q: %w", mount.RepositoryRef.Name, err)
 		}
-		ready := meta.FindStatusCondition(repository.Status.Conditions, repositoriesv1alpha1.RepositoryConditionStorageReady)
-		if repository.Status.ObservedGeneration < repository.Generation || ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration < repository.Generation || repository.Status.VolumeClaimName == "" {
+		if !conditions.ReadyAtGeneration(repository.Status.Conditions, repositoriesv1alpha1.RepositoryConditionStorageReady, repository.Generation, repository.Status.ObservedGeneration) || repository.Status.VolumeClaimName == "" {
 			return fmt.Errorf("repository %q is not Ready", repository.Name)
 		}
 		return nil
@@ -647,30 +620,12 @@ func validateWorkspaceMountSource(ctx context.Context, kubeClient client.Client,
 	// Deferred checkouts become Ready only after their owner's writable mount
 	// starts the initializer. Accept current volume readiness for that transition.
 	canInitialize := worktreebootstrap.Deferred(worktree) &&
-		worktree.Labels["workspaces.rc.ayaka.io/generated-for"] == workspace.Name && !mount.ReadOnly &&
+		worktree.Labels[worktreeownership.GeneratedForLabel] == workspace.Name && !mount.ReadOnly &&
 		volumeReady != nil && volumeReady.Status == metav1.ConditionTrue && volumeReady.ObservedGeneration >= worktree.Generation
 	if worktree.Status.ObservedGeneration < worktree.Generation || (!worktreeReady && !canInitialize) || worktree.Status.VolumeClaimName == "" {
 		return fmt.Errorf("worktree %q is not Ready", worktree.Name)
 	}
-	if mount.ReadOnly {
-		return nil
-	}
-
-	lease := new(coordinationv1.Lease)
-	leaseKey := client.ObjectKey{Name: worktreeclaim.LeaseName(worktree), Namespace: workspace.Namespace}
-	if err := kubeClient.Get(ctx, leaseKey, lease); apierrors.IsNotFound(err) {
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("check Worktree %q write Lease: %w", worktree.Name, err)
-	}
-	if lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity == string(workspace.UID) {
-		return nil
-	}
-	holder := lease.Labels[worktreeclaim.HolderLabel]
-	if holder == "" && lease.Spec.HolderIdentity != nil {
-		holder = *lease.Spec.HolderIdentity
-	}
-	return fmt.Errorf("worktree %q has an active writer %q", worktree.Name, holder)
+	return nil
 }
 
 func cleanupGeneratedWorktree(ctx context.Context, kubeClient client.Client, worktree *repositoriesv1alpha1.Worktree, cause error) error {
@@ -686,11 +641,7 @@ func newUnmountCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use: "unmount WORKSPACE MOUNT", Short: "Remove a code mount from a Workspace", Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			clusterClient, err := cluster.New(config)
+			clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 			if err != nil {
 				return err
 			}
@@ -755,11 +706,7 @@ func newStateCommand(kubeconfigFlags *kubeconfig.Flags, running bool) *cobra.Com
 	cmd := &cobra.Command{
 		Use: verb + " NAME", Short: short, Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			clusterClient, err := cluster.New(config)
+			clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 			if err != nil {
 				return err
 			}
@@ -796,15 +743,11 @@ func newStateCommand(kubeconfigFlags *kubeconfig.Flags, running bool) *cobra.Com
 
 func newDeleteCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	var force bool
-	var cascade bool
+	var deprecatedCascade bool // Only whether the flag was set matters.
 	cmd := &cobra.Command{
 		Use: "delete NAME", Short: "Delete a Workspace and its owned runtime state", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			clusterClient, err := cluster.New(config)
+			clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 			if err != nil {
 				return err
 			}
@@ -812,14 +755,14 @@ func newDeleteCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err := clusterClient.Kube.Get(cmd.Context(), client.ObjectKey{Name: args[0], Namespace: namespace}, workspace); err != nil {
 				return err
 			}
-			return deleteWorkspace(cmd, clusterClient.Kube, workspace, cascade || cmd.Flags().Changed("cascade-created-worktrees"),
+			return deleteWorkspace(cmd, clusterClient.Kube, workspace, cmd.Flags().Changed("cascade-created-worktrees"),
 				func(ctx context.Context, current *workspacesv1alpha1.Workspace) ([]string, error) {
 					return stopForTopologyChange(ctx, clusterClient, current, force)
 				})
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "Stop active processes before deletion")
-	cmd.Flags().BoolVar(&cascade, "cascade-created-worktrees", false, "Deprecated: owned Worktrees always cascade; label-only legacy Worktrees are retained")
+	cmd.Flags().BoolVar(&deprecatedCascade, "cascade-created-worktrees", false, "Deprecated: owned Worktrees always cascade; label-only legacy Worktrees are retained")
 
 	return cmd
 }
@@ -881,7 +824,7 @@ func reviewWorkspaceDeletion(ctx context.Context, kubeClient client.Client, work
 	for index := range worktrees.Items {
 		worktree := &worktrees.Items[index]
 		if worktreeownership.IsOwnedBy(worktree, workspace) {
-			blockers, err := worktreeownership.ReferenceBlockers(ctx, kubeClient, workspace.Namespace, worktree.Name)
+			blockers, err := worktreeownership.ListReferenceBlockers(ctx, kubeClient, workspace.Namespace, worktree.Name)
 			if err != nil {
 				return nil, err
 			}
@@ -910,11 +853,7 @@ func newPortForwardCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	return &cobra.Command{
 		Use: "port-forward NAME LOCAL[:REMOTE]", Short: "Forward a local port to the Workspace Pod", Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			clusterClient, err := cluster.New(config)
+			clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 			if err != nil {
 				return err
 			}
@@ -925,11 +864,11 @@ func newPortForwardCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if workspace.Status.RuntimePodName == "" {
 				return fmt.Errorf("workspace %q has no running Pod", workspace.Name)
 			}
-			roundTripper, upgrader, err := spdy.RoundTripperFor(config)
+			roundTripper, upgrader, err := spdy.RoundTripperFor(clusterClient.Config)
 			if err != nil {
 				return err
 			}
-			serverURL, err := url.Parse(config.Host)
+			serverURL, err := url.Parse(clusterClient.Config.Host)
 			if err != nil {
 				return err
 			}
@@ -952,26 +891,9 @@ func newPortForwardCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 }
 
 func newDefaultCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
-	return &cobra.Command{
-		Use: "default NAME", Short: "Set the XDG default Workspace for the current context and namespace", Args: cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			_, namespace, contextName, err := kubeconfigFlags.ResolveWithIdentity()
-			if err != nil {
-				return err
-			}
-			path, err := workspaceservice.DefaultConfigPath()
-			if err != nil {
-				return err
-			}
-			store := workspaceservice.DefaultStore{Path: path}
-			defaults, err := store.Get(contextName, namespace)
-			if err != nil {
-				return err
-			}
-			defaults.Workspace = args[0]
-			return store.Set(contextName, namespace, defaults)
-		},
-	}
+	return command.NewDefaultCommand(kubeconfigFlags, "Set the XDG default Workspace for the current context and namespace", func(defaults *workspaceservice.Defaults, name string) {
+		defaults.Workspace = name
+	})
 }
 
 func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
@@ -982,11 +904,7 @@ func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err := options.output.Validate(true); err != nil {
 				return err
 			}
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			clusterClient, err := cluster.New(config)
+			clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 			if err != nil {
 				return err
 			}
@@ -1006,31 +924,7 @@ func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 }
 
 func newGetCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
-	options := new(clioutput.Options)
-	cmd := &cobra.Command{
-		Use: "get NAME", Short: "Show a Workspace", Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := options.Validate(false); err != nil {
-				return err
-			}
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			clusterClient, err := cluster.New(config)
-			if err != nil {
-				return err
-			}
-			workspace := new(workspacesv1alpha1.Workspace)
-			if err := clusterClient.Kube.Get(cmd.Context(), client.ObjectKey{Namespace: namespace, Name: args[0]}, workspace); err != nil {
-				return fmt.Errorf("get Workspace %q: %w", args[0], err)
-			}
-			return options.PrintDetails(cmd.OutOrStdout(), workspace, clusterClient.Kube.Scheme(), workspaceDetailFields(workspace))
-		},
-	}
-	options.AddFlags(cmd, false)
-
-	return cmd
+	return command.NewGetCommand(kubeconfigFlags, "Workspace", func() *workspacesv1alpha1.Workspace { return new(workspacesv1alpha1.Workspace) }, workspaceDetailFields)
 }
 
 func workspaceListItems(workspaces []workspacesv1alpha1.Workspace) []workspacesv1alpha1.Workspace {
@@ -1070,11 +964,12 @@ func workspaceListTable(workspaces []workspacesv1alpha1.Workspace, now time.Time
 	}
 }
 
-func suspendedAtDisplay(workspace *workspacesv1alpha1.Workspace) string {
-	if workspace.Status.SuspendedAt == nil {
-		return "-"
+// durationOrDisabled renders an optional lifecycle clock; nil disables it.
+func durationOrDisabled(value *metav1.Duration) string {
+	if value == nil {
+		return "disabled"
 	}
-	return clioutput.Timestamp(*workspace.Status.SuspendedAt)
+	return value.Duration.String()
 }
 
 func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.Field {
@@ -1085,14 +980,6 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 	storage := "-"
 	if workspace.Spec.Storage != nil {
 		storage = workspaceStorageSummary(*workspace.Spec.Storage)
-	}
-	idleTimeout := "disabled"
-	if workspace.Spec.IdleTimeout != nil {
-		idleTimeout = workspace.Spec.IdleTimeout.Duration.String()
-	}
-	deleteAfterSuspended := "disabled"
-	if workspace.Spec.DeleteAfterSuspended != nil {
-		deleteAfterSuspended = workspace.Spec.DeleteAfterSuspended.Duration.String()
 	}
 	automountToken := "default"
 	if workspace.Spec.AutomountServiceAccountToken != nil {
@@ -1105,6 +992,14 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 	lifecycle := "-"
 	if workspace.Spec.Lifecycle != nil {
 		lifecycle = fmt.Sprintf("%d initialize, %d before-stop", len(workspace.Spec.Lifecycle.Initialize), len(workspace.Spec.Lifecycle.BeforeStop))
+	}
+	status := workspace.Status.Lifecycle
+	if status == nil {
+		status = &workspacesv1alpha1.WorkspaceLifecycleStatus{}
+	}
+	history := "-"
+	if h := workspace.Status.ExecutionHistory; h != nil {
+		history = fmt.Sprintf("%d retained, %d pending cleanup", h.Retained, h.PendingCleanup)
 	}
 
 	return []clioutput.Field{
@@ -1125,9 +1020,13 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 		{Name: "Service account", Value: clioutput.ValueOrDash(workspace.Spec.ServiceAccountName)},
 		{Name: "Automount service account token", Value: automountToken},
 		{Name: "Runtime class", Value: runtimeClass},
-		{Name: "Idle timeout", Value: idleTimeout},
-		{Name: "Delete after suspended", Value: deleteAfterSuspended},
-		{Name: "Suspended at", Value: suspendedAtDisplay(workspace)},
+		{Name: "Idle timeout", Value: durationOrDisabled(workspace.Spec.IdleTimeout)},
+		{Name: "Delete after suspended", Value: durationOrDisabled(workspace.Spec.DeleteAfterSuspended)},
+		{Name: "Suspended at", Value: clioutput.OptionalTimestamp(workspace.Status.SuspendedAt)},
+		{Name: "Active executions", Value: status.ActiveExecutions},
+		{Name: "Idle suspend at", Value: clioutput.OptionalTimestamp(status.IdleSuspendAt)},
+		{Name: "Delete at", Value: clioutput.OptionalTimestamp(status.DeleteAt)},
+		{Name: "Execution history", Value: history},
 		{Name: "Mounts", Value: workspaceMountSummary(workspace.Spec.Mounts)},
 		{Name: "Agent credentials", Value: workspaceReferenceNames(workspace.Spec.AgentCredentialRefs)},
 		{Name: "Credentials", Value: workspaceReferenceNames(workspace.Spec.CredentialRefs)},
@@ -1214,7 +1113,7 @@ func stopForTopologyChange(ctx context.Context, clusterClient *cluster.Client, w
 	processClient := &workspaceservice.ProcessClient{Kube: clusterClient.Kube, Runtime: clusterClient.Processes, Config: clusterClient.Config}
 	for index := range processes.Items {
 		process := &processes.Items[index]
-		if process.Spec.TargetRef.Kind != workspacesv1alpha1.WorkspaceExecTargetWorkspace || process.Spec.TargetRef.Name != workspace.Name || terminal(process.Status.Phase) {
+		if process.Spec.TargetRef.Kind != workspacesv1alpha1.WorkspaceExecTargetWorkspace || process.Spec.TargetRef.Name != workspace.Name || process.Status.Phase.Terminal() {
 			continue
 		}
 		if !force {
@@ -1250,6 +1149,9 @@ func waitWorkspaceGenerationReady(ctx context.Context, kubeClient client.Client,
 			return true, nil
 		}
 		condition := meta.FindStatusCondition(current.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady)
+		if condition != nil && condition.Status == metav1.ConditionFalse && condition.ObservedGeneration >= generation && condition.Reason == reasonWorktreeInUse {
+			return false, &worktreeInUseError{workspace: current.Name, message: condition.Message}
+		}
 		if condition != nil && condition.Status == metav1.ConditionFalse && condition.ObservedGeneration >= generation && !workspaceReadinessTransient(condition.Reason) {
 			return false, fmt.Errorf("workspace %q runtime failed for generation %d: %s", current.Name, generation, condition.Message)
 		}
@@ -1259,7 +1161,7 @@ func waitWorkspaceGenerationReady(ctx context.Context, kubeClient client.Client,
 
 func workspaceReadinessTransient(reason string) bool {
 	switch reason {
-	case "Provisioning", "Starting", "Replacing", "Stopping", "Mounting", "Unmounting", "WorktreeNotReady", "RepositoryNotReady", "WorktreeInUse":
+	case "Provisioning", "Starting", "Replacing", "Stopping", "Mounting", "Unmounting", "WorktreeNotReady", "RepositoryNotReady", reasonWorktreeInUse:
 		return true
 	default:
 		return false
@@ -1267,16 +1169,32 @@ func workspaceReadinessTransient(reason string) bool {
 }
 
 func workspaceReadyForGeneration(workspace *workspacesv1alpha1.Workspace, generation int64) bool {
-	if workspace.Status.ObservedGeneration < generation {
-		return false
-	}
-	condition := meta.FindStatusCondition(workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady)
-	return condition != nil && condition.Status == metav1.ConditionTrue && condition.ObservedGeneration >= generation
+	return conditions.ReadyAtGeneration(workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady, generation, workspace.Status.ObservedGeneration)
+}
+
+// reasonWorktreeInUse is the Workspace Ready reason for a writable mount whose
+// Worktree another writer holds. The mount stays in spec and starts later.
+const reasonWorktreeInUse = "WorktreeInUse"
+
+// worktreeInUseError ends a wait: the mount is accepted but pending.
+type worktreeInUseError struct {
+	workspace string
+	message   string
+}
+
+func (e *worktreeInUseError) Error() string {
+	return fmt.Sprintf("workspace %q mount is waiting: %s", e.workspace, e.message)
 }
 
 func finishTopologyChange(cmd *cobra.Command, kubeClient client.Client, result workspaceMountResult, noWait bool) error {
 	if err := reportStoppedProcesses(cmd, result.stoppedProcesses); err != nil {
 		return err
+	}
+	if len(result.writers) > 0 {
+		if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "warning: the Worktree is held for writing by %s; workspace/%s reports Ready=False reason %s until it is released (check: rcctl workspace get %s)\n",
+			strings.Join(result.writers, ", "), result.workspace.Name, reasonWorktreeInUse, result.workspace.Name); err != nil {
+			return err
+		}
 	}
 	if noWait {
 		_, err := fmt.Fprintf(cmd.ErrOrStderr(), "workspace/%s topology updated; runtime reconciliation pending\n", result.workspace.Name)
@@ -1286,6 +1204,11 @@ func finishTopologyChange(cmd *cobra.Command, kubeClient client.Client, result w
 	indicator := progress.Start(cmd.ErrOrStderr(), "waiting for Workspace mount update...")
 	defer indicator.Stop()
 	if err := waitWorkspaceGenerationReady(cmd.Context(), kubeClient, result.workspace, result.workspace.Generation); err != nil {
+		var inUse *worktreeInUseError
+		if errors.As(err, &inUse) {
+			indicator.Stop()
+			_, err = fmt.Fprintf(cmd.ErrOrStderr(), "workspace/%s topology updated; %s (check: rcctl workspace get %s)\n", result.workspace.Name, inUse.message, result.workspace.Name)
+		}
 		return err
 	}
 	current := new(workspacesv1alpha1.Workspace)
@@ -1310,16 +1233,6 @@ func topologyChangeFailure(cmd *cobra.Command, stopped []string, cause error) er
 		return errors.Join(cause, err)
 	}
 	return cause
-}
-
-func terminal(phase workspacesv1alpha1.WorkspaceExecPhase) bool {
-	switch phase {
-	case workspacesv1alpha1.WorkspaceExecPhaseSucceeded, workspacesv1alpha1.WorkspaceExecPhaseFailed,
-		workspacesv1alpha1.WorkspaceExecPhaseStopped, workspacesv1alpha1.WorkspaceExecPhaseLost:
-		return true
-	default:
-		return false
-	}
 }
 
 func boundedName(name string) string {

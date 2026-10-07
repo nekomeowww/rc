@@ -49,7 +49,7 @@ var _ = Describe("Workspace lifecycle API", func() {
 		Expect(k8sClient.Create(ctx, workspace)).To(Succeed())
 		process := &workspacesv1alpha1.WorkspaceExec{ObjectMeta: metav1.ObjectMeta{Name: "command", Namespace: namespace.Name, Finalizers: []string{executionFinalizer}}, Spec: workspacesv1alpha1.WorkspaceExecSpec{TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: workspace.Name}, Command: []string{testTrueValue}}}
 		Expect(k8sClient.Create(ctx, process)).To(Succeed())
-		gate := workspaceadmission.Gate{Client: k8sClient}
+		gate := workspaceadmission.Gate{Client: k8sClient, Reader: k8sClient}
 		Expect(gate.Admit(ctx, workspace, process)).To(Succeed())
 		// A successful no-op admission need not change resourceVersion. Closing
 		// must still find the committed execution in its authoritative scan.
@@ -70,7 +70,7 @@ var _ = Describe("Workspace lifecycle API", func() {
 			},
 		})
 		// A no-op status write must still enforce the supplied resourceVersion.
-		err := (workspaceadmission.Gate{Client: intercepted}).Admit(ctx, workspace, process)
+		err := (workspaceadmission.Gate{Client: intercepted, Reader: intercepted}).Admit(ctx, workspace, process)
 		Expect(apierrors.IsConflict(err)).To(BeTrue())
 		Expect(gate.Reopen(ctx, workspace)).To(Succeed())
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(workspace), workspace)).To(Succeed())

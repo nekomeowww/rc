@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -14,7 +13,6 @@ import (
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/cluster"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
 	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
@@ -30,11 +28,7 @@ func newOwnershipCommand(flags *kubeconfig.Flags, adopt bool) *cobra.Command {
 		if workspace == "" {
 			return fmt.Errorf("--workspace is required")
 		}
-		config, namespace, err := flags.Resolve()
-		if err != nil {
-			return err
-		}
-		clusterClient, err := cluster.New(config)
+		clusterClient, namespace, err := cluster.Connect(flags)
 		if err != nil {
 			return err
 		}
@@ -53,7 +47,7 @@ func newOwnershipCommand(flags *kubeconfig.Flags, adopt bool) *cobra.Command {
 }
 
 // changeWorktreeOwnership changes metadata only, preserving checkout, mounts,
-// PVC, and writer Leases. Optimistic locking rejects concurrent deletion or
+// PVC, and holders. Optimistic locking rejects concurrent deletion or
 // ownership changes rather than overwriting a newer object.
 func changeWorktreeOwnership(ctx context.Context, kube client.Client, namespace, name, workspaceName string, adopt bool) error {
 	worktree := new(repositoriesv1alpha1.Worktree)
@@ -70,8 +64,7 @@ func changeWorktreeOwnership(ctx context.Context, kube client.Client, namespace,
 	if workspace.UID == "" {
 		return fmt.Errorf("workspace %q has no UID", workspaceName)
 	}
-	ready := meta.FindStatusCondition(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady)
-	if ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration < worktree.Generation || worktree.Status.ObservedGeneration < worktree.Generation {
+	if !worktreeownership.ReadyAtCurrentGeneration(worktree) {
 		return fmt.Errorf("worktree %q must be Ready before changing ownership; finish its checkout first", name)
 	}
 	before := worktree.DeepCopy()
@@ -83,7 +76,7 @@ func changeWorktreeOwnership(ctx context.Context, kube client.Client, namespace,
 			return err
 		}
 	}
-	controllerutil.AddFinalizer(worktree, worktreeclaim.DeletionFinalizer)
+	controllerutil.AddFinalizer(worktree, worktreeownership.DeletionFinalizer)
 	return kube.Patch(ctx, worktree, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 }
 

@@ -13,7 +13,7 @@ func (r *WorkspaceExecReconciler) preserveTargetIdleClock(ctx context.Context, p
 	if process.Status.CompletedAt == nil {
 		return nil
 	}
-	target, err := readExecutionTarget(ctx, r.cleanupReader(), process)
+	target, err := readExecutionTarget(ctx, r.APIReader, process)
 	if err != nil || target == nil {
 		return err
 	}

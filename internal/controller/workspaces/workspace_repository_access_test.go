@@ -5,6 +5,7 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/holdset"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
 	"github.com/stretchr/testify/require"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -54,8 +55,8 @@ func TestWorkspaceReleasesParentBeforeDependencyChecks(t *testing.T) {
 			require.NoError(t, controllerutil.SetControllerReference(workspace, home, scheme))
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: workspace.Name, Namespace: workspace.Namespace}}
 			c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace).WithObjects(parent, workspace, home, pod).Build()
-			gate := repositoryaccess.Gate{Client: c}
-			admission, err := gate.Acquire(ctx, parent, repositoryaccess.Token("workspace", workspace), repositoryaccess.Mount, true)
+			gate := repositoryaccess.Gate{Client: c, Reader: c}
+			admission, err := gate.Acquire(ctx, parent, repositoryaccess.Holder(repositoryaccess.KindWorkspace, workspace, repositoryaccess.Mount), true)
 			require.NoError(t, err)
 			require.Equal(t, repositoryaccess.Admitted, admission)
 			r := WorkspaceReconciler{Client: c, APIReader: c, Scheme: scheme, RunnerImage: testRunnerImage}
@@ -76,7 +77,7 @@ func TestWorkspaceReleasesParentBeforeDependencyChecks(t *testing.T) {
 			busy, err = gate.Busy(ctx, parent, "sync")
 			require.NoError(t, err)
 			require.False(t, busy, "an absent Pod must release its reservation despite unavailable dependencies")
-			admission, err = gate.Acquire(ctx, parent, "sync", repositoryaccess.Write, true)
+			admission, err = gate.Acquire(ctx, parent, holdset.Holder{Kind: repositoryaccess.KindRepositorySync, Name: "sync", UID: "sync-uid", Mode: repositoryaccess.Write}, true)
 			require.NoError(t, err)
 			require.Equal(t, repositoryaccess.Admitted, admission, "sync can proceed without deleting the Workspace")
 		})

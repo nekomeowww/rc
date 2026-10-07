@@ -67,7 +67,7 @@ func TestForegroundTranscriptCleanupWithGarbageCollector(t *testing.T) {
 	platform, err := rcplatform.Resolve(rcplatform.Target{OS: corev1.Linux})
 	require.NoError(t, err)
 	volume := workspaceservice.TranscriptVolume{Claim: claim.Name, Image: "unused-until-scheduled", Runtime: platform}
-	service := &executionRetentionService{Client: kube}
+	service := &executionRetentionService{Client: kube, APIReader: kube}
 	exec := &WorkspaceExecReconciler{Client: kube, APIReader: kube}
 	newProcess := func(name string) *workspacesv1alpha1.WorkspaceExec {
 		process := &workspacesv1alpha1.WorkspaceExec{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace.Name, Finalizers: []string{executionFinalizer}}, Spec: workspacesv1alpha1.WorkspaceExecSpec{TargetRef: executionTargetReference(target), Command: []string{testTrueValue}}}
@@ -114,7 +114,7 @@ func TestForegroundTranscriptCleanupWithGarbageCollector(t *testing.T) {
 	require.True(t, worker.DeletionTimestamp.IsZero())
 	require.Equal(t, originalUID, worker.UID)
 	require.True(t, metav1.IsControlledBy(worker, target))
-	service = &executionRetentionService{Client: kube}
+	service = &executionRetentionService{Client: kube, APIReader: kube}
 	busy, err := service.reconcileTranscriptWorker(ctx, target)
 	require.NoError(t, err)
 	require.True(t, busy)

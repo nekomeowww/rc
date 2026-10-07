@@ -27,6 +27,17 @@ spec:
     - jsonPath: .status.worktreePath
       name: Path
       type: string
+    - jsonPath: .status.conditions[?(@.type=='InUse')].status
+      name: In-Use
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='InUse')].reason
+      name: Usage
+      priority: 1
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='DeletionBlocked')].reason
+      name: Blocked
+      priority: 1
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -229,6 +240,42 @@ spec:
                   sourceVolumeClaimName is the parent PVC cloned when this Worktree was
                   created.
                 type: string
+              usedBy:
+                description: |-
+                  usedBy mirrors the Worktree hold set: admitted Workspace mounts and
+                  writers. It is written by the Worktree controller and is not a lock.
+                items:
+                  description: |-
+                    UsageReference identifies one resource that holds a Worktree or Repository
+                    volume. It mirrors the controller's hold set; it is not a lock.
+                  properties:
+                    kind:
+                      description: kind is the holder's Kubernetes kind, for example
+                        Workspace or WorktreeExec.
+                      type: string
+                    mode:
+                      description: |-
+                        mode is the access mode: read or write on a Worktree; mount, clone or
+                        write on a Repository.
+                      type: string
+                    name:
+                      description: name is the holder's name in the same namespace.
+                      type: string
+                    since:
+                      description: since is when the holder was admitted.
+                      format: date-time
+                      type: string
+                    uid:
+                      description: uid is the holder incarnation; a same-name replacement
+                        is a different holder.
+                      type: string
+                  required:
+                  - kind
+                  - mode
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
               volumeClaimName:
                 description: volumeClaimName is the child PVC containing the independent
                   Git copy.

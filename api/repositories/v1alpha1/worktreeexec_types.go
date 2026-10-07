@@ -56,6 +56,13 @@ type WorktreeExecStatus struct {
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 
+	// completedAt is when the command reached its terminal result: the Job
+	// completion or failure time, or the time a failure without a finished Job
+	// was recorded. It is set once, together with the terminal Succeeded
+	// condition, and is never rewritten.
+	// +optional
+	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+
 	// conditions represent the current state of the WorktreeExec resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
@@ -76,6 +83,7 @@ type WorktreeExecStatus struct {
 // +kubebuilder:printcolumn:name="Worktree",type=string,JSONPath=".spec.worktreeRef.name"
 // +kubebuilder:printcolumn:name="Succeeded",type=string,JSONPath=".status.conditions[?(@.type=='Succeeded')].status"
 // +kubebuilder:printcolumn:name="Job",type=string,JSONPath=".status.jobName"
+// +kubebuilder:printcolumn:name="Completed",type=date,JSONPath=".status.completedAt"
 
 // WorktreeExec is the Schema for the worktreeexecs API
 type WorktreeExec struct {

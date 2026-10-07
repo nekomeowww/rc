@@ -216,7 +216,7 @@ func (processes *ProcessClient) WaitUntilAttachable(ctx context.Context, process
 		if current.Status.Phase == workspacesv1alpha1.WorkspaceExecPhaseRunning {
 			return true, nil
 		}
-		if processPhaseTerminal(current.Status.Phase) {
+		if current.Status.Phase.Terminal() {
 			return true, nil
 		}
 		return false, nil
@@ -225,7 +225,7 @@ func (processes *ProcessClient) WaitUntilAttachable(ctx context.Context, process
 
 func (processes *ProcessClient) WaitUntilTerminal(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) (*workspacesv1alpha1.WorkspaceExec, error) {
 	return processes.wait(ctx, process, func(current *workspacesv1alpha1.WorkspaceExec) (bool, error) {
-		return processPhaseTerminal(current.Status.Phase), nil
+		return current.Status.Phase.Terminal(), nil
 	})
 }
 
@@ -425,16 +425,6 @@ func (processes *ProcessClient) Logs(ctx context.Context, process *workspacesv1a
 	_, err = io.Copy(output, stream)
 
 	return err
-}
-
-func processPhaseTerminal(phase workspacesv1alpha1.WorkspaceExecPhase) bool {
-	switch phase {
-	case workspacesv1alpha1.WorkspaceExecPhaseSucceeded, workspacesv1alpha1.WorkspaceExecPhaseFailed,
-		workspacesv1alpha1.WorkspaceExecPhaseStopped, workspacesv1alpha1.WorkspaceExecPhaseLost:
-		return true
-	default:
-		return false
-	}
 }
 
 func AgentTypeForCommand(command string) string {

@@ -28,11 +28,11 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	"github.com/nekomeowww/rc/internal/lifecycle"
+	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
 const (
-	containerNamePrefix     = "rc-worktree-"
-	generatedWorkspaceLabel = "workspaces.rc.ayaka.io/generated-for"
+	containerNamePrefix = "rc-worktree-"
 	// EagerLabel opts a generated-for Worktree into the ordinary bootstrap Job.
 	// Workspace mount uses this mode so checkout failure is known before an
 	// existing runtime is disrupted.
@@ -55,7 +55,7 @@ func NativeWorktreeMountPath(name string) string {
 // Deferred reports whether a generated Worktree can initialize its branch in
 // the consuming Workspace runtime instead of a separate bootstrap Job.
 func Deferred(worktree *repositoriesv1alpha1.Worktree) bool {
-	return worktree.Labels[generatedWorkspaceLabel] != "" &&
+	return worktree.Labels[worktreeownership.GeneratedForLabel] != "" &&
 		worktree.Labels[EagerLabel] != "true" &&
 		worktree.Spec.Branch != "" &&
 		worktree.Spec.ResetBranch == "" &&

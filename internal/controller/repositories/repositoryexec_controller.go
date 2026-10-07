@@ -34,6 +34,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	"github.com/nekomeowww/rc/internal/conditions"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
 	"github.com/nekomeowww/rc/internal/runtimepolicy"
 )
@@ -55,6 +56,7 @@ var repositoryExecStatus = oneShotStatusAdapter[*repositoriesv1alpha1.Repository
 		exec.Status.JobName = jobName
 		exec.Status.Conditions = conditions
 	},
+	completedAt:   func(exec *repositoriesv1alpha1.RepositoryExec) **metav1.Time { return &exec.Status.CompletedAt },
 	conditionType: repositoriesv1alpha1.RepositoryExecConditionSucceeded,
 	resourceKind:  "RepositoryExec",
 }
@@ -62,6 +64,8 @@ var repositoryExecStatus = oneShotStatusAdapter[*repositoriesv1alpha1.Repository
 // RepositoryExecReconciler reconciles a RepositoryExec object.
 type RepositoryExecReconciler struct {
 	client.Client
+	// APIReader is required. It bypasses the informer cache; SetupWithManager
+	// sets it from the manager.
 	APIReader   client.Reader
 	Scheme      *runtime.Scheme
 	RunnerImage string
@@ -79,21 +83,26 @@ func (r *RepositoryExecReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	log := logf.FromContext(ctx)
 	// Request status and Job existence must reflect completed API writes, not
 	// informer delivery order. This preserves at-most-once execution.
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
 	exec := new(repositoriesv1alpha1.RepositoryExec)
 
-	err := reader.Get(ctx, req.NamespacedName, exec)
+	err := r.APIReader.Get(ctx, req.NamespacedName, exec)
 	if err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	token := repositoryaccess.Token("repository-exec", exec)
+	holder := repositoryaccess.Holder(repositoryaccess.KindRepositoryExec, exec, repositoryaccess.Write)
 	succeeded := meta.FindStatusCondition(exec.Status.Conditions, repositoriesv1alpha1.RepositoryExecConditionSucceeded)
+	if succeeded != nil && succeeded.Status != metav1.ConditionUnknown && exec.Status.CompletedAt == nil {
+		if err := repositoryExecStatus.backfillCompletedAt(ctx, r.Client, req.NamespacedName); err != nil {
+			return ctrl.Result{}, err
+		}
+		// The finalizer release below uses an optimistic lock on this object.
+		if err := r.APIReader.Get(ctx, req.NamespacedName, exec); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
+		}
+	}
 	if !exec.DeletionTimestamp.IsZero() || (succeeded != nil && succeeded.Status != metav1.ConditionUnknown) {
-		done, err := releaseRepositoryOperation(ctx, r.Client, r.APIReader, exec, token, exec.Status.JobName)
+		done, err := releaseRepositoryOperation(ctx, r.Client, r.APIReader, exec, exec.Spec.RepositoryRef.Name, holder.Key(), exec.Status.JobName)
 		if err != nil || done {
 			return ctrl.Result{}, err
 		}
@@ -106,7 +115,7 @@ func (r *RepositoryExecReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 	}
 
-	job, jobState, err := observeOneShotJob(ctx, reader, exec, exec.Status.JobName)
+	job, jobState, err := observeOneShotJob(ctx, r.APIReader, exec, exec.Status.JobName)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("observe Repository Exec Job: %w", err)
 	}
@@ -131,8 +140,7 @@ func (r *RepositoryExecReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, fmt.Errorf("get Repository: %w", err)
 	}
 
-	ready := meta.FindStatusCondition(repository.Status.Conditions, repositoriesv1alpha1.RepositoryConditionStorageReady)
-	if repository.Status.ObservedGeneration < repository.Generation || ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration < repository.Generation || repository.Status.VolumeClaimName == "" {
+	if !conditions.ReadyAtGeneration(repository.Status.Conditions, repositoriesv1alpha1.RepositoryConditionStorageReady, repository.Generation, repository.Status.ObservedGeneration) || repository.Status.VolumeClaimName == "" {
 		err := r.setSucceeded(ctx, exec, metav1.ConditionUnknown, "RepositoryNotReady", "Referenced Repository parent volume is not ready", "")
 		if err != nil {
 			return ctrl.Result{}, err
@@ -141,7 +149,7 @@ func (r *RepositoryExecReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
-	admission, err := (repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}).Acquire(ctx, repository, token, repositoryaccess.Write, true)
+	admission, err := (repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}).Acquire(ctx, repository, holder, true)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -232,7 +240,7 @@ func (r *RepositoryExecReconciler) reflectJobStatus(
 	job *batchv1.Job,
 ) error {
 	if status, reason, message, terminal := terminalJobOutcome(job); terminal {
-		return r.setSucceeded(ctx, exec, status, reason, message, job.Name)
+		return repositoryExecStatus.setAt(ctx, r.Client, client.ObjectKeyFromObject(exec), status, reason, message, job.Name, jobCompletionTime(job))
 	}
 
 	return r.setSucceeded(ctx, exec, metav1.ConditionUnknown, "CommandRunning", "Command has not completed", job.Name)

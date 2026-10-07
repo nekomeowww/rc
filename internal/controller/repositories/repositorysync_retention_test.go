@@ -44,7 +44,7 @@ func TestSyncCustomRetentionSurvivesControllerRestart(t *testing.T) {
 	require.NoError(t, c.Status().Update(t.Context(), request))
 	// A fresh reconciler must schedule the remaining time from persisted completion,
 	// rather than delete at the default TTL or restart the full seven-day period.
-	r := RepositorySyncReconciler{Client: c, Scheme: c.Scheme(), RunnerImage: syncTestRunnerImage}
+	r := RepositorySyncReconciler{Client: c, APIReader: c, Scheme: c.Scheme(), RunnerImage: syncTestRunnerImage}
 	result, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(request)})
 	require.NoError(t, err)
 	require.InDelta(t, (3 * 24 * time.Hour).Seconds(), result.RequeueAfter.Seconds(), 5)
@@ -62,7 +62,7 @@ func TestSyncFailureWithoutJobGetsCompletionTime(t *testing.T) {
 	require.Empty(t, request.Status.JobName)
 	require.NotNil(t, request.Status.CompletedAt)
 	require.True(t, request.Status.CompletedAt.After(before))
-	r := RepositorySyncReconciler{Client: c, Scheme: c.Scheme(), RunnerImage: syncTestRunnerImage}
+	r := RepositorySyncReconciler{Client: c, APIReader: c, Scheme: c.Scheme(), RunnerImage: syncTestRunnerImage}
 	result, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(request)})
 	require.NoError(t, err)
 	require.InDelta(t, (3 * 24 * time.Hour).Seconds(), result.RequeueAfter.Seconds(), 5)
@@ -89,7 +89,7 @@ func TestSyncRetentionWaitsForRunningConsumer(t *testing.T) {
 	reconcileSync(t, c, request)
 	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(request), request))
 	require.Contains(t, request.Finalizers, repositoryOperationFinalizer)
-	gate := repositoryaccess.Gate{Client: c}
+	gate := repositoryaccess.Gate{Client: c, Reader: c}
 	busy, err := gate.Busy(t.Context(), repository, "next-writer")
 	require.NoError(t, err)
 	require.True(t, busy)

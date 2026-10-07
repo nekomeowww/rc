@@ -33,13 +33,15 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	"github.com/nekomeowww/rc/internal/holdset"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
+	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
 const (
@@ -92,19 +94,14 @@ var _ = Describe("WorktreeExec Job", func() {
 		Expect(job.Spec.Template.Spec.Containers[0].WorkingDir).To(Equal(worktreebootstrap.VolumeRootMountPath(worktree.Name)))
 	})
 
-	It("waits when the Workspace-compatible write Lease has another holder", func() {
+	It("waits when a Workspace holds the Worktree for writing", func() {
 		scheme := runtime.NewScheme()
 		Expect(repositoriesv1alpha1.AddToScheme(scheme)).To(Succeed())
 		Expect(coordinationv1.AddToScheme(scheme)).To(Succeed())
-		worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: testWorktreeExecTree, Namespace: testNamespace, UID: testWorktreeUID}}
-		exec := &repositoriesv1alpha1.WorktreeExec{ObjectMeta: metav1.ObjectMeta{Name: testWorktreeExecName, Namespace: testNamespace, UID: testExecUID}}
-		workspaceHolder := testWorkspaceUID
-		lease := &coordinationv1.Lease{
-			ObjectMeta: metav1.ObjectMeta{Name: worktreeclaim.LeaseName(worktree), Namespace: testNamespace},
-			Spec:       coordinationv1.LeaseSpec{HolderIdentity: &workspaceHolder},
-		}
-		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(lease).Build()
-		reconciler := &WorktreeExecReconciler{Client: client, Scheme: scheme}
+		worktree := withHolders(readyWorktreeForExec(), workspaceWriter())
+		exec := worktreeExecWithRecordedJob()
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree, exec).Build()
+		reconciler := &WorktreeExecReconciler{Client: client, APIReader: client, Scheme: scheme}
 
 		acquired, err := reconciler.acquireClaim(context.Background(), exec, worktree)
 
@@ -112,23 +109,49 @@ var _ = Describe("WorktreeExec Job", func() {
 		Expect(acquired).To(BeFalse())
 	})
 
-	It("releases its write Lease after execution", func() {
+	It("waits while a legacy write Lease from an older rcctl has another holder", func() {
 		scheme := runtime.NewScheme()
 		Expect(repositoriesv1alpha1.AddToScheme(scheme)).To(Succeed())
 		Expect(coordinationv1.AddToScheme(scheme)).To(Succeed())
-		exec := &repositoriesv1alpha1.WorktreeExec{ObjectMeta: metav1.ObjectMeta{Name: testWorktreeExecName, Namespace: testNamespace, UID: testExecUID}}
+		worktree := readyWorktreeForExec()
+		exec := worktreeExecWithRecordedJob()
+		workspaceHolder := testWorkspaceUID
+		lease := &coordinationv1.Lease{
+			ObjectMeta: metav1.ObjectMeta{Name: worktreeownership.LegacyWriteLeaseName(worktree), Namespace: testNamespace},
+			Spec:       coordinationv1.LeaseSpec{HolderIdentity: &workspaceHolder},
+		}
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree, exec, lease).Build()
+		reconciler := &WorktreeExecReconciler{Client: client, APIReader: client, Scheme: scheme}
+
+		acquired, err := reconciler.acquireClaim(context.Background(), exec, worktree)
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(acquired).To(BeFalse())
+		Expect(client.Delete(context.Background(), lease)).To(Succeed())
+		acquired, err = reconciler.acquireClaim(context.Background(), exec, worktree)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(acquired).To(BeTrue(), "garbage collection of the legacy Lease releases the writer")
+	})
+
+	It("releases its writer holder and legacy Lease after execution", func() {
+		scheme := runtime.NewScheme()
+		Expect(repositoriesv1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(coordinationv1.AddToScheme(scheme)).To(Succeed())
+		exec := worktreeExecWithRecordedJob()
+		worktree := withHolders(readyWorktreeForExec(), execHolder(exec))
 		holder := string(exec.UID)
 		lease := &coordinationv1.Lease{
-			ObjectMeta: metav1.ObjectMeta{Name: "rc-worktree-test", Namespace: testNamespace, Labels: map[string]string{worktreeclaim.HolderLabel: exec.Name}},
+			ObjectMeta: metav1.ObjectMeta{Name: worktreeownership.LegacyWriteLeaseName(worktree), Namespace: testNamespace, Labels: map[string]string{worktreeownership.LegacyHolderLabel: exec.Name}},
 			Spec:       coordinationv1.LeaseSpec{HolderIdentity: &holder},
 		}
-		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(lease).Build()
-		reconciler := &WorktreeExecReconciler{Client: client, Scheme: scheme}
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree, lease).Build()
+		reconciler := &WorktreeExecReconciler{Client: client, APIReader: client, Scheme: scheme}
 
 		Expect(reconciler.releaseClaim(context.Background(), exec)).To(Succeed())
 		persisted := new(coordinationv1.Lease)
 		err := client.Get(context.Background(), types.NamespacedName{Name: lease.Name, Namespace: lease.Namespace}, persisted)
 		Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		Expect(worktreeHolders(client, worktree)).To(BeEmpty())
 	})
 
 	It("marks a recorded missing Job lost instead of executing the command again", func() {
@@ -138,7 +161,7 @@ var _ = Describe("WorktreeExec Job", func() {
 		worktree := readyWorktreeForExec()
 		exec := worktreeExecWithRecordedJob()
 		client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&repositoriesv1alpha1.WorktreeExec{}).WithObjects(worktree, exec).Build()
-		reconciler := &WorktreeExecReconciler{Client: client, Scheme: scheme, RunnerImage: testRunnerImage}
+		reconciler := &WorktreeExecReconciler{Client: client, APIReader: client, Scheme: scheme, RunnerImage: testRunnerImage}
 
 		_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: clientObjectKey(exec)})
 
@@ -153,7 +176,7 @@ var _ = Describe("WorktreeExec Job", func() {
 		Expect(condition.Reason).To(Equal("JobLost"))
 	})
 
-	It("restores a missing write Lease while a Job is running", func() {
+	It("restores a missing writer holder while a Job is running", func() {
 		scheme := runtime.NewScheme()
 		Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
 		Expect(repositoriesv1alpha1.AddToScheme(scheme)).To(Succeed())
@@ -161,30 +184,26 @@ var _ = Describe("WorktreeExec Job", func() {
 		exec := worktreeExecWithRecordedJob()
 		job := runningWorktreeExecJob(scheme, exec)
 		client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&repositoriesv1alpha1.WorktreeExec{}, &batchv1.Job{}).WithObjects(worktree, exec, job).Build()
-		reconciler := &WorktreeExecReconciler{Client: client, Scheme: scheme, RunnerImage: testRunnerImage}
+		reconciler := &WorktreeExecReconciler{Client: client, APIReader: client, Scheme: scheme, RunnerImage: testRunnerImage}
 
 		_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: clientObjectKey(exec)})
 
 		Expect(err).NotTo(HaveOccurred())
-		lease := new(coordinationv1.Lease)
-		Expect(client.Get(context.Background(), types.NamespacedName{Name: worktreeclaim.LeaseName(worktree), Namespace: worktree.Namespace}, lease)).To(Succeed())
-		Expect(lease.Spec.HolderIdentity).To(HaveValue(Equal(string(exec.UID))))
+		holders := worktreeHolders(client, worktree)
+		Expect(holders).To(HaveLen(1))
+		Expect(holders[0].UID).To(Equal(exec.UID))
+		Expect(holders[0].Mode).To(Equal(worktreeownership.Write))
 	})
 
-	It("stops a running Job when another writer owns its Lease", func() {
+	It("stops a running Job when another writer holds its Worktree", func() {
 		scheme := runtime.NewScheme()
 		Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
 		Expect(repositoriesv1alpha1.AddToScheme(scheme)).To(Succeed())
-		worktree := readyWorktreeForExec()
+		worktree := withHolders(readyWorktreeForExec(), workspaceWriter())
 		exec := worktreeExecWithRecordedJob()
 		job := runningWorktreeExecJob(scheme, exec)
-		foreignHolder := testWorkspaceUID
-		lease := &coordinationv1.Lease{
-			ObjectMeta: metav1.ObjectMeta{Name: worktreeclaim.LeaseName(worktree), Namespace: worktree.Namespace},
-			Spec:       coordinationv1.LeaseSpec{HolderIdentity: &foreignHolder},
-		}
-		client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&repositoriesv1alpha1.WorktreeExec{}, &batchv1.Job{}).WithObjects(worktree, exec, job, lease).Build()
-		reconciler := &WorktreeExecReconciler{Client: client, Scheme: scheme, RunnerImage: testRunnerImage}
+		client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&repositoriesv1alpha1.WorktreeExec{}, &batchv1.Job{}).WithObjects(worktree, exec, job).Build()
+		reconciler := &WorktreeExecReconciler{Client: client, APIReader: client, Scheme: scheme, RunnerImage: testRunnerImage}
 
 		_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: clientObjectKey(exec)})
 
@@ -196,7 +215,7 @@ var _ = Describe("WorktreeExec Job", func() {
 		condition := meta.FindStatusCondition(persisted.Status.Conditions, repositoriesv1alpha1.WorktreeExecConditionSucceeded)
 		Expect(condition).NotTo(BeNil())
 		Expect(condition.Status).To(Equal(metav1.ConditionUnknown))
-		Expect(condition.Reason).To(Equal("StoppingAfterWriteLeaseLost"))
+		Expect(condition.Reason).To(Equal("StoppingAfterWriterLost"))
 
 		_, err = reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: clientObjectKey(exec)})
 
@@ -205,7 +224,7 @@ var _ = Describe("WorktreeExec Job", func() {
 		condition = meta.FindStatusCondition(persisted.Status.Conditions, repositoriesv1alpha1.WorktreeExecConditionSucceeded)
 		Expect(condition).NotTo(BeNil())
 		Expect(condition.Status).To(Equal(metav1.ConditionFalse))
-		Expect(condition.Reason).To(Equal("WriteLeaseLost"))
+		Expect(condition.Reason).To(Equal("WriterLost"))
 	})
 
 	It("records the execution before an ambiguous Job creation failure", func() {
@@ -225,17 +244,16 @@ var _ = Describe("WorktreeExec Job", func() {
 			Expect(condition).NotTo(BeNil())
 			Expect(condition.Reason).To(Equal("JobScheduled"))
 		}}
-		reconciler := &WorktreeExecReconciler{Client: observingClient, Scheme: scheme, RunnerImage: testRunnerImage}
+		reconciler := &WorktreeExecReconciler{Client: observingClient, APIReader: observingClient, Scheme: scheme, RunnerImage: testRunnerImage}
 
 		_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: clientObjectKey(exec)})
 
 		Expect(err).To(MatchError(ContainSubstring(createErr.Error())))
-		lease := new(coordinationv1.Lease)
-		Expect(baseClient.Get(context.Background(), types.NamespacedName{Name: worktreeclaim.LeaseName(worktree), Namespace: worktree.Namespace}, lease)).To(Succeed())
+		Expect(worktreeHolders(baseClient, worktree)).To(HaveLen(1), "keep the holder while Job creation is ambiguous")
 		reconciler.Client = baseClient
 		_, err = reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: clientObjectKey(exec)})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(apierrors.IsNotFound(baseClient.Get(context.Background(), clientObjectKey(lease), lease))).To(BeTrue())
+		Expect(worktreeHolders(baseClient, worktree)).To(BeEmpty())
 		persisted := new(repositoriesv1alpha1.WorktreeExec)
 		Expect(baseClient.Get(context.Background(), clientObjectKey(exec), persisted)).To(Succeed())
 		condition := meta.FindStatusCondition(persisted.Status.Conditions, repositoriesv1alpha1.WorktreeExecConditionSucceeded)
@@ -243,46 +261,37 @@ var _ = Describe("WorktreeExec Job", func() {
 		Expect(condition.Reason).To(Equal("JobLost"))
 	})
 
-	It("maps a foreign Lease change to waiting WorktreeExec resources", func() {
+	It("maps a Worktree holder change to waiting WorktreeExec resources", func() {
 		scheme := runtime.NewScheme()
 		Expect(repositoriesv1alpha1.AddToScheme(scheme)).To(Succeed())
 		worktree := readyWorktreeForExec()
 		exec := worktreeExecWithRecordedJob()
 		exec.Status = repositoriesv1alpha1.WorktreeExecStatus{}
 		kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree, exec).Build()
-		reconciler := &WorktreeExecReconciler{Client: kubeClient}
-		lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
-			Name: worktreeclaim.LeaseName(worktree), Namespace: worktree.Namespace,
-		}}
-
-		requests := reconciler.execsForLease(context.Background(), lease)
+		reconciler := &WorktreeExecReconciler{Client: kubeClient, APIReader: kubeClient}
+		requests := reconciler.execsForWorktree(context.Background(), worktree)
 
 		Expect(requests).To(ConsistOf(reconcile.Request{NamespacedName: clientObjectKey(exec)}))
 	})
 
-	It("keeps its Lease until Pods from a lost Job are gone", func() {
+	It("keeps its holder until Pods from a lost Job are gone", func() {
 		scheme := runtime.NewScheme()
 		Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
 		Expect(repositoriesv1alpha1.AddToScheme(scheme)).To(Succeed())
 		exec := worktreeExecWithRecordedJob()
-		holder := string(exec.UID)
-		lease := &coordinationv1.Lease{
-			ObjectMeta: metav1.ObjectMeta{Name: "lost-job-lease", Namespace: exec.Namespace, Labels: map[string]string{worktreeclaim.HolderLabel: exec.Name}},
-			Spec:       coordinationv1.LeaseSpec{HolderIdentity: &holder},
-		}
+		worktree := withHolders(readyWorktreeForExec(), execHolder(exec))
 		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 			Name: "orphaned-command-pod", Namespace: exec.Namespace, Labels: map[string]string{"job-name": exec.Status.JobName},
 		}}
-		kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&repositoriesv1alpha1.WorktreeExec{}).WithObjects(exec, lease, pod).Build()
-		reconciler := &WorktreeExecReconciler{Client: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
+		kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&repositoriesv1alpha1.WorktreeExec{}).WithObjects(exec, worktree, pod).Build()
+		reconciler := &WorktreeExecReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
 		request := reconcile.Request{NamespacedName: clientObjectKey(exec)}
 
 		Expect(reconciler.execsForJobPod(context.Background(), pod)).To(ConsistOf(request))
 		_, err := reconciler.Reconcile(context.Background(), request)
 
 		Expect(err).NotTo(HaveOccurred())
-		persistedLease := new(coordinationv1.Lease)
-		Expect(kubeClient.Get(context.Background(), clientObjectKey(lease), persistedLease)).To(Succeed())
+		Expect(worktreeHolders(kubeClient, worktree)).To(HaveLen(1))
 		persisted := new(repositoriesv1alpha1.WorktreeExec)
 		Expect(kubeClient.Get(context.Background(), clientObjectKey(exec), persisted)).To(Succeed())
 		condition := meta.FindStatusCondition(persisted.Status.Conditions, repositoriesv1alpha1.WorktreeExecConditionSucceeded)
@@ -293,7 +302,7 @@ var _ = Describe("WorktreeExec Job", func() {
 		_, err = reconciler.Reconcile(context.Background(), request)
 
 		Expect(err).NotTo(HaveOccurred())
-		Expect(apierrors.IsNotFound(kubeClient.Get(context.Background(), clientObjectKey(lease), persistedLease))).To(BeTrue())
+		Expect(worktreeHolders(kubeClient, worktree)).To(BeEmpty())
 		Expect(kubeClient.Get(context.Background(), clientObjectKey(exec), persisted)).To(Succeed())
 		condition = meta.FindStatusCondition(persisted.Status.Conditions, repositoriesv1alpha1.WorktreeExecConditionSucceeded)
 		Expect(condition).NotTo(BeNil())
@@ -309,6 +318,23 @@ func readyWorktreeForExec() *repositoriesv1alpha1.Worktree {
 			Type: repositoriesv1alpha1.WorktreeConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1, Reason: testReadyReason,
 		}}},
 	}
+}
+
+func workspaceWriter() holdset.Holder {
+	return holdset.Holder{Kind: worktreeownership.KindWorkspace, Name: testDeveloperName, UID: testWorkspaceUID, Mode: worktreeownership.Write}
+}
+
+func withHolders(worktree *repositoriesv1alpha1.Worktree, holders ...holdset.Holder) *repositoriesv1alpha1.Worktree {
+	Expect(holdset.Encode(worktree, worktreeownership.HoldersAnnotation, holdset.State{Holders: holders})).To(Succeed())
+	return worktree
+}
+
+func worktreeHolders(reader ctrlclient.Reader, worktree *repositoriesv1alpha1.Worktree) []holdset.Holder {
+	current := new(repositoriesv1alpha1.Worktree)
+	ExpectWithOffset(1, reader.Get(context.Background(), clientObjectKey(worktree), current)).To(Succeed())
+	state, err := worktreeownership.Decode(current)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	return state.Holders
 }
 
 func worktreeExecWithRecordedJob() *repositoriesv1alpha1.WorktreeExec {

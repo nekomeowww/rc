@@ -4,185 +4,218 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/client-go/util/retry"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/holdset"
 )
 
 const (
-	mountHoldersAnnotation = "repositories.rc.ayaka.io/mount-holders"
-	mountsClosedAnnotation = "repositories.rc.ayaka.io/mounts-closed"
+	// HoldersAnnotation stores the Worktree hold set: every admitted Workspace
+	// mount and writer, plus the irreversible storage/deletion fence.
+	HoldersAnnotation = "repositories.rc.ayaka.io/holders"
+	// Annotations written before the hold set. They are still read, and are
+	// removed by the first hold set write, for one release.
+	legacyMountHoldersAnnotation = "repositories.rc.ayaka.io/mount-holders"
+	legacyMountsClosedAnnotation = "repositories.rc.ayaka.io/mounts-closed"
 )
 
-// MountAccess serializes runtime admission and deletion on the Worktree itself.
-// Both sides use resourceVersion preconditions on this same object. A Lease can
-// disappear during foreground GC; this fence lives until the Worktree is gone.
-// Workspace spec is a desired mount, not permission to create a consumer.
-// Reservations have no TTL: time passing cannot stop an admitted runtime.
-type MountAccess struct {
-	Client client.Client
-	Reader client.Reader
+// Worktree holder modes. Readers coexist with everything; a writer excludes
+// other writers. Deletion uses the Closed fence, not a holder.
+const (
+	Read  holdset.Mode = "read"
+	Write holdset.Mode = "write"
+)
+
+// Holder kinds on a Worktree.
+const (
+	KindWorkspace    = "Workspace"
+	KindWorktreeExec = "WorktreeExec"
+)
+
+// Conflicts admits any number of readers and at most one writer.
+func Conflicts(existing []holdset.Holder, candidate holdset.Holder) []holdset.Holder {
+	if candidate.Mode != Write {
+		return nil
+	}
+	var blocking []holdset.Holder
+	for _, holder := range existing {
+		if holder.Mode == Write {
+			blocking = append(blocking, holder)
+		}
+	}
+	return blocking
 }
 
-func (g MountAccess) reader() client.Reader {
-	if g.Reader != nil {
-		return g.Reader
+// WorkspaceHolder identifies one Workspace incarnation's use of a Worktree.
+func WorkspaceHolder(workspace *workspacesv1alpha1.Workspace, mode holdset.Mode) holdset.Holder {
+	return holdset.HolderFor(KindWorkspace, workspace, mode)
+}
+
+// Decode reads the Worktree hold set, merging the legacy mount-holders and
+// mounts-closed annotations. Legacy mount holders were Workspaces of any
+// mode; their write access was a separate Lease, imported by the controller.
+func Decode(worktree *repositoriesv1alpha1.Worktree) (holdset.State, error) {
+	state, err := holdset.Decode(worktree, HoldersAnnotation)
+	if err != nil {
+		return holdset.State{}, err
 	}
-	return g.Client
+	if worktree.Annotations[legacyMountsClosedAnnotation] != "" {
+		state.Closed = true
+	}
+	if data := worktree.Annotations[legacyMountHoldersAnnotation]; data != "" {
+		tokens := make(map[string]bool)
+		if err := json.Unmarshal([]byte(data), &tokens); err != nil {
+			return holdset.State{}, fmt.Errorf("decode legacy Worktree mount holders: %w", err)
+		}
+		for token, held := range tokens {
+			uid, name, _ := strings.Cut(token, "/")
+			holder := holdset.Holder{Kind: KindWorkspace, Name: name, UID: types.UID(uid), Mode: Read, Since: worktree.CreationTimestamp}
+			if _, exists := state.Find(holder.Key()); held && uid != "" && !exists {
+				state.Put(holder)
+			}
+		}
+	}
+	return state, nil
 }
 
 // MountsClosed reports an irreversible storage/deletion fence. A Worktree whose
-// storage was explicitly deleted must not silently become a fresh checkout.
+// storage was explicitly deleted must not silently become a fresh checkout. An
+// unreadable hold set fails closed.
 func MountsClosed(worktree *repositoriesv1alpha1.Worktree) bool {
-	return !worktree.DeletionTimestamp.IsZero() || worktree.Annotations[mountsClosedAnnotation] != ""
+	if !worktree.DeletionTimestamp.IsZero() {
+		return true
+	}
+	state, err := Decode(worktree)
+	return err != nil || state.Closed
 }
 
-func mountToken(workspace *workspacesv1alpha1.Workspace) string {
-	return string(workspace.UID) + "/" + workspace.Name
+// MountAccess serializes runtime admission, writers and deletion on the
+// Worktree itself. Every side uses resourceVersion preconditions on this same
+// object, so a Lease that foreground GC can remove is never the fence.
+// Workspace spec is a desired mount, not permission to create a consumer.
+// Holders have no TTL: time passing cannot stop an admitted runtime.
+type MountAccess struct {
+	Client client.Client
+	// Reader is required and must bypass the manager cache in production.
+	Reader client.Reader
 }
 
-func mountHolders(worktree *repositoriesv1alpha1.Worktree) (map[string]bool, error) {
-	holders := make(map[string]bool)
-	if data := worktree.Annotations[mountHoldersAnnotation]; data != "" {
-		if err := json.Unmarshal([]byte(data), &holders); err != nil {
-			return nil, fmt.Errorf("decode Worktree mount holders: %w", err)
+// Store returns the hold set of a Worktree. A non-empty uid treats any other
+// incarnation as absent, so a stale capture cannot touch a replacement.
+func (g MountAccess) Store(key client.ObjectKey, uid types.UID) holdset.AnnotationStore {
+	return holdset.AnnotationStore{
+		Client: g.Client, Reader: g.Reader, Key: key, UID: uid, Annotation: HoldersAnnotation,
+		New:    func() client.Object { return new(repositoriesv1alpha1.Worktree) },
+		Decode: func(obj client.Object) (holdset.State, error) { return Decode(obj.(*repositoriesv1alpha1.Worktree)) },
+		Legacy: []string{legacyMountHoldersAnnotation, legacyMountsClosedAnnotation},
+	}
+}
+
+// Admit records holder before owner creates any runtime, hot-mount helper or
+// Job that uses the Worktree. The captured UID, generation and claim prevent a
+// stale observation from admitting against changed storage; a DELETE or Close
+// racing this patch changes resourceVersion, so the retry observes the fence.
+// A refused result still reports Held when holder already holds its mode.
+// On error the write may have succeeded: retain and later release the holder
+// only after confirming that the owner's consumers have stopped.
+func (g MountAccess) Admit(ctx context.Context, captured *repositoriesv1alpha1.Worktree, owner client.Object, holder holdset.Holder) (holdset.Result, error) {
+	live := owner.DeepCopyObject().(client.Object)
+	if err := g.Reader.Get(ctx, client.ObjectKeyFromObject(owner), live); err != nil {
+		return holdset.Result{}, client.IgnoreNotFound(err)
+	}
+	if live.GetUID() != holder.UID || !live.GetDeletionTimestamp().IsZero() {
+		return holdset.Result{}, nil
+	}
+	var result holdset.Result
+	_, err := holdset.Update(ctx, g.Store(client.ObjectKeyFromObject(captured), captured.UID), func(obj client.Object, state *holdset.State) (bool, error) {
+		result = holdset.Result{}
+		if obj == nil {
+			return false, nil
 		}
-	}
-	if holders == nil {
-		holders = make(map[string]bool)
-	}
-	return holders, nil
+		current := obj.(*repositoriesv1alpha1.Worktree)
+		if current.Generation != captured.Generation || current.Status.VolumeClaimName != captured.Status.VolumeClaimName {
+			existing, found := state.Find(holder.Key())
+			result.Held = found && existing.Mode == holder.Mode
+			return false, nil
+		}
+		admission := *state
+		admission.Closed = admission.Closed || !current.DeletionTimestamp.IsZero()
+		var changed bool
+		result, changed = admission.Admit(holder, Conflicts)
+		if changed {
+			state.Holders = admission.Holders
+		}
+		return changed, nil
+	})
+	return result, err
 }
 
-func storeMountHolders(worktree *repositoriesv1alpha1.Worktree, holders map[string]bool) error {
-	encoded, err := json.Marshal(holders)
+// Close closes admission permanently and returns the holders that remain.
+// Even with no visible Pod yet, an admitted creator keeps deletion waiting.
+// New spec references after this point cannot obtain access.
+func (g MountAccess) Close(ctx context.Context, worktree *repositoriesv1alpha1.Worktree) ([]holdset.Holder, error) {
+	remaining, err := holdset.Close(ctx, g.Store(client.ObjectKeyFromObject(worktree), worktree.UID))
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("close Worktree admission: %w", err)
 	}
-	if worktree.Annotations == nil {
-		worktree.Annotations = make(map[string]string)
-	}
-	worktree.Annotations[mountHoldersAnnotation] = string(encoded)
-	return nil
+	return remaining, nil
 }
 
-// Admit records an in-flight mount before any runtime or hot-mount Pod creation.
-// The captured UID prevents name reuse; a DELETE or Close racing this patch
-// changes resourceVersion, so a retry observes the fence and refuses admission.
-// On error the write may have succeeded: retain and later release the token
-// only after confirming that this Workspace's consumers have stopped.
-func (g MountAccess) Admit(ctx context.Context, captured *repositoriesv1alpha1.Worktree, workspace *workspacesv1alpha1.Workspace) (bool, error) {
-	owner := new(workspacesv1alpha1.Workspace)
-	if err := g.reader().Get(ctx, client.ObjectKeyFromObject(workspace), owner); err != nil {
-		return false, client.IgnoreNotFound(err)
-	}
-	if owner.UID != workspace.UID || !owner.DeletionTimestamp.IsZero() {
-		return false, nil
-	}
-	admitted := false
-	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		admitted = false
-		current := new(repositoriesv1alpha1.Worktree)
-		if err := g.reader().Get(ctx, client.ObjectKeyFromObject(captured), current); err != nil {
-			return client.IgnoreNotFound(err)
-		}
-		if current.UID != captured.UID || current.Generation != captured.Generation || current.Status.VolumeClaimName != captured.Status.VolumeClaimName || MountsClosed(current) {
-			return nil
-		}
-		holders, err := mountHolders(current)
-		if err != nil {
-			return err
-		}
-		if holders[mountToken(workspace)] {
-			admitted = true
-			return nil
-		}
-		before := current.DeepCopy()
-		holders[mountToken(workspace)] = true
-		if err := storeMountHolders(current, holders); err != nil {
-			return err
-		}
-		if err := g.Client.Patch(ctx, current, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
-			return err
-		}
-		admitted = true
-		return nil
-	})
-	return admitted, err
+// Release drops one holder from the Worktree named key. Call it only after the
+// holder's consumers have stopped. An empty uid accepts any incarnation; a
+// holder key never matches an incarnation it was not admitted to.
+func (g MountAccess) Release(ctx context.Context, key client.ObjectKey, uid types.UID, holderKey string) error {
+	return holdset.Release(ctx, g.Store(key, uid), holderKey)
 }
 
-// Close closes admission permanently and reports whether in-flight/runtime
-// reservations remain. Even with no visible Pod yet, an admitted creator keeps
-// deletion waiting. New spec references after this point cannot obtain access.
-func (g MountAccess) Close(ctx context.Context, worktree *repositoriesv1alpha1.Worktree) (bool, error) {
-	drained := false
-	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		current := new(repositoriesv1alpha1.Worktree)
-		if err := g.reader().Get(ctx, client.ObjectKeyFromObject(worktree), current); err != nil {
-			return err
-		}
-		if current.UID != worktree.UID {
-			return fmt.Errorf("worktree identity changed while closing mount admission")
-		}
-		holders, err := mountHolders(current)
-		if err != nil {
-			return err
-		}
-		if current.Annotations[mountsClosedAnnotation] == "" {
-			before := current.DeepCopy()
-			if current.Annotations == nil {
-				current.Annotations = make(map[string]string)
-			}
-			current.Annotations[mountsClosedAnnotation] = "true"
-			if err := g.Client.Patch(ctx, current, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
-				return err
-			}
-		}
-		drained = len(holders) == 0
-		return nil
-	})
-	return drained, err
-}
-
-// ReleaseExcept drops this Workspace incarnation's unused reservations. Call
-// only after removed mounts' Pods have disappeared. Candidates are captured by
-// the caller during topology change or teardown, never discovered on the Ready
+// ReleaseExcept drops this Workspace incarnation's unused holders. Call only
+// after removed mounts' Pods have disappeared. Candidates are captured by the
+// caller during topology change or teardown, never discovered on the Ready
 // path. keep contains names still used by the current topology; nil releases all.
 func (g MountAccess) ReleaseExcept(ctx context.Context, workspace *workspacesv1alpha1.Workspace, candidates []repositoriesv1alpha1.Worktree, keep map[string]bool) error {
+	modes := make(map[string]holdset.Mode, len(keep))
+	for name, kept := range keep {
+		if kept {
+			modes[name] = Write
+		}
+	}
+	return g.Retain(ctx, workspace, candidates, modes)
+}
+
+// Retain releases this Workspace's holders on candidates absent from keep and
+// downgrades a write holder to read where keep allows only reading. It never
+// upgrades: writes are admitted only through Admit.
+func (g MountAccess) Retain(ctx context.Context, workspace *workspacesv1alpha1.Workspace, candidates []repositoriesv1alpha1.Worktree, keep map[string]holdset.Mode) error {
+	key := WorkspaceHolder(workspace, Read).Key()
 	for _, worktree := range candidates {
-		if worktree.Namespace != workspace.Namespace || keep[worktree.Name] {
+		if worktree.Namespace != workspace.Namespace {
 			continue
 		}
-		if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-			current := new(repositoriesv1alpha1.Worktree)
-			if err := g.reader().Get(ctx, client.ObjectKeyFromObject(&worktree), current); err != nil {
-				return client.IgnoreNotFound(err)
+		mode, kept := keep[worktree.Name]
+		if kept && mode == Write {
+			continue
+		}
+		if _, err := holdset.Update(ctx, g.Store(client.ObjectKeyFromObject(&worktree), worktree.UID), func(_ client.Object, state *holdset.State) (bool, error) {
+			existing, found := state.Find(key)
+			switch {
+			case !found:
+				return false, nil
+			case !kept:
+				return state.Remove(key), nil
+			case existing.Mode == Write:
+				existing.Mode = Read
+				state.Put(existing)
+				return true, nil
+			default:
+				return false, nil
 			}
-			if current.UID != worktree.UID {
-				return nil
-			}
-			holders, err := mountHolders(current)
-			if err != nil {
-				return err
-			}
-			if !holders[mountToken(workspace)] {
-				return nil
-			}
-			before := current.DeepCopy()
-			delete(holders, mountToken(workspace))
-			if err := storeMountHolders(current, holders); err != nil {
-				return err
-			}
-			err = g.Client.Patch(ctx, current, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
-			if apierrors.IsNotFound(err) {
-				return nil
-			}
-			return err
-		}); err != nil {
+		}); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
 	}

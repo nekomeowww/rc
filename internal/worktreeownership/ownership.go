@@ -15,7 +15,7 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
+	"github.com/nekomeowww/rc/internal/conditions"
 )
 
 // GeneratedForLabel records checkout provenance and bootstrap hints. It never
@@ -25,6 +25,10 @@ const GeneratedForLabel = "workspaces.rc.ayaka.io/generated-for"
 // WorkspaceCleanupFinalizer marks runtime teardown, which finishes before GC
 // waits for dependent Worktrees. Unlike foregroundDeletion it is a live blocker.
 const WorkspaceCleanupFinalizer = "workspaces.rc.ayaka.io/terminate-processes"
+
+// DeletionFinalizer keeps a Worktree present until the controller has closed
+// its hold set, drained every holder, and verified no Pod uses its volume.
+const DeletionFinalizer = "repositories.rc.ayaka.io/worktree-delete-protection"
 
 // VolumeProtectionFinalizer keeps foreground GC from removing storage before
 // the Worktree's mount, runtime, writer, and clone checks have completed.
@@ -40,7 +44,13 @@ func InitializeGenerated(workspace *workspacesv1alpha1.Workspace, worktree *repo
 		worktree.Labels = make(map[string]string)
 	}
 	worktree.Labels[GeneratedForLabel] = workspace.Name
-	controllerutil.AddFinalizer(worktree, worktreeclaim.DeletionFinalizer)
+	controllerutil.AddFinalizer(worktree, DeletionFinalizer)
+}
+
+// ReadyAtCurrentGeneration reports whether the Worktree's status and Ready
+// condition are True and observed at or after its current generation.
+func ReadyAtCurrentGeneration(worktree *repositoriesv1alpha1.Worktree) bool {
+	return conditions.ReadyAtGeneration(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady, worktree.Generation, worktree.Status.ObservedGeneration)
 }
 
 // WorkspaceOwner returns a Workspace controller reference, without interpreting
@@ -65,17 +75,51 @@ func IsOwnedBy(worktree *repositoriesv1alpha1.Worktree, workspace *workspacesv1a
 }
 
 // ReferenceBlockers lists live Workspace mounts that protect a Worktree from
-// deletion. Deleting Workspaces finish runtime cleanup and release writer Leases first;
-// counting their mounts here would deadlock foreground garbage collection.
+// deletion. Deleting Workspaces finish runtime cleanup and release their holders
+// first; counting their mounts here would deadlock foreground garbage collection.
 // This is a conservative reference check, not an admission lock. Callers must
-// close MountAccess and acquire the exclusive writer Lease before finalizing.
+// close MountAccess and wait for its holders to drain before finalizing.
+// reader should be a cache with WorkspaceWorktreeIndex; a reader without the
+// index, such as a direct API client, falls back to ListReferenceBlockers.
 func ReferenceBlockers(ctx context.Context, reader client.Reader, namespace, name string) ([]string, error) {
+	workspaces := new(workspacesv1alpha1.WorkspaceList)
+	if err := reader.List(ctx, workspaces, client.InNamespace(namespace), client.MatchingFields{WorkspaceWorktreeIndex: name}); err != nil {
+		return ListReferenceBlockers(ctx, reader, namespace, name)
+	}
+	return referenceBlockers(workspaces.Items, name), nil
+}
+
+// WorkspaceWorktreeIndex indexes Workspaces by the Worktrees their spec mounts.
+const WorkspaceWorktreeIndex = "spec.mounts.worktreeRef.name"
+
+// WorkspaceWorktreeIndexValues extracts WorkspaceWorktreeIndex values.
+func WorkspaceWorktreeIndexValues(object client.Object) []string {
+	workspace, ok := object.(*workspacesv1alpha1.Workspace)
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(workspace.Spec.Mounts))
+	for _, mount := range workspace.Spec.Mounts {
+		if mount.WorktreeRef != nil && !slices.Contains(names, mount.WorktreeRef.Name) {
+			names = append(names, mount.WorktreeRef.Name)
+		}
+	}
+	return names
+}
+
+// ListReferenceBlockers is ReferenceBlockers for clients without a cache
+// index: it lists every Workspace in the namespace.
+func ListReferenceBlockers(ctx context.Context, reader client.Reader, namespace, name string) ([]string, error) {
 	workspaces := new(workspacesv1alpha1.WorkspaceList)
 	if err := reader.List(ctx, workspaces, client.InNamespace(namespace)); err != nil {
 		return nil, fmt.Errorf("list Workspace references for Worktree %q: %w", name, err)
 	}
+	return referenceBlockers(workspaces.Items, name), nil
+}
+
+func referenceBlockers(workspaces []workspacesv1alpha1.Workspace, name string) []string {
 	blockers := make([]string, 0)
-	for _, workspace := range workspaces.Items {
+	for _, workspace := range workspaces {
 		if !workspace.DeletionTimestamp.IsZero() && !slices.Contains(workspace.Finalizers, WorkspaceCleanupFinalizer) {
 			continue
 		}
@@ -87,7 +131,7 @@ func ReferenceBlockers(ctx context.Context, reader client.Reader, namespace, nam
 		}
 	}
 	slices.Sort(blockers)
-	return blockers, nil
+	return blockers
 }
 
 // ProtectVolume upgrades an existing owned PVC before an explicit adoption can

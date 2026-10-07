@@ -27,6 +27,8 @@ import (
 // releasing the parent, so subsequent clones cannot observe a partial reset.
 type RepositorySyncReconciler struct {
 	client.Client
+	// APIReader is required. It bypasses the informer cache; SetupWithManager
+	// sets it from the manager.
 	APIReader   client.Reader
 	Scheme      *runtime.Scheme
 	RunnerImage string
@@ -43,15 +45,11 @@ type RepositorySyncReconciler struct {
 func (r *RepositorySyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	// Request status and Job existence must reflect completed API writes, not
 	// informer delivery order. This preserves at-most-once execution.
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
 	request := new(repositoriesv1alpha1.RepositorySync)
-	if err := reader.Get(ctx, req.NamespacedName, request); err != nil {
+	if err := r.APIReader.Get(ctx, req.NamespacedName, request); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	token := repositoryaccess.Token("sync", request)
+	holder := repositoryaccess.Holder(repositoryaccess.KindRepositorySync, request, repositoryaccess.Write)
 	terminal := meta.FindStatusCondition(request.Status.Conditions, repositoriesv1alpha1.RepositorySyncConditionSucceeded)
 	if !request.DeletionTimestamp.IsZero() || (terminal != nil && terminal.Status != metav1.ConditionUnknown) {
 		if !request.DeletionTimestamp.IsZero() && request.Status.JobName != "" && (terminal == nil || terminal.Status == metav1.ConditionUnknown) {
@@ -66,7 +64,7 @@ func (r *RepositorySyncReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 				}
 			}
 		}
-		done, err := releaseRepositoryOperation(ctx, r.Client, r.APIReader, request, token, request.Status.JobName)
+		done, err := releaseRepositoryOperation(ctx, r.Client, r.APIReader, request, request.Spec.RepositoryRef.Name, holder.Key(), request.Status.JobName)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -92,7 +90,7 @@ func (r *RepositorySyncReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 		return ctrl.Result{}, err
 	}
-	job, state, err := observeOneShotJob(ctx, reader, request, request.Status.JobName)
+	job, state, err := observeOneShotJob(ctx, r.APIReader, request, request.Status.JobName)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -118,7 +116,7 @@ func (r *RepositorySyncReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, r.setResult(ctx, request, metav1.ConditionUnknown, "RepositoryNotReady", "Waiting for Repository bootstrap", nil)
 	}
 	gate := repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}
-	admission, err := gate.Acquire(ctx, repository, token, repositoryaccess.Write, false)
+	admission, err := gate.Acquire(ctx, repository, holder, false)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -187,11 +185,7 @@ func (r *RepositorySyncReconciler) complete(ctx context.Context, request *reposi
 	status, reason, message, _ := terminalJobOutcome(job)
 	if status == metav1.ConditionTrue {
 		pods := new(corev1.PodList)
-		reader := r.APIReader
-		if reader == nil {
-			reader = r.Client
-		}
-		if err := reader.List(ctx, pods, client.InNamespace(job.Namespace), client.MatchingLabels{batchv1.JobNameLabel: job.Name}); err != nil {
+		if err := r.APIReader.List(ctx, pods, client.InNamespace(job.Namespace), client.MatchingLabels{batchv1.JobNameLabel: job.Name}); err != nil {
 			return err
 		}
 		for _, pod := range pods.Items {

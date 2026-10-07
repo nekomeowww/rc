@@ -32,6 +32,40 @@ const (
 	// WorktreeConditionReady reports whether the child volume and its isolated
 	// Git checkout are ready for a workload to mount.
 	WorktreeConditionReady = "Ready"
+
+	// WorktreeConditionDeletionBlocked is True only while the Worktree has a
+	// deletionTimestamp and its controller's finalizer is waiting. It is absent
+	// otherwise. Reasons are the DeletionBlockedReason* constants.
+	WorktreeConditionDeletionBlocked = "DeletionBlocked"
+
+	// WorktreeConditionInUse reports whether a Workspace, a WorktreeExec or a
+	// Pod currently uses the Worktree. status.usedBy lists admitted holders.
+	WorktreeConditionInUse = "InUse"
+)
+
+// Reasons of the InUse condition.
+const (
+	// WorktreeReasonMountedByWorkspace means a Workspace holds a mount.
+	WorktreeReasonMountedByWorkspace = "MountedByWorkspace"
+	// WorktreeReasonWriterExec means a WorktreeExec holds the Worktree writer.
+	WorktreeReasonWriterExec = "WriterExec"
+	// WorktreeReasonPodConsumer means only a Pod outside rc's hold set uses
+	// the volume.
+	WorktreeReasonPodConsumer = "PodConsumer"
+	// WorktreeReasonIdle means nothing uses the Worktree.
+	WorktreeReasonIdle = "Idle"
+)
+
+// Storage failure reasons. Both VolumeReady and Ready are False with these
+// reasons. Other storage-owning kinds use the same reason names on their
+// storage condition (for example StorageReady).
+const (
+	// WorktreeReasonVolumeClaimLost means the recorded child PVC is missing.
+	// The controller does not create a replacement checkout.
+	WorktreeReasonVolumeClaimLost = "VolumeClaimLost"
+	// WorktreeReasonVolumeClaimConflict means the PVC selected for this
+	// Worktree is not controlled by this Worktree incarnation.
+	WorktreeReasonVolumeClaimConflict = "VolumeClaimConflict"
 )
 
 // WorktreeStorageSpec optionally overrides the storage inherited from the
@@ -146,6 +180,12 @@ type WorktreeStatus struct {
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 
+	// usedBy mirrors the Worktree hold set: admitted Workspace mounts and
+	// writers. It is written by the Worktree controller and is not a lock.
+	// +listType=atomic
+	// +optional
+	UsedBy []UsageReference `json:"usedBy,omitempty"`
+
 	// conditions represent the current state of the Worktree resource.
 	// +listType=map
 	// +listMapKey=type
@@ -160,6 +200,9 @@ type WorktreeStatus struct {
 // +kubebuilder:printcolumn:name="Repository",type=string,JSONPath=".spec.repositoryRef.name"
 // +kubebuilder:printcolumn:name="Volume",type=string,JSONPath=".status.volumeClaimName"
 // +kubebuilder:printcolumn:name="Path",type=string,JSONPath=".status.worktreePath"
+// +kubebuilder:printcolumn:name="In-Use",type=string,JSONPath=".status.conditions[?(@.type=='InUse')].status"
+// +kubebuilder:printcolumn:name="Usage",type=string,JSONPath=".status.conditions[?(@.type=='InUse')].reason",priority=1
+// +kubebuilder:printcolumn:name="Blocked",type=string,JSONPath=".status.conditions[?(@.type=='DeletionBlocked')].reason",priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=".metadata.creationTimestamp"
 type Worktree struct {
 	metav1.TypeMeta `json:",inline"`

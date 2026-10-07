@@ -75,6 +75,8 @@ type resolvedCredentialProjection struct {
 // WorkspaceExecReconciler reconciles an at-most-once command with rc-kube.
 type WorkspaceExecReconciler struct {
 	client.Client
+	// APIReader is required. It bypasses the informer cache; SetupWithManager
+	// sets it from the manager.
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
 	Runtime   processruntime.Runtime
@@ -100,14 +102,17 @@ func (r *WorkspaceExecReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	// A claimed execution belongs to one runtime incarnation even when its
 	// phase fell back to Pending. Resolve loss before target readiness or RPCs.
+	// The Pod read here also serves the Stop and Inspect paths below.
+	var runtimePod *corev1.Pod
 	if process.Status.RuntimePodUID != "" {
-		reason, message, err := r.processRuntimeLoss(ctx, process)
+		pod, reason, message, err := r.originalRuntimePod(ctx, process)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		if reason != "" {
 			return ctrl.Result{}, r.setTerminalProcessStatus(ctx, req.NamespacedName, workspacesv1alpha1.WorkspaceExecPhaseLost, nil, reason, message, 0)
 		}
+		runtimePod = pod
 	}
 	if r.Runtime == nil {
 		return ctrl.Result{}, errors.New("WorkspaceExec runtime client is not configured")
@@ -121,7 +126,7 @@ func (r *WorkspaceExecReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if process.Status.RuntimePodUID == "" && (process.Status.Phase == "" || process.Status.Phase == workspacesv1alpha1.WorkspaceExecPhasePending) {
 			return ctrl.Result{}, r.setTerminalProcessStatus(ctx, req.NamespacedName, workspacesv1alpha1.WorkspaceExecPhaseStopped, nil, "StoppedBeforeStart", "Process was stopped before it started", 0)
 		}
-		target, lost, err := r.originalProcessTarget(ctx, process)
+		target, lost, err := runtimeProcessTarget(process, runtimePod)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -140,7 +145,7 @@ func (r *WorkspaceExecReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	if process.Status.Phase == workspacesv1alpha1.WorkspaceExecPhaseRunning {
-		target, lost, err := r.originalProcessTarget(ctx, process)
+		target, lost, err := runtimeProcessTarget(process, runtimePod)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -168,7 +173,7 @@ func (r *WorkspaceExecReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 // Call stack:
 // Reconcile -> startWorkspaceExec -> resolveProcessTarget
 //
-//	-> claimProcessRuntime -> processRuntimeLoss -> Runtime.Start
+//	-> claimProcessRuntime -> originalRuntimePod -> Runtime.Start
 func (r *WorkspaceExecReconciler) startWorkspaceExec(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) (ctrl.Result, error) {
 	key := client.ObjectKeyFromObject(process)
 	target, reason, message, err := r.resolveProcessTarget(ctx, process)
@@ -201,19 +206,15 @@ func (r *WorkspaceExecReconciler) startProcess(ctx context.Context, key types.Na
 		return ctrl.Result{}, err
 	}
 	// Status writes are not synchronously reflected in the informer cache.
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
 	current := new(workspacesv1alpha1.WorkspaceExec)
-	if err := reader.Get(ctx, key, current); err != nil {
+	if err := r.APIReader.Get(ctx, key, current); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	if !current.DeletionTimestamp.IsZero() || executionTerminal(current.Status.Phase) {
+	if !current.DeletionTimestamp.IsZero() || current.Status.Phase.Terminal() {
 		return ctrl.Result{Requeue: true}, nil
 	}
 	if target.workspace != nil {
-		gate := workspaceadmission.Gate{Client: r.Client, Reader: reader}
+		gate := workspaceadmission.Gate{Client: r.Client, Reader: r.APIReader}
 		if err := gate.Admit(ctx, target.workspace, current); err != nil {
 			if errors.Is(err, workspaceadmission.ErrClosed) || errors.Is(err, workspaceadmission.ErrOwnerChanged) || apierrors.IsNotFound(err) {
 				return ctrl.Result{}, r.setTerminalProcessStatus(ctx, key, workspacesv1alpha1.WorkspaceExecPhaseFailed, nil, "WorkspaceAdmissionRejected", err.Error(), 0)
@@ -231,7 +232,7 @@ func (r *WorkspaceExecReconciler) startProcess(ctx context.Context, key types.Na
 			}
 		}
 	}
-	reason, message, err := r.processRuntimeLoss(ctx, current)
+	_, reason, message, err := r.originalRuntimePod(ctx, current)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -256,7 +257,7 @@ func (r *WorkspaceExecReconciler) handleWorkspaceExecLifecycle(ctx context.Conte
 		return result, true, err
 	}
 	if controllerutil.ContainsFinalizer(process, executionFinalizer) {
-		if executionTerminal(process.Status.Phase) {
+		if process.Status.Phase.Terminal() {
 			return ctrl.Result{}, true, r.ensureExecutionCompletedAt(ctx, process)
 		}
 		return ctrl.Result{}, false, nil
@@ -273,11 +274,11 @@ func (r *WorkspaceExecReconciler) finalizeWorkspaceExec(ctx context.Context, pro
 	if !controllerutil.ContainsFinalizer(process, executionFinalizer) {
 		return ctrl.Result{}, nil
 	}
-	owner, err := readExecutionTarget(ctx, r.cleanupReader(), process)
+	owner, err := readExecutionTarget(ctx, r.APIReader, process)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if owner != nil && owner.GetDeletionTimestamp().IsZero() && !executionTerminal(process.Status.Phase) && process.Status.RuntimePodName != "" && process.Status.RuntimePodUID != "" {
+	if owner != nil && owner.GetDeletionTimestamp().IsZero() && !process.Status.Phase.Terminal() && process.Status.RuntimePodName != "" && process.Status.RuntimePodUID != "" {
 		if r.Runtime == nil {
 			return ctrl.Result{}, errors.New("WorkspaceExec runtime client is not configured")
 		}
@@ -291,7 +292,7 @@ func (r *WorkspaceExecReconciler) finalizeWorkspaceExec(ctx context.Context, pro
 			if err != nil && !errors.Is(err, processruntime.ErrNotFound) {
 				return ctrl.Result{}, fmt.Errorf("stop deleting process through rc-kube: %w", err)
 			}
-			if err == nil && !executionTerminal(runtimePhase(state.Phase, state.ExitCode)) {
+			if err == nil && !runtimePhase(state.Phase, state.ExitCode).Terminal() {
 				return ctrl.Result{RequeueAfter: processTargetRequeueDelay}, nil
 			}
 			if err == nil {
@@ -322,45 +323,45 @@ func (r *WorkspaceExecReconciler) finalizeWorkspaceExec(ctx context.Context, pro
 	return ctrl.Result{}, nil
 }
 
-// processRuntimeLoss uses authoritative Pod identity and terminal state rather
-// than Workspace Ready. A Pod exit is not the exit code of its child processes.
-func (r *WorkspaceExecReconciler) processRuntimeLoss(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) (string, string, error) {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+// originalRuntimePod reads the claimed runtime Pod directly. It uses
+// authoritative Pod identity and terminal state rather than Workspace Ready; a
+// Pod exit is not the exit code of its child processes. A non-empty reason
+// reports loss: RuntimeReplaced when the original Pod identity is gone, or
+// RuntimeTerminated with the returned Pod when it reached a terminal state.
+func (r *WorkspaceExecReconciler) originalRuntimePod(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) (*corev1.Pod, string, string, error) {
 	pod := new(corev1.Pod)
 	key := client.ObjectKey{Namespace: process.Namespace, Name: process.Status.RuntimePodName}
-	err := reader.Get(ctx, key, pod)
+	err := r.APIReader.Get(ctx, key, pod)
 	if apierrors.IsNotFound(err) || (err == nil && string(pod.UID) != process.Status.RuntimePodUID) {
-		return "RuntimeReplaced", "The original runtime Pod no longer exists", nil
+		return nil, "RuntimeReplaced", "The original runtime Pod no longer exists", nil
 	}
 	if err != nil {
-		return "", "", err
+		return nil, "", "", fmt.Errorf("get original process runtime Pod: %w", err)
 	}
 	if runtimePodTerminal(pod) {
-		return "RuntimeTerminated", runtimePodDiagnosis(pod), nil
+		return pod, "RuntimeTerminated", runtimePodDiagnosis(pod), nil
 	}
-	return "", "", nil
+	return pod, "", "", nil
 }
 
 func (r *WorkspaceExecReconciler) originalProcessTarget(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) (*resolvedProcessTarget, bool, error) {
 	if process.Status.RuntimePodName == "" || process.Status.RuntimePodUID == "" {
 		return nil, true, nil
 	}
-	pod := new(corev1.Pod)
-	key := types.NamespacedName{Name: process.Status.RuntimePodName, Namespace: process.Namespace}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
+	pod, reason, _, err := r.originalRuntimePod(ctx, process)
+	if err != nil {
+		return nil, false, err
 	}
-	if err := reader.Get(ctx, key, pod); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, true, nil
-		}
-		return nil, false, fmt.Errorf("get original process runtime Pod: %w", err)
+	if reason != "" {
+		return nil, true, nil
 	}
-	if string(pod.UID) != process.Status.RuntimePodUID || runtimePodTerminal(pod) {
+	return runtimeProcessTarget(process, pod)
+}
+
+// runtimeProcessTarget addresses the original runtime Pod returned by
+// originalRuntimePod. A nil Pod means the original runtime is lost.
+func runtimeProcessTarget(process *workspacesv1alpha1.WorkspaceExec, pod *corev1.Pod) (*resolvedProcessTarget, bool, error) {
+	if pod == nil {
 		return nil, true, nil
 	}
 	platform, err := rcplatform.FromPod(pod)
@@ -702,7 +703,7 @@ func (r *WorkspaceExecReconciler) claimProcessRuntime(ctx context.Context, key t
 	if err := r.Get(ctx, key, current); err != nil {
 		return fmt.Errorf("re-fetch WorkspaceExec before runtime claim: %w", err)
 	}
-	if executionTerminal(current.Status.Phase) || (current.Status.RuntimePodUID != "" && current.Status.RuntimePodUID != target.podUID) {
+	if current.Status.Phase.Terminal() || (current.Status.RuntimePodUID != "" && current.Status.RuntimePodUID != target.podUID) {
 		return fmt.Errorf("WorkspaceExec runtime claim changed before start")
 	}
 	if err := r.bindTranscriptVolume(ctx, current, target); err != nil {
@@ -726,14 +727,14 @@ func (r *WorkspaceExecReconciler) claimProcessRuntime(ctx context.Context, key t
 
 func (r *WorkspaceExecReconciler) applyRuntimeState(ctx context.Context, key types.NamespacedName, target *resolvedProcessTarget, state processruntime.State) error {
 	phase := runtimePhase(state.Phase, state.ExitCode)
-	if executionTerminal(phase) {
+	if phase.Terminal() {
 		return r.setTerminalProcessStatus(ctx, key, phase, state.ExitCode, state.Reason, runtimeMessage(phase), state.AttachedClients)
 	}
 	current := new(workspacesv1alpha1.WorkspaceExec)
 	if err := r.Get(ctx, key, current); err != nil {
 		return fmt.Errorf("re-fetch WorkspaceExec before status update: %w", err)
 	}
-	if executionTerminal(current.Status.Phase) {
+	if current.Status.Phase.Terminal() {
 		return nil
 	}
 	now := metav1.Now()
@@ -809,7 +810,7 @@ func (r *WorkspaceExecReconciler) setTerminalProcessStatus(ctx context.Context, 
 	if err := r.Get(ctx, key, current); err != nil {
 		return fmt.Errorf("re-fetch WorkspaceExec before terminal status update: %w", err)
 	}
-	if executionTerminal(current.Status.Phase) {
+	if current.Status.Phase.Terminal() {
 		return nil
 	}
 	now := metav1.Now()
@@ -861,7 +862,7 @@ func (r *WorkspaceExecReconciler) executionsForRuntimePod(ctx context.Context, o
 	requests := make([]reconcile.Request, 0)
 	for index := range processes.Items {
 		process := &processes.Items[index]
-		if executionTerminal(process.Status.Phase) || process.Status.RuntimePodName != object.GetName() {
+		if process.Status.Phase.Terminal() || process.Status.RuntimePodName != object.GetName() {
 			continue
 		}
 		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(process)})

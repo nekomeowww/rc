@@ -1,10 +1,13 @@
 package maintenance
 
 import (
+	"cmp"
 	"fmt"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/nekomeowww/rc/internal/audit"
 	clioutput "github.com/nekomeowww/rc/pkg/output"
@@ -32,11 +35,11 @@ func evidence(r audit.Resource) string {
 	if len(r.Finalizers) > 0 {
 		parts = append(parts, "finalizers="+strings.Join(r.Finalizers, ","))
 	}
-	if r.Holder != "" {
-		parts = append(parts, "holder="+r.Holder)
+	for _, holder := range r.Holders {
+		parts = append(parts, "holder="+holder.Kind+"/"+holder.Name+" mode="+holder.Mode)
 	}
-	if r.Reservation != "" {
-		parts = append(parts, "reservation="+r.Reservation)
+	if r.Lifecycle != nil {
+		parts = append(parts, fmt.Sprintf("active-executions=%d", r.Lifecycle.ActiveExecutions), "idle-suspend-at="+timestamp(r.Lifecycle.IdleSuspendAt), "delete-at="+timestamp(r.Lifecycle.DeleteAt))
 	}
 	if r.CapacityBytes != nil {
 		parts = append(parts, "bound-capacity="+capacity(r.CapacityBytes))
@@ -75,28 +78,46 @@ func reportTable(report audit.Report) clioutput.Table {
 	return table
 }
 
-func planTable(plan audit.CleanupPlan) clioutput.Table {
-	table := clioutput.Table{Columns: []clioutput.Column{{Name: resourceColumn}, {Name: "UID"}, {Name: "VERSION"}}}
-	table.Rows = append(table.Rows, []any{"Plan expires " + plan.ExpiresAt.String(), "history only", plan.Version})
-	for _, ref := range plan.Candidates {
-		table.Rows = append(table.Rows, []any{objectName(ref), string(ref.UID), ref.ResourceVersion})
+// timestamp renders a published deadline; an empty deadline means no
+// automatic action is scheduled.
+func timestamp(t *metav1.Time) string {
+	if t == nil {
+		return "none"
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+func historyTable(report audit.HistoryReport) clioutput.Table {
+	table := clioutput.Table{Columns: []clioutput.Column{{Name: "TARGET"}, {Name: "RETENTION"}, {Name: "STATUS"}, {Name: "COMPLIANT"}, {Name: "RETAINED"}, {Name: "PENDING-CLEANUP"}, {Name: "POLICY", Wide: true}, {Name: "MESSAGE", Wide: true}}}
+	for _, observation := range report.Coverage {
+		if !observation.Complete {
+			table.Rows = append(table.Rows, []any{observation.Kind, audit.RetentionUnknown, "-", "-", "-", "-", "-", observation.Error})
+		}
+	}
+	for _, target := range report.Targets {
+		table.Rows = append(table.Rows, []any{objectName(target.Target), target.Retention, target.Status, cmp.Or(target.Reason, "-"), count(target.Retained), count(target.PendingCleanup), effectivePolicy(target), cmp.Or(target.Message, "-")})
+	}
+	if len(table.Rows) == 0 {
+		table.Rows = append(table.Rows, []any{"-", "no execution targets", "-", "-", "-", "-", "-", "-"})
 	}
 	return table
 }
 
-func resultTable(result audit.PruneResult) clioutput.Table {
-	table := clioutput.Table{Columns: []clioutput.Column{{Name: resourceColumn}, {Name: "RESULT"}}}
-	for _, ref := range result.Requested {
-		table.Rows = append(table.Rows, []any{objectName(ref), "deletion requested"})
+func count(value *int32) string {
+	if value == nil {
+		return "-"
 	}
-	for _, ref := range result.Absent {
-		table.Rows = append(table.Rows, []any{objectName(ref), "observed absent"})
+	return fmt.Sprint(*value)
+}
+
+// effectivePolicy shows the defaulted policy the controller published.
+func effectivePolicy(target audit.HistoryTarget) string {
+	if target.EffectiveTTL == nil && target.EffectiveMaxEntries == 0 {
+		return "-"
 	}
-	for _, ref := range result.Pending {
-		table.Rows = append(table.Rows, []any{objectName(ref), "deletion pending; run doctor to inspect convergence"})
+	ttl := "-"
+	if target.EffectiveTTL != nil {
+		ttl = target.EffectiveTTL.Duration.String()
 	}
-	if len(table.Rows) == 0 {
-		table.Rows = append(table.Rows, []any{"-", "no deletion requested"})
-	}
-	return table
+	return fmt.Sprintf("ttlAfterFinished=%s maxEntries=%d", ttl, target.EffectiveMaxEntries)
 }

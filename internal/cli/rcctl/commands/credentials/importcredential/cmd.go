@@ -9,12 +9,10 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
+	"github.com/nekomeowww/rc/internal/cli/rcctl/cluster"
 	credentialservice "github.com/nekomeowww/rc/internal/credentials"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 )
@@ -126,23 +124,12 @@ func run(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, options options)
 		}
 	}
 
-	config, namespace, err := kubeconfigFlags.Resolve()
+	clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 	if err != nil {
 		return err
 	}
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		return fmt.Errorf("register Kubernetes API types: %w", err)
-	}
-	if err := configsv1alpha1.AddToScheme(scheme); err != nil {
-		return fmt.Errorf("register rc API types: %w", err)
-	}
-	kubeClient, err := client.New(config, client.Options{Scheme: scheme})
-	if err != nil {
-		return fmt.Errorf("create Kubernetes client: %w", err)
-	}
 
-	importer := credentialservice.NewImporter(kubeClient, scheme)
+	importer := credentialservice.NewImporter(clusterClient.Kube, clusterClient.Kube.Scheme())
 	if options.credentialType == credentialTypeGitHub {
 		result, err := importer.ImportGitHub(cmd.Context(), credentialservice.ImportGitHubRequest{
 			Namespace: namespace,

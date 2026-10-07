@@ -49,6 +49,16 @@ const (
 	WorkspaceExecConditionTranscriptCleanup                           = "TranscriptCleanup"
 )
 
+// Terminal reports whether the phase can no longer make progress.
+func (p WorkspaceExecPhase) Terminal() bool {
+	switch p {
+	case WorkspaceExecPhaseSucceeded, WorkspaceExecPhaseFailed, WorkspaceExecPhaseStopped, WorkspaceExecPhaseLost:
+		return true
+	default:
+		return false
+	}
+}
+
 // WorkspaceExecTargetReference selects a Workspace or Environment draft.
 type WorkspaceExecTargetReference struct {
 	// kind is Workspace or WorkspaceEnvironment. Environment targets always
@@ -225,6 +235,7 @@ type WorkspaceExecStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Exit",type=integer,JSONPath=".status.exitCode"
 // +kubebuilder:printcolumn:name="Started",type=date,JSONPath=".status.startedAt"
+// +kubebuilder:printcolumn:name="Completed",type=date,JSONPath=".status.completedAt"
 
 // WorkspaceExec is the Schema for the workspaceexecs API
 type WorkspaceExec struct {

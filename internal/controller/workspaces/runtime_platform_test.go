@@ -66,7 +66,8 @@ func TestRuntimeOSValidationAndDefaultImage(t *testing.T) {
 	requirements := require.New(t)
 	scheme := runtime.NewScheme()
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme))
-	reconciler := &WorkspaceReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), RunnerImage: testLinuxImage, WindowsRunnerImage: "example/windows"}
+	kube := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconciler := &WorkspaceReconciler{Client: kube, APIReader: kube, RunnerImage: testLinuxImage, WindowsRunnerImage: "example/windows"}
 	workspace := &workspacesv1alpha1.Workspace{Spec: workspacesv1alpha1.WorkspaceSpec{OS: corev1.Windows, Storage: &workspacesv1alpha1.PersistentStorageSpec{Size: resource.MustParse("1Gi")}}}
 	resolved, reason, _, err := reconciler.resolveWorkspaceBase(context.Background(), workspace)
 	requirements.NoError(err)
@@ -91,7 +92,8 @@ func TestWindowsLinkedWorktreeMountPaths(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "feature", Namespace: testNamespace},
 		Status:     repositoriesv1alpha1.WorktreeStatus{VolumeClaimName: "child", WorktreePath: "/repository/worktree/feature", Conditions: []metav1.Condition{{Type: repositoriesv1alpha1.WorktreeConditionReady, Status: metav1.ConditionTrue}}},
 	}
-	reconciler := &WorkspaceReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()
+	reconciler := &WorkspaceReconciler{Client: kube, APIReader: kube}
 	platform, err := rcplatform.Resolve(rcplatform.Target{OS: corev1.Windows})
 	require.NoError(t, err)
 	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace}, Spec: workspacesv1alpha1.WorkspaceSpec{OS: corev1.Windows, Mounts: []workspacesv1alpha1.WorkspaceMount{{Name: testWindowsMount, Path: testWindowsMount, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: "feature"}}}}}
@@ -130,7 +132,8 @@ func TestWindowsDeferredMountUsesMainRuntimeImage(t *testing.T) {
 		Spec:       repositoriesv1alpha1.WorktreeSpec{Branch: "rc/generated"},
 		Status:     repositoriesv1alpha1.WorktreeStatus{VolumeClaimName: "generated", WorktreePath: "/repository", Conditions: []metav1.Condition{{Type: repositoriesv1alpha1.WorktreeConditionVolumeReady, Status: metav1.ConditionTrue}}},
 	}
-	reconciler := &WorkspaceReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build(), RunnerImage: testLinuxImage}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()
+	reconciler := &WorkspaceReconciler{Client: kube, APIReader: kube, RunnerImage: testLinuxImage}
 	platform, err := rcplatform.Resolve(rcplatform.Target{OS: corev1.Windows})
 	require.NoError(t, err)
 	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: string(corev1.Windows), Namespace: testNamespace}, Spec: workspacesv1alpha1.WorkspaceSpec{OS: corev1.Windows, Mounts: []workspacesv1alpha1.WorkspaceMount{{Name: testWindowsMount, Path: testWindowsMount, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: worktree.Name}}}}}
@@ -152,8 +155,9 @@ func TestWindowsDeferredMountUsesMainRuntimeImage(t *testing.T) {
 
 func TestDarwinRuntimeUsesConfiguredHostStorage(t *testing.T) {
 	t.Parallel()
+	kube := fake.NewClientBuilder().Build()
 	reconciler := &WorkspaceReconciler{
-		Client: fake.NewClientBuilder().Build(), RunnerImage: testLinuxImage,
+		Client: kube, APIReader: kube, RunnerImage: testLinuxImage,
 		DarwinRunnerImage: "example/macos:26.3", DarwinWorkspaceRoot: "/Users/runner/.local/share/rc",
 	}
 	workspace := &workspacesv1alpha1.Workspace{

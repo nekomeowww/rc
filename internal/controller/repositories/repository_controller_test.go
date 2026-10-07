@@ -55,7 +55,7 @@ var _ = Describe("Repository Controller", func() {
 		Expect(k8sClient.Create(ctx, repository)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, repository)).To(Succeed()) })
 
-		reconciler := &RepositoryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: "ghcr.io/example/rc/runner:test"}
+		reconciler := &RepositoryReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: "ghcr.io/example/rc/runner:test"}
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		Expect(err).NotTo(HaveOccurred())
 

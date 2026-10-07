@@ -31,15 +31,6 @@ import (
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 )
 
-// runtimeReader bypasses informer lag at runtime identity and mount cleanup
-// boundaries. Unit tests can use the same fake client for reads and writes.
-func (r *WorkspaceReconciler) runtimeReader() client.Reader {
-	if r.APIReader != nil {
-		return r.APIReader
-	}
-	return r.Client
-}
-
 // reconcileRuntimeRecovery runs before dependency resolution: losing a Worktree
 // or Environment must not hide a terminal runtime or block its cleanup.
 //
@@ -51,9 +42,8 @@ func (r *WorkspaceReconciler) reconcileRuntimeRecovery(ctx context.Context, work
 	if workspace.Spec.DesiredState == workspacesv1alpha1.WorkspaceDesiredStateSuspended {
 		return ctrl.Result{}, false, nil
 	}
-	reader := r.runtimeReader()
 	pod := new(corev1.Pod)
-	err := reader.Get(ctx, client.ObjectKeyFromObject(workspace), pod)
+	err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(workspace), pod)
 	if apierrors.IsNotFound(err) {
 		return ctrl.Result{}, false, nil
 	} else if err != nil {
@@ -63,13 +53,13 @@ func (r *WorkspaceReconciler) reconcileRuntimeRecovery(ctx context.Context, work
 		return ctrl.Result{}, false, nil
 	}
 	processes := new(workspacesv1alpha1.WorkspaceExecList)
-	if err := reader.List(ctx, processes, client.InNamespace(workspace.Namespace)); err != nil {
+	if err := r.APIReader.List(ctx, processes, client.InNamespace(workspace.Namespace)); err != nil {
 		return ctrl.Result{}, true, err
 	}
 	bound := false
 	for i := range processes.Items {
 		process := &processes.Items[i]
-		if process.Status.RuntimePodName == pod.Name && process.Status.RuntimePodUID == string(pod.UID) && !executionTerminal(process.Status.Phase) {
+		if process.Status.RuntimePodName == pod.Name && process.Status.RuntimePodUID == string(pod.UID) && !process.Status.Phase.Terminal() {
 			bound = true
 			break
 		}
@@ -110,9 +100,11 @@ func (r *WorkspaceReconciler) persistTerminalRuntimePlan(ctx context.Context, wo
 	}
 	previous := current.DeepCopy()
 	current.Status.ObservedGeneration = current.Generation
+	// Ready carries the stable RuntimeTerminal reason; Degraded tells whether
+	// the runtime completed or failed.
 	meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 		Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionFalse,
-		ObservedGeneration: current.Generation, Reason: plan.reason, Message: plan.message,
+		ObservedGeneration: current.Generation, Reason: workspacesv1alpha1.WorkspaceReasonRuntimeTerminal, Message: plan.message,
 	})
 	meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 		Type: workspacesv1alpha1.WorkspaceConditionDegraded, Status: metav1.ConditionTrue,

@@ -38,6 +38,29 @@ const (
 	WorkspaceConditionDegraded                                                = "Degraded"
 	WorkspaceConditionReady                                                   = ConditionReady
 	WorkspaceConditionOutdated                                                = ConditionOutdated
+	WorkspaceConditionStorageReady                                            = ConditionStorageReady
+	WorkspaceConditionExecutionHistoryCompliant                               = ConditionExecutionHistoryCompliant
+	// WorkspaceConditionDeletionBlocked is True only while the Workspace is
+	// deleting and its cleanup finalizer waits; the reason names the first blocker.
+	WorkspaceConditionDeletionBlocked = "DeletionBlocked"
+)
+
+// Ready and DeletionBlocked reasons published for a Workspace.
+const (
+	// WorkspaceReasonRuntimeMissing means a Ready runtime Pod disappeared and the
+	// controller is replacing it.
+	WorkspaceReasonRuntimeMissing = "RuntimeMissing"
+	// WorkspaceReasonRuntimeTerminal means the runtime Pod reached Succeeded or
+	// Failed. The Degraded reason tells which (RuntimeCompleted or RuntimeFailed).
+	WorkspaceReasonRuntimeTerminal = "RuntimeTerminal"
+	// WorkspaceReasonWaitingForExecutions means deletion waits for this
+	// Workspace's WorkspaceExecs to stop and be removed.
+	WorkspaceReasonWaitingForExecutions = "WaitingForExecutions"
+	// WorkspaceReasonWaitingForHotMounts means deletion waits for Worktree
+	// hot-mount helper or cleanup Pods to finish.
+	WorkspaceReasonWaitingForHotMounts = "WaitingForHotMounts"
+	// WorkspaceReasonWaitingForPods means deletion waits for the runtime Pod.
+	WorkspaceReasonWaitingForPods = "WaitingForPods"
 )
 
 // WorkspaceMount associates a stable path with a Worktree or Repository PVC.
@@ -242,8 +265,35 @@ func (spec WorkspaceSpec) IsTemporary() bool {
 	return spec.EffectiveRetentionPolicy() == WorkspaceRetentionPolicyDeleteAfterProcessesExit
 }
 
+// WorkspaceLifecycleStatus publishes the deadlines that the retention
+// controller acts on. Each deadline is empty when no automatic action is
+// scheduled, for example while executions are active.
+type WorkspaceLifecycleStatus struct {
+	// idleSuspendAt is when an idle Workspace will be suspended.
+	// +optional
+	IdleSuspendAt *metav1.Time `json:"idleSuspendAt,omitempty"`
+
+	// deleteAt is when the Workspace will be deleted: after a temporary
+	// Workspace's processes exit, or after the suspended recovery window.
+	// +optional
+	DeleteAt *metav1.Time `json:"deleteAt,omitempty"`
+
+	// activeExecutions counts nonterminal WorkspaceExecs for this Workspace.
+	// +optional
+	ActiveExecutions int32 `json:"activeExecutions"`
+}
+
 // WorkspaceStatus defines the observed state of Workspace.
 type WorkspaceStatus struct {
+	// lifecycle publishes the automatic suspension and deletion deadlines.
+	// +optional
+	Lifecycle *WorkspaceLifecycleStatus `json:"lifecycle,omitempty"`
+
+	// executionHistory summarizes WorkspaceExec history under
+	// spec.executionRetention. It is empty for temporary Workspaces.
+	// +optional
+	ExecutionHistory *ExecutionHistoryStatus `json:"executionHistory,omitempty"`
+
 	// lastExecutionCompletedAt preserves the idle clock after execution history
 	// is collected. It only moves forward.
 	// +optional
@@ -308,6 +358,10 @@ type WorkspaceStatus struct {
 // +kubebuilder:printcolumn:name="State",type=string,JSONPath=".spec.desiredState"
 // +kubebuilder:printcolumn:name="Image",type=string,JSONPath=".status.runtimeImage"
 // +kubebuilder:printcolumn:name="Pod",type=string,JSONPath=".status.runtimePodName"
+// +kubebuilder:printcolumn:name="Active",type=integer,JSONPath=".status.lifecycle.activeExecutions"
+// +kubebuilder:printcolumn:name="Suspend-At",type=date,JSONPath=".status.lifecycle.idleSuspendAt",priority=1
+// +kubebuilder:printcolumn:name="Delete-At",type=date,JSONPath=".status.lifecycle.deleteAt",priority=1
+// +kubebuilder:printcolumn:name="Blocked",type=string,JSONPath=".status.conditions[?(@.type=='DeletionBlocked')].reason",priority=1
 
 // Workspace is the Schema for the workspaces API
 type Workspace struct {

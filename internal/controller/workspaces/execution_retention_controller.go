@@ -10,12 +10,12 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/executionretention"
 )
 
 const (
@@ -37,27 +37,58 @@ func executionPodNames(object client.Object) []string {
 	return []string{name}
 }
 
-// reconcileExecutionHistory uses a target-scoped snapshot only to plan work.
+// reconcileExecutionHistory prunes history under policy. A nil policy keeps
+// all history and performs no reads.
+func (r *executionRetentionService) reconcileExecutionHistory(ctx context.Context, namespace string, target workspacesv1alpha1.WorkspaceExecTargetReference, targetUID types.UID, policy *workspacesv1alpha1.ExecutionRetentionPolicy) error {
+	if policy == nil {
+		return nil
+	}
+	_, err := r.pruneExecutionHistory(ctx, namespace, target, targetUID, policy)
+	return err
+}
+
+// executionHistorySummary counts one target's records from the planning
+// snapshot. Records owned by an earlier same-name target are not counted.
+type executionHistorySummary struct {
+	retained int32
+	pending  int32
+}
+
+// pruneExecutionHistory uses a target-scoped snapshot only to plan work.
 // Every mutation re-reads the execution and policy directly from the API. One
 // item's conflict is deferred to the next pass rather than starving its peers.
-func (r *executionRetentionService) reconcileExecutionHistory(ctx context.Context, namespace string, target workspacesv1alpha1.WorkspaceExecTargetReference, targetUID types.UID, policy *workspacesv1alpha1.ExecutionRetentionPolicy) (ctrl.Result, error) {
-	if policy == nil {
-		return ctrl.Result{}, nil
-	}
+// The summary is nil only when the snapshot could not be listed.
+func (r *executionRetentionService) pruneExecutionHistory(ctx context.Context, namespace string, target workspacesv1alpha1.WorkspaceExecTargetReference, targetUID types.UID, policy *workspacesv1alpha1.ExecutionRetentionPolicy) (*executionHistorySummary, error) {
 	executions, err := r.executionHistory(ctx, namespace, target)
 	if err != nil {
-		return ctrl.Result{}, err
+		return nil, err
 	}
-	pending := 0
+	owned := func(p *workspacesv1alpha1.WorkspaceExec) bool {
+		owner := metav1.GetControllerOf(p)
+		return owner == nil || targetUID == "" || owner.UID == targetUID
+	}
+	summary := &executionHistorySummary{}
+	deleting := 0
 	for i := range executions {
 		p := &executions[i]
-		owner := metav1.GetControllerOf(p)
-		if !p.DeletionTimestamp.IsZero() && (owner == nil || targetUID == "" || owner.UID == targetUID) {
-			pending++
+		if !owned(p) {
+			continue
+		}
+		summary.retained++
+		if !p.DeletionTimestamp.IsZero() {
+			deleting++
 		}
 	}
-	plan := planExecutionRetention(executions, policy, time.Now())
-	budget := executionCleanupBatch - pending
+	plan := executionretention.Build(executions, policy, time.Now())
+	expired := 0
+	for _, i := range plan.Remove {
+		if owned(&executions[i]) {
+			expired++
+		}
+	}
+	summary.pending = int32(deleting + expired)
+	summary.retained -= summary.pending
+	budget := executionCleanupBatch - deleting
 	var failures []error
 	for _, i := range plan.Remove {
 		if budget <= 0 {
@@ -72,19 +103,12 @@ func (r *executionRetentionService) reconcileExecutionHistory(ctx context.Contex
 			failures = append(failures, fmt.Errorf("request cleanup for %s: %w", executions[i].Name, err))
 		}
 	}
-	return ctrl.Result{RequeueAfter: executionRetentionInterval}, errors.Join(failures...)
-}
-
-func (r *executionRetentionService) retentionReader() client.Reader {
-	if r.APIReader != nil {
-		return r.APIReader
-	}
-	return r.Client
+	return summary, errors.Join(failures...)
 }
 
 func (r *executionRetentionService) executionHistory(ctx context.Context, namespace string, target workspacesv1alpha1.WorkspaceExecTargetReference) ([]workspacesv1alpha1.WorkspaceExec, error) {
 	listed := new(workspacesv1alpha1.WorkspaceExecList)
-	if err := r.retentionReader().List(ctx, listed, client.InNamespace(namespace), client.MatchingFields{executionTargetIndex: target.Name}); err != nil {
+	if err := r.APIReader.List(ctx, listed, client.InNamespace(namespace), client.MatchingFields{executionTargetIndex: target.Name}); err != nil {
 		return nil, fmt.Errorf("list execution history: %w", err)
 	}
 	executions := make([]workspacesv1alpha1.WorkspaceExec, 0, len(listed.Items))
@@ -100,24 +124,12 @@ func (r *executionRetentionService) executionHistory(ctx context.Context, namesp
 // bump any execution's resourceVersion. A deleting or temporary target retains
 // its existing whole-target deletion lifecycle.
 func (r *executionRetentionService) currentExecutionPolicy(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) (*workspacesv1alpha1.ExecutionRetentionPolicy, error) {
-	target, err := readExecutionTarget(ctx, r.retentionReader(), process)
+	target, err := readExecutionTarget(ctx, r.APIReader, process)
 	if err != nil || target == nil {
 		return nil, err
 	}
-	if !target.GetDeletionTimestamp().IsZero() {
-		return nil, nil
-	}
-	switch target := target.(type) {
-	case *workspacesv1alpha1.Workspace:
-		if target.Spec.IsTemporary() {
-			return nil, nil
-		}
-		return target.Spec.ExecutionRetention, nil
-	case *workspacesv1alpha1.WorkspaceEnvironment:
-		return target.Spec.ExecutionRetention, nil
-	default:
-		return nil, nil
-	}
+	policy, _ := executionretention.PolicyFor(target)
+	return policy, nil
 }
 
 // executionCleanupCandidate validates an API-fresh object, including identity,
@@ -125,17 +137,17 @@ func (r *executionRetentionService) currentExecutionPolicy(ctx context.Context, 
 // re-plans the current target list, because changed peers affect the rank.
 func (r *executionRetentionService) executionCleanupCandidate(ctx context.Context, snapshot *workspacesv1alpha1.WorkspaceExec) (*workspacesv1alpha1.WorkspaceExec, error) {
 	current := new(workspacesv1alpha1.WorkspaceExec)
-	if err := r.retentionReader().Get(ctx, client.ObjectKeyFromObject(snapshot), current); err != nil {
+	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(snapshot), current); err != nil {
 		return nil, err
 	}
-	if current.UID != snapshot.UID || current.Spec.TargetRef != snapshot.Spec.TargetRef || !current.DeletionTimestamp.IsZero() || current.Spec.Retain || !executionTerminal(current.Status.Phase) || current.Status.CompletedAt == nil {
+	if current.UID != snapshot.UID || current.Spec.TargetRef != snapshot.Spec.TargetRef || !current.DeletionTimestamp.IsZero() || current.Spec.Retain || !current.Status.Phase.Terminal() || current.Status.CompletedAt == nil {
 		return nil, nil
 	}
 	policy, err := r.currentExecutionPolicy(ctx, current)
 	if err != nil || policy == nil {
 		return nil, err
 	}
-	plan := planExecutionRetention([]workspacesv1alpha1.WorkspaceExec{*current}, policy, time.Now())
+	plan := executionretention.Build([]workspacesv1alpha1.WorkspaceExec{*current}, policy, time.Now())
 	if len(plan.Remove) != 0 {
 		return current, nil
 	}
@@ -157,7 +169,7 @@ func (r *executionRetentionService) executionCleanupCandidate(ctx context.Contex
 		return nil, nil
 	}
 	executions[index] = *current
-	plan = planExecutionRetention(executions, policy, time.Now())
+	plan = executionretention.Build(executions, policy, time.Now())
 	if slices.Contains(plan.Remove, index) {
 		return current, nil
 	}

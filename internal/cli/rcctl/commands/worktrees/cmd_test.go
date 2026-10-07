@@ -14,11 +14,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
+	"github.com/nekomeowww/rc/internal/holdset"
+	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
 const (
@@ -124,7 +124,7 @@ func TestRunWorktreeDeleteRejectsMountedWorktree(t *testing.T) {
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree, workspace).Build()
 
-	err := runWorktreeDelete(context.Background(), kubeClient, listTestNamespace, worktree.Name)
+	_, err := runWorktreeDelete(context.Background(), kubeClient, listTestNamespace, worktree.Name)
 
 	requirements.Error(err, "reject deletion while a Workspace references the Worktree")
 	assertions.ErrorContains(err, `mounted by Workspace "dev"`, "identify the blocking Workspace")
@@ -143,14 +143,15 @@ func TestRunWorktreeDeleteRequestsProtectedDeletion(t *testing.T) {
 	worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: testWorktreeName, Namespace: listTestNamespace}}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()
 
-	require.NoError(t, runWorktreeDelete(context.Background(), kubeClient, worktree.Namespace, worktree.Name))
+	_, err := runWorktreeDelete(context.Background(), kubeClient, worktree.Namespace, worktree.Name)
+	require.NoError(t, err)
 	persisted := new(repositoriesv1alpha1.Worktree)
 	require.NoError(t, kubeClient.Get(context.Background(), types.NamespacedName{Name: worktree.Name, Namespace: worktree.Namespace}, persisted))
 	assert.False(t, persisted.DeletionTimestamp.IsZero(), "request deletion from the API server")
-	assert.Contains(t, persisted.Finalizers, worktreeclaim.DeletionFinalizer, "retain server-side deletion protection for the controller")
+	assert.Contains(t, persisted.Finalizers, worktreeownership.DeletionFinalizer, "retain server-side deletion protection for the controller")
 }
 
-func TestRunWorktreeDeleteRejectsWriterThatWinsTheClaimRace(t *testing.T) {
+func TestRunWorktreeDeleteWithActiveWriterDefersToControllerFence(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
 	require.NoError(t, repositoriesv1alpha1.AddToScheme(scheme), "register Repository API types")
@@ -159,36 +160,23 @@ func TestRunWorktreeDeleteRejectsWriterThatWinsTheClaimRace(t *testing.T) {
 	worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{
 		Name: testWorktreeName, Namespace: listTestNamespace, UID: "worktree-uid",
 	}}
-	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()
-	foreignHolder := "exec-uid"
-	competitor := &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{Name: worktreeclaim.LeaseName(worktree), Namespace: worktree.Namespace, Labels: map[string]string{worktreeclaim.HolderLabel: "active-exec"}},
-		Spec:       coordinationv1.LeaseSpec{HolderIdentity: &foreignHolder},
-	}
-	kubeClient := &deletionRaceClient{Client: baseClient, competitor: competitor}
+	writer := holdset.Holder{Kind: worktreeownership.KindWorktreeExec, Name: "active-exec", UID: "exec-uid", Mode: worktreeownership.Write}
+	require.NoError(t, holdset.Encode(worktree, worktreeownership.HoldersAnnotation, holdset.State{Holders: []holdset.Holder{writer}}))
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()
 
-	err := runWorktreeDelete(context.Background(), kubeClient, worktree.Namespace, worktree.Name)
+	holders, err := runWorktreeDelete(context.Background(), kubeClient, worktree.Namespace, worktree.Name)
 
-	require.Error(t, err, "reject deletion when a writer atomically claims the Worktree first")
-	assert.ErrorContains(t, err, "active-exec", "identify the writer that won the Lease race")
+	// The controller closes the admission fence and waits for the writer; it
+	// publishes DeletionBlocked=WaitingForWriter while it does.
+	require.NoError(t, err)
+	require.Len(t, holders, 1)
+	assert.Equal(t, "active-exec", holders[0].Name, "report what deletion waits for")
 	persisted := new(repositoriesv1alpha1.Worktree)
-	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: worktree.Name, Namespace: worktree.Namespace}, persisted))
-}
-
-type deletionRaceClient struct {
-	client.Client
-	competitor *coordinationv1.Lease
-	injected   bool
-}
-
-func (c *deletionRaceClient) Create(ctx context.Context, object client.Object, options ...client.CreateOption) error {
-	if _, ok := object.(*coordinationv1.Lease); ok && !c.injected {
-		c.injected = true
-		if err := c.Client.Create(ctx, c.competitor.DeepCopy()); err != nil {
-			return err
-		}
-	}
-	return c.Client.Create(ctx, object, options...)
+	require.NoError(t, kubeClient.Get(context.Background(), types.NamespacedName{Name: worktree.Name, Namespace: worktree.Namespace}, persisted))
+	assert.False(t, persisted.DeletionTimestamp.IsZero())
+	leases := new(coordinationv1.LeaseList)
+	require.NoError(t, kubeClient.List(context.Background(), leases))
+	assert.Empty(t, leases.Items, "rcctl takes no deletion Lease")
 }
 
 func TestWorktreeExecRequiresDelimiterAndPreservesArguments(t *testing.T) {

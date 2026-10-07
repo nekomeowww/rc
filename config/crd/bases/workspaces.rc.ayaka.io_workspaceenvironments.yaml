@@ -293,6 +293,41 @@ spec:
                 description: editorPodName is the active Environment editor Pod, when
                   one exists.
                 type: string
+              executionHistory:
+                description: |-
+                  executionHistory summarizes WorkspaceExec history under
+                  spec.executionRetention.
+                properties:
+                  effectiveMaxEntries:
+                    description: |-
+                      effectiveMaxEntries is maxEntries after defaulting. It is zero when no
+                      policy is set.
+                    format: int32
+                    type: integer
+                  effectiveTTL:
+                    description: |-
+                      effectiveTTL is ttlAfterFinished after defaulting. It is empty when no
+                      policy is set.
+                    type: string
+                  observedGeneration:
+                    description: observedGeneration is the target generation this
+                      summary reflects.
+                    format: int64
+                    type: integer
+                  pendingCleanup:
+                    description: |-
+                      pendingCleanup counts records that are expired under the policy or
+                      already deleting, and still exist. Removals are bounded per pass, so a
+                      large backlog drains over several passes.
+                    format: int32
+                    type: integer
+                  retained:
+                    description: |-
+                      retained counts this target's WorkspaceExec records that the policy keeps,
+                      including active and pinned records.
+                    format: int32
+                    type: integer
+                type: object
               lastExecutionCompletedAt:
                 description: |-
                   lastExecutionCompletedAt preserves the idle clock after execution history

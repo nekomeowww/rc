@@ -39,13 +39,6 @@ func (r *WorkspaceExecReconciler) ensureExecutionCompletedAt(ctx context.Context
 	return r.Status().Update(ctx, process)
 }
 
-func (r *WorkspaceExecReconciler) cleanupReader() client.Reader {
-	if r.APIReader != nil {
-		return r.APIReader
-	}
-	return r.Client
-}
-
 // transcriptStorageGone ends per-transcript obligations during whole-target or
 // PVC deletion. No worker can safely depend on storage that GC is dismantling.
 func transcriptStorageGone(ctx context.Context, reader client.Reader, process *workspacesv1alpha1.WorkspaceExec) (bool, error) {
@@ -77,7 +70,7 @@ func (r *WorkspaceExecReconciler) requestTranscriptCleanup(ctx context.Context, 
 	if transcriptCleaned(process) {
 		return true, nil
 	}
-	gone, err := transcriptStorageGone(ctx, r.cleanupReader(), process)
+	gone, err := transcriptStorageGone(ctx, r.APIReader, process)
 	if err != nil {
 		return false, err
 	}

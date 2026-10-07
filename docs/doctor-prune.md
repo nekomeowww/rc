@@ -1,118 +1,95 @@
-# Doctor and safe pruning (T-665)
+# Doctor and the execution history report
 
-This replaces the uncommitted T-664 implementation at baseline
-`51d9ce86f84d9a704e4a23fde3546712589d9347`.
-
-## Current integration status
-
-T-663's canonical target-scoped retention evaluator is wired into production.
-Review groups a complete WorkspaceExec snapshot by target and evaluates TTL,
-retain intent and count limits together. Immediately before every DELETE, prune
-lists that target's current peers and runs the same evaluator again. Missing or
-deleting targets, unsupported history kinds, stale owner UIDs and unavailable
-policy evidence fail closed. Legacy Repository/Worktree execution records remain
-doctor evidence; prune only accepts WorkspaceExec identities.
-
-`--history-for` is an **additional** age floor (default 168h). Shortening it can
-never turn a canonical rejection into permission. Doctor's lifecycle projections
-are diagnostic evidence; they do not define retention defaults or target policy.
+`rcctl doctor` and `rcctl prune` are both read-only. Neither command deletes,
+updates or patches any object.
 
 ## Commands
 
 ```sh
 rcctl -n development doctor
 rcctl doctor -A -o json
-rcctl -n development prune --dry-run --history-for 336h
-rcctl -n development prune --dry-run -o json > plan.json
-# Review the selected identities:
 rcctl -n development prune
-rcctl prune --from-plan plan.json --yes
+rcctl prune -A -o wide
+rcctl prune -A -o json
 ```
+
+Both commands support table, wide, JSON and YAML output, and a namespace or
+`-A`. Warnings and hints go to stderr; structured stdout contains exactly one
+document.
+
+## Doctor
 
 Doctor reports runtime/storage failures, references, owner identity, deletion
 blockers and PVC requests. Requested capacity is not actual usage or reclaimed
-storage. Workspaces, Worktrees, Repositories, PVCs, Pods and Leases never become
-prune actions. Missing permissions remain `unknown`; a successful list of another
-kind can still prove that its referenced dependency is absent.
+storage. Missing permissions remain `unknown`; a successful list of another kind
+can still prove that its referenced dependency is absent.
 
-Prune previews support table/JSON/YAML, namespace or `-A`, and `--history-for`.
-An explicit `yes` line confirms interactive pruning; EOF or another answer cancels.
-`--yes` skips the prompt. `--dry-run` always prevents writes, even with `--yes`.
-Warnings/prompts use stderr; structured stdout contains exactly one document.
+Doctor reads the decisions that the controllers publish in status. It does not
+derive them again on the client:
 
-## Small plans and bounded requests
+| Finding | Source |
+| --- | --- |
+| `MissingStorage`, `PVCConflict` | `StorageReady` (Workspace, WorkspaceEnvironment, Repository) or `VolumeReady` (Worktree) with reason `VolumeClaimLost` or `VolumeClaimConflict` |
+| `MissingRuntime`, `TerminalRuntimePod` | Workspace `Ready` with reason `RuntimeMissing` or `RuntimeTerminal`; the `Degraded` reason (`RuntimeFailed`, `RuntimeCompleted`) is in the message |
+| `DeletionPending`, `DeletionBlocker` | `DeletionBlocked` (Workspace, Worktree, Repository): reason, message and the time since its last transition. Other kinds, and these kinds before the controller writes the condition, show their finalizers instead |
+| `StorageUnpublished` | Status names no PVC. Doctor never predicts a PVC name from the object name |
+| Execution completion time | `status.completedAt` on WorkspaceExec, WorktreeExec, RepositoryExec and RepositorySync |
+| Workspace evidence `idle-suspend-at`, `delete-at`, `active-executions` | `status.lifecycle`; `none` means no automatic action is scheduled |
 
-`CleanupPlan` v1alpha2 contains only version, namespace, history policy, creation
-and expiry times, and executable terminal-history identities (API/kind/name/UID/
-resourceVersion). It contains no report, inventory, blocked/data candidates,
-reference graph, capacity estimate or reconstructed JSON signature. Older plans
-must be regenerated. JSON plans are selections, not signed capabilities.
+Doctor keeps these checks on the client, because status cannot report them:
 
-Both fresh and saved execution paths do one uncached scan of 13 resource kinds
-before confirmation. Saved identities must still be eligible and unchanged; new
-eligible records are never added. Unrelated changes are allowed. Already absent
-records and deletion-pending instances are resumable, but name reuse is rejected.
-The saved scope/policy cannot be overridden, and its original one-hour maximum
-lifetime is never renewed. Expiry is checked again after confirmation and before
-DELETE. Partial visibility yields a non-executable fresh preview; saved-plan
-revalidation and execution fail when safety evidence is unknown.
+- One existence check of the PVC and Pod named in status. If the named object
+  is absent, doctor reports `MissingStorage` or `MissingRuntime` even when
+  `Ready` is `True`: the status can be stale, or the controller can be down.
+- `StaleStatus` when `status.observedGeneration` is lower than the generation.
+- PVCs without an owner reference, and reachability from rc resources.
+- `VisibilityUnknown`, `RuntimeUnknown` and `StorageUnknown` for kinds that RBAC
+  hides.
+- Thresholds: `LongUnhealthy`, `LargeStorageRequest`, and `ProvisioningFailure`
+  from PVC Events.
 
-After confirmation, each candidate gets a fresh GET of itself and its direct
-target, plus one WorkspaceExec LIST for that target. Eligibility, completion age,
-finalizers, attachment, retain intent, TTL and count rank are rechecked. Every
-DELETE carries UID and resourceVersion preconditions with orphan propagation. The
-result distinguishes requested, observed absent, and pending deletion, including
-partial failures.
+## Prune: execution history backlog
 
-Kubernetes cannot atomically fence changes to a different object between GET and
-DELETE. New incoming references after review and target-policy changes after the
-last GET remain a cross-object race. This path deletes only terminal history and
-orphans dependents; it never claims to delete or reclaim their data. Finalizers
-are never stripped. Do not extend this path to data resources without a separate
-server-side safety contract.
+The rc controller deletes terminal WorkspaceExec history. It applies the
+target's `spec.executionRetention` policy with fresh reads and delete
+preconditions, in batches of at most 20 records per pass. It publishes the
+result on the target in `status.executionHistory` and in the
+`ExecutionHistoryCompliant` condition. `rcctl prune` does not delete anything.
+It shows that published status for each Workspace and WorkspaceEnvironment:
 
-## Measurement and verification
+| Column | Meaning |
+| --- | --- |
+| `RETENTION` | `Configured`, `Unset` (policy omitted: history is kept), `Temporary` and `TargetDeleting` (history goes with the target), or `Unknown` (target kind not visible) |
+| `STATUS` | `Current`, `Stale` (`status.executionHistory.observedGeneration` is lower than the target generation), `Unpublished` (no summary yet), or `NotApplicable` (temporary or deleting target) |
+| `COMPLIANT` | `ExecutionHistoryCompliant` reason: `WithinPolicy`, `PolicyUnset` or `CleanupBacklog` |
+| `RETAINED` | Records that the policy keeps, including running and pinned (`spec.retain`) records |
+| `PENDING-CLEANUP` | Records that are expired or deleting and wait for the controller |
+| `POLICY` (wide) | Effective `ttlAfterFinished` and `maxEntries` after defaulting |
+| `MESSAGE` (wide) | Stale or unpublished note, and the condition message |
 
-The before/after request regression uses a counting client, excluding API discovery:
+Prune never recomputes the backlog. When the summary is `Stale` or
+`Unpublished`, the controller has not caught up with the target or is not
+running; the counts are the last published values or absent. A
+`PENDING-CLEANUP` value that stays above zero means the controller is behind.
+To remove history sooner, lower `spec.executionRetention.ttlAfterFinished` or
+`maxEntries` on the target. To keep one record, set `spec.retain: true` on the
+WorkspaceExec.
 
-| Two eligible WorkspaceExec records, after review | Before | After |
-| --- | ---: | ---: |
-| LIST | 39 | 2 |
-| GET | 4 | 6 |
-| DELETE | 2 | 2 |
+The report issues two LIST requests (Workspace and WorkspaceEnvironment) and no
+other requests. It does not list WorkspaceExecs. If one target kind cannot be
+listed, the report marks that kind as unknown and still shows the other kind.
 
-The two extra GETs reread target policy. The old execution rescanned all 13 kinds
-`N + 1` times after review. The new whole review/execution path uses `13 + N`
-LISTs, `3N` GETs and `N` DELETEs for WorkspaceExec records that disappear
-immediately. Already absent/pending records need only their own GET. The regression
-covers N = 1, 2 and 100.
+The earlier client-side deletion flow (`--dry-run`, `--yes`, `--from-plan`,
+`--history-for` and saved cleanup plans) is removed. It could only delete a
+subset of what the controller deletes under the same policy.
 
-Removed: capability-gap baseline test, old command-name negative assertion,
-fake-client conditional-delete duplication, data-impact planning and full-snapshot
-JSON equality. Expired/dry-run/saved-plan CLI cases share one table. Atomic UID/RV
-races use the isolated envtest API; one CLI happy path covers confirmation, saved
-selection and retry. Detailed doctor graphs stay in unit tests, while the HTTP
-fixture contains only five objects.
-
-The smaller test set retains real API races, bounded-request regression and
-canonical target-scoped policy coverage. The HTTP fixture stores five compact
-objects and does not duplicate the detailed doctor graph tests.
-
+## Verification
 
 ```sh
-go test ./... -count=1
-go test ./internal/audit -run TestPruneRequestBudget -count=1 -v
-KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.36 --bin-dir "$PWD/bin" -p path)" \
-  go test -tags=integration ./internal/audit -run TestAPIConditionalDeletion -count=1 -v
-make lint-fix
+go test ./internal/audit ./internal/cli/rcctl/... -count=1
 make lint
-make test
 ```
 
-Verified on 2026-10-07: full non-cached tests, the N=1/2/100 request regression,
-all three envtest cases, `make lint-fix`, `make lint` (0 issues), and `make test`
-passed. The initial envtest attempt used a relative asset path; the absolute
-`$PWD/bin` command above fixes test-working-directory resolution.
-
-All tests use fake clients, local HTTP fixtures or an isolated envtest API server;
-no ihome or other real-cluster operations are involved.
+`TestExecutionHistoryReadsPublishedStatusWithoutWrites` uses a client that fails
+the test on any write. The CLI tests use a local HTTP fixture that rejects every
+non-GET request. No test uses a real cluster.

@@ -3,6 +3,7 @@ package repositories
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
@@ -22,10 +23,7 @@ const repositoryOperationFinalizer = "repositories.rc.ayaka.io/parent-access"
 // releaseRepositoryOperation waits for consumers to stop before releasing the
 // parent. A lost Job alone is not proof that its Pods have stopped. Deletion
 // uses foreground propagation, then removes the operation's finalizer last.
-func releaseRepositoryOperation(ctx context.Context, c client.Client, reader client.Reader, owner client.Object, token, jobName string) (bool, error) {
-	if reader == nil {
-		reader = c
-	}
+func releaseRepositoryOperation(ctx context.Context, c client.Client, reader client.Reader, owner client.Object, repositoryName, key, jobName string) (bool, error) {
 	if jobName != "" {
 		job := new(batchv1.Job)
 		err := reader.Get(ctx, client.ObjectKey{Namespace: owner.GetNamespace(), Name: jobName}, job)
@@ -62,7 +60,7 @@ func releaseRepositoryOperation(ctx context.Context, c client.Client, reader cli
 			}
 		}
 	}
-	if err := (repositoryaccess.Gate{Client: c, Reader: reader}).Release(ctx, owner.GetNamespace(), token); err != nil {
+	if err := (repositoryaccess.Gate{Client: c, Reader: reader}).ReleaseNamed(ctx, client.ObjectKey{Namespace: owner.GetNamespace(), Name: repositoryName}, key); err != nil {
 		return false, err
 	}
 	if controllerutil.ContainsFinalizer(owner, repositoryOperationFinalizer) {
@@ -117,7 +115,7 @@ func setRepositoryStorageReady(
 		if current.Status.ObservedGeneration == before.Status.ObservedGeneration &&
 			current.Status.VolumeClaimName == before.Status.VolumeClaimName &&
 			equality.Semantic.DeepEqual(current.Status.LastUpdatedAt, before.Status.LastUpdatedAt) &&
-			conditionsEqual(current.Status.Conditions, before.Status.Conditions) {
+			slices.Equal(current.Status.Conditions, before.Status.Conditions) {
 			return nil
 		}
 

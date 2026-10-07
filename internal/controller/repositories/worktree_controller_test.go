@@ -26,10 +26,11 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/holdset"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
 	"github.com/nekomeowww/rc/internal/volumeclaim"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
+	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
 const (
@@ -63,7 +64,7 @@ var _ = Describe("Worktree Controller", func() {
 		worktree := &repositoriesv1alpha1.Worktree{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: worktreeName, Namespace: testNamespace,
-				Labels: map[string]string{generatedWorkspaceLabel: generatedWorkspaceTestName},
+				Labels: map[string]string{worktreeownership.GeneratedForLabel: generatedWorkspaceTestName},
 			},
 			Spec: repositoriesv1alpha1.WorktreeSpec{
 				RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: repositoryName},
@@ -73,7 +74,7 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(k8sClient.Create(ctx, worktree)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, worktree)).To(Succeed()) })
 		key := types.NamespacedName{Name: worktreeName, Namespace: testNamespace}
-		reconciler := &WorktreeReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: "ghcr.io/example/rc/runner:test"}
+		reconciler := &WorktreeReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: "ghcr.io/example/rc/runner:test"}
 
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		Expect(err).NotTo(HaveOccurred())
@@ -123,7 +124,7 @@ var _ = Describe("Worktree Controller", func() {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "generated-worktree",
 				Namespace: testNamespace,
-				Labels:    map[string]string{generatedWorkspaceLabel: generatedWorkspaceTestName},
+				Labels:    map[string]string{worktreeownership.GeneratedForLabel: generatedWorkspaceTestName},
 			},
 			Spec: repositoriesv1alpha1.WorktreeSpec{
 				RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: "repository-parent"},
@@ -169,7 +170,7 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(k8sClient.Create(ctx, worktree)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, worktree)).To(Succeed()) })
 
-		reconciler := &WorktreeReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: runnerImage}
+		reconciler := &WorktreeReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: runnerImage}
 		key := types.NamespacedName{Name: worktreeName, Namespace: testNamespace}
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		Expect(err).NotTo(HaveOccurred())
@@ -386,7 +387,7 @@ var _ = Describe("Worktree Controller", func() {
 		claim.Status.Phase = corev1.ClaimPending
 		Expect(k8sClient.Status().Update(ctx, claim)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, worktree)).To(Succeed())
-		gate := repositoryaccess.Gate{Client: k8sClient}
+		gate := repositoryaccess.Gate{Client: k8sClient, Reader: k8sClient}
 		for range 2 {
 			result, err := reconciler.Reconcile(ctx, request)
 			Expect(err).NotTo(HaveOccurred())
@@ -423,7 +424,7 @@ var _ = Describe("Worktree Controller", func() {
 			}}},
 		}
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree, workspace).Build()
-		reconciler := &WorktreeReconciler{Client: client, Scheme: scheme, RunnerImage: testRunnerImage}
+		reconciler := &WorktreeReconciler{Client: client, APIReader: client, Scheme: scheme, RunnerImage: testRunnerImage}
 
 		result, err := reconciler.reconcileDelete(context.Background(), worktree)
 
@@ -434,7 +435,7 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(persisted.Finalizers).To(ContainElement(worktreeDeletionFinalizer))
 	})
 
-	It("keeps deletion protected while an active writer holds the Lease", func() {
+	It("keeps deletion protected while an active writer holds the Worktree", func() {
 		scheme := runtime.NewScheme()
 		Expect(repositoriesv1alpha1.AddToScheme(scheme)).To(Succeed())
 		Expect(workspacesv1alpha1.AddToScheme(scheme)).To(Succeed())
@@ -443,13 +444,10 @@ var _ = Describe("Worktree Controller", func() {
 		worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{
 			Name: "delete-in-use", Namespace: testNamespace, UID: testWorktreeUID, DeletionTimestamp: &now, Finalizers: []string{worktreeDeletionFinalizer},
 		}}
-		holder := testWorkspaceUID
-		lease := &coordinationv1.Lease{
-			ObjectMeta: metav1.ObjectMeta{Name: worktreeclaim.LeaseName(worktree), Namespace: worktree.Namespace, Labels: map[string]string{worktreeclaim.HolderLabel: testDeveloperName}},
-			Spec:       coordinationv1.LeaseSpec{HolderIdentity: &holder},
-		}
-		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree, lease).Build()
-		reconciler := &WorktreeReconciler{Client: client, Scheme: scheme, RunnerImage: testRunnerImage}
+		writer := holdset.Holder{Kind: worktreeownership.KindWorkspace, Name: testDeveloperName, UID: testWorkspaceUID, Mode: worktreeownership.Write}
+		Expect(holdset.Encode(worktree, worktreeownership.HoldersAnnotation, holdset.State{Holders: []holdset.Holder{writer}})).To(Succeed())
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()
+		reconciler := &WorktreeReconciler{Client: client, APIReader: client, Scheme: scheme, RunnerImage: testRunnerImage}
 
 		result, err := reconciler.reconcileDelete(context.Background(), worktree)
 
@@ -460,7 +458,7 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(persisted.Finalizers).To(ContainElement(worktreeDeletionFinalizer))
 	})
 
-	It("completes protected deletion after acquiring the exclusive Lease", func() {
+	It("completes protected deletion once the closed Worktree has no holders", func() {
 		scheme := runtime.NewScheme()
 		Expect(corev1.AddToScheme(scheme)).To(Succeed())
 		Expect(repositoriesv1alpha1.AddToScheme(scheme)).To(Succeed())
@@ -471,7 +469,7 @@ var _ = Describe("Worktree Controller", func() {
 			Name: "delete-available", Namespace: testNamespace, UID: testWorktreeUID, DeletionTimestamp: &now, Finalizers: []string{worktreeDeletionFinalizer},
 		}}
 		kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()
-		reconciler := &WorktreeReconciler{Client: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
+		reconciler := &WorktreeReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
 
 		result, err := reconciler.reconcileDelete(context.Background(), worktree)
 
@@ -486,7 +484,7 @@ var _ = Describe("Worktree Controller", func() {
 		}
 	})
 
-	It("keeps deletion protected when a Workspace mount races the deletion claim", func() {
+	It("keeps deletion protected when a Workspace mount races the deletion fence", func() {
 		scheme := runtime.NewScheme()
 		Expect(repositoriesv1alpha1.AddToScheme(scheme)).To(Succeed())
 		Expect(workspacesv1alpha1.AddToScheme(scheme)).To(Succeed())
@@ -503,7 +501,7 @@ var _ = Describe("Worktree Controller", func() {
 		}
 		baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()
 		raceClient := &workspaceMountRaceClient{Client: baseClient, workspace: workspace}
-		reconciler := &WorktreeReconciler{Client: raceClient, Scheme: scheme, RunnerImage: testRunnerImage}
+		reconciler := &WorktreeReconciler{Client: raceClient, APIReader: raceClient, Scheme: scheme, RunnerImage: testRunnerImage}
 
 		result, err := reconciler.reconcileDelete(context.Background(), worktree)
 
@@ -514,27 +512,23 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(persisted.Finalizers).To(ContainElement(worktreeDeletionFinalizer))
 	})
 
-	It("maps Workspace and foreign Lease changes back to the referenced Worktree", func() {
+	It("maps Workspace changes back to the referenced Worktree", func() {
 		scheme := runtime.NewScheme()
 		Expect(repositoriesv1alpha1.AddToScheme(scheme)).To(Succeed())
 		worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{
 			Name: "watched-worktree", Namespace: testNamespace, UID: "watched-worktree-uid",
 		}}
 		kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()
-		reconciler := &WorktreeReconciler{Client: kubeClient}
+		reconciler := &WorktreeReconciler{Client: kubeClient, APIReader: kubeClient}
 		workspace := &workspacesv1alpha1.Workspace{
 			ObjectMeta: metav1.ObjectMeta{Name: testDeveloperName, Namespace: testNamespace},
 			Spec: workspacesv1alpha1.WorkspaceSpec{Mounts: []workspacesv1alpha1.WorkspaceMount{{
 				Name: testMountName, Path: testMountName, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: worktree.Name},
 			}}},
 		}
-		lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
-			Name: worktreeclaim.LeaseName(worktree), Namespace: worktree.Namespace,
-		}}
 		request := reconcile.Request{NamespacedName: types.NamespacedName{Name: worktree.Name, Namespace: worktree.Namespace}}
 
 		Expect(reconciler.worktreesForWorkspace(context.Background(), workspace)).To(ConsistOf(request))
-		Expect(reconciler.worktreesForLease(context.Background(), lease)).To(ConsistOf(request))
 	})
 })
 
@@ -544,16 +538,17 @@ type workspaceMountRaceClient struct {
 	injected  bool
 }
 
-func (c *workspaceMountRaceClient) Create(ctx context.Context, object client.Object, options ...client.CreateOption) error {
-	if err := c.Client.Create(ctx, object, options...); err != nil {
+// Patch injects a Workspace mount right after the deletion fence commits.
+func (c *workspaceMountRaceClient) Patch(ctx context.Context, object client.Object, patch client.Patch, options ...client.PatchOption) error {
+	if err := c.Client.Patch(ctx, object, patch, options...); err != nil {
 		return err
 	}
-	if _, ok := object.(*coordinationv1.Lease); !ok || c.injected {
+	if _, ok := object.(*repositoriesv1alpha1.Worktree); !ok || c.injected {
 		return nil
 	}
 	c.injected = true
 
-	return c.Client.Create(ctx, c.workspace.DeepCopy())
+	return c.Create(ctx, c.workspace.DeepCopy())
 }
 
 func runGitCommand(directory string, arguments ...string) {

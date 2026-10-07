@@ -35,6 +35,7 @@ import (
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/rcplatform"
+	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
 const runnerTestNamespace = "development"
@@ -131,7 +132,7 @@ func TestRunnerCreatesTemporaryWorkspaceAndWorktreeForRepository(t *testing.T) {
 	requirements.NoError(kubeClient.Get(context.Background(), worktreeKey, worktree), "get generated Worktree")
 	assertions.Equal(repository.Name, worktree.Spec.RepositoryRef.Name, "clone selected Repository")
 	assertions.Equal("rc/codex-temporary/rc", worktree.Spec.Branch, "use unique rc branch")
-	assertions.Equal("codex-temporary", worktree.Labels[CreatedForWorkspaceLabel], "label cascade ownership")
+	assertions.Equal("codex-temporary", worktree.Labels[worktreeownership.GeneratedForLabel], "label cascade ownership")
 }
 
 func TestRunnerMarksTemporaryWorkspaceAndOwnsGeneratedWorktree(t *testing.T) {

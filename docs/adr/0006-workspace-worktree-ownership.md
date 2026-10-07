@@ -214,3 +214,20 @@ kind delete cluster --name rc-t661-ownership
 The real-GC test refuses any kubeconfig whose selected context is not the isolated
 T-661 Kind context. Ordinary tests cover identity, detach/adopt conflicts,
 creation rollback, active writers, runtime cleanup, and legacy resources.
+
+## Update: one hold set replaces the writer Lease
+
+The Worktree write Lease and its deletion holder were removed. Mount admission,
+writers and the deletion fence now share one hold set on the Worktree
+(`repositories.rc.ayaka.io/holders`): Workspace mounts are `read` or `write`
+holders, a WorktreeExec is a `write` holder, at most one writer is admitted, and
+Close is the only deletion fence. WorktreeExec admission is a CAS on the same
+object, closing the earlier plain-read gap. rcctl no longer creates Leases: a
+mount only patches Workspace spec, and `worktree delete` checks references and
+deletes. Legacy `mount-holders`/`mounts-closed` annotations and live
+`rc-worktree-*` Leases are still honored for one release so an upgraded cluster
+keeps every writer an older controller admitted. Holders whose owner is gone
+are swept only when no Pod uses the volume. Worktree `status.usedBy` with the
+`InUse` condition, and Repository `status.access`, mirror the hold sets for
+users and `rcctl doctor`; they are outputs, never locks. A single leader-elected
+controller is assumed; running old and new controller replicas together is unsafe.

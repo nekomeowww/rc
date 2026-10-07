@@ -24,6 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -31,12 +32,16 @@ import (
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	processruntime "github.com/nekomeowww/rc/internal/execution"
+	"github.com/nekomeowww/rc/internal/kubeconfig"
 )
 
+// Client bundles the Kubernetes clients rcctl commands use. Constructing it
+// performs no network I/O.
 type Client struct {
-	Kube      client.Client
-	Processes *processruntime.KubeRuntime
-	Config    *rest.Config
+	Kube       client.Client
+	Kubernetes kubernetes.Interface
+	Processes  *processruntime.KubeRuntime
+	Config     *rest.Config
 }
 
 func New(config *rest.Config) (*Client, error) {
@@ -48,12 +53,31 @@ func New(config *rest.Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create Kubernetes client: %w", err)
 	}
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("create Kubernetes clientset: %w", err)
+	}
 	podExecutor, err := processruntime.NewKubernetesPodExecutor(config)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Client{Kube: kubeClient, Processes: processruntime.NewKubeRuntime(podExecutor), Config: rest.CopyConfig(config)}, nil
+	return &Client{Kube: kubeClient, Kubernetes: clientset, Processes: processruntime.NewKubeRuntime(podExecutor), Config: rest.CopyConfig(config)}, nil
+}
+
+// Connect resolves the kubeconfig flags and builds a Client for the selected
+// cluster, returning the resolved namespace alongside it.
+func Connect(flags *kubeconfig.Flags) (*Client, string, error) {
+	config, namespace, err := flags.Resolve()
+	if err != nil {
+		return nil, "", err
+	}
+	clusterClient, err := New(config)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return clusterClient, namespace, nil
 }
 
 func newScheme() (*runtime.Scheme, error) {

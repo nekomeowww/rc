@@ -28,6 +28,11 @@ const (
 	// WorkspaceEnvironmentConditionDraftReady reports whether draft can run
 	// Environment edit processes.
 	WorkspaceEnvironmentConditionDraftReady = "DraftReady"
+	// WorkspaceEnvironmentConditionStorageReady reports the current PVC.
+	WorkspaceEnvironmentConditionStorageReady = ConditionStorageReady
+	// WorkspaceEnvironmentConditionExecutionHistoryCompliant reports the
+	// execution history backlog.
+	WorkspaceEnvironmentConditionExecutionHistoryCompliant = ConditionExecutionHistoryCompliant
 )
 
 // WorkspaceEnvironmentSpec defines the reusable image and home volume state.
@@ -72,6 +77,11 @@ type WorkspaceEnvironmentSpec struct {
 
 // WorkspaceEnvironmentStatus defines the observed state of WorkspaceEnvironment.
 type WorkspaceEnvironmentStatus struct {
+	// executionHistory summarizes WorkspaceExec history under
+	// spec.executionRetention.
+	// +optional
+	ExecutionHistory *ExecutionHistoryStatus `json:"executionHistory,omitempty"`
+
 	// lastExecutionCompletedAt preserves the idle clock after execution history
 	// is collected. It only moves forward.
 	// +optional

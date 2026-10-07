@@ -24,6 +24,9 @@ spec:
     - jsonPath: .status.jobName
       name: Job
       type: string
+    - jsonPath: .status.completedAt
+      name: Completed
+      type: date
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -80,6 +83,14 @@ spec:
           status:
             description: status defines the observed state of WorktreeExec
             properties:
+              completedAt:
+                description: |-
+                  completedAt is when the command reached its terminal result: the Job
+                  completion or failure time, or the time a failure without a finished Job
+                  was recorded. It is set once, together with the terminal Succeeded
+                  condition, and is never rewritten.
+                format: date-time
+                type: string
               conditions:
                 description: |-
                   conditions represent the current state of the WorktreeExec resource.

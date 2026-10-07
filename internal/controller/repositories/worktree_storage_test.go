@@ -88,7 +88,7 @@ func TestWorktreeCloneRecoversSourceAfterStatusWriteFailure(t *testing.T) {
 					return kubeClient.SubResource(subresource).Patch(ctx, object, patch, opts...)
 				},
 			})
-			first := &WorktreeReconciler{Client: failingClient, Scheme: c.Scheme()}
+			first := &WorktreeReconciler{Client: failingClient, APIReader: failingClient, Scheme: c.Scheme()}
 			_, err := first.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			require.ErrorIs(t, err, stoppedBeforeStatus)
 			require.Equal(t, 1, statusWrites)
@@ -106,7 +106,7 @@ func TestWorktreeCloneRecoversSourceAfterStatusWriteFailure(t *testing.T) {
 			require.NoError(t, c.Status().Update(ctx, repository))
 			claim.Status.Phase = phase
 			require.NoError(t, c.Status().Update(ctx, claim))
-			restarted := &WorktreeReconciler{Client: c, Scheme: c.Scheme()}
+			restarted := &WorktreeReconciler{Client: c, APIReader: c, Scheme: c.Scheme()}
 			for range 2 {
 				_, err = restarted.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 				require.NoError(t, err)
@@ -124,7 +124,7 @@ func TestWorktreeCloneRecoversSourceAfterStatusWriteFailure(t *testing.T) {
 			persisted := new(corev1.PersistentVolumeClaim)
 			require.NoError(t, c.Get(ctx, claimKey, persisted))
 			assert.Equal(t, claim.Spec, persisted.Spec, "recovery must not rewrite or replace the independent child")
-			busy, err := (repositoryaccess.Gate{Client: c}).Busy(ctx, repository, "another-operation")
+			busy, err := (repositoryaccess.Gate{Client: c, Reader: c}).Busy(ctx, repository, "another-operation")
 			require.NoError(t, err)
 			assert.Equal(t, phase != corev1.ClaimBound, busy, "retain original admission until Bound, then release it despite the parent change")
 
@@ -156,7 +156,7 @@ func TestWorktreeCloneRecoversSourceAfterStatusWriteFailure(t *testing.T) {
 			assert.Equal(t, "VolumeDeleted", ready.Reason)
 			assert.Equal(t, source.Name, worktree.Status.SourceVolumeClaimName)
 			assert.True(t, meta.IsStatusConditionFalse(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionVolumeReady))
-			busy, err = (repositoryaccess.Gate{Client: c}).Busy(ctx, repository, "another-operation")
+			busy, err = (repositoryaccess.Gate{Client: c, Reader: c}).Busy(ctx, repository, "another-operation")
 			require.NoError(t, err)
 			assert.False(t, busy, "a deleted child must release its reservation")
 		})
@@ -175,7 +175,7 @@ func TestWorktreeCloneRecoveryUsesCommittedClaim(t *testing.T) {
 		{name: "Repository removed"},
 		{name: "Repository replaced", replaceRepository: true},
 		{name: "malformed source", configure: func(claim *corev1.PersistentVolumeClaim) { claim.Spec.DataSource = nil }, wantReason: cloneStorageTestSpecChangedReason},
-		{name: "owner incarnation mismatch", configure: func(claim *corev1.PersistentVolumeClaim) { claim.OwnerReferences[0].UID = "previous-worktree" }, wantReason: "VolumeClaimConflict"},
+		{name: "owner incarnation mismatch", configure: func(claim *corev1.PersistentVolumeClaim) { claim.OwnerReferences[0].UID = "previous-worktree" }, wantReason: repositoriesv1alpha1.WorktreeReasonVolumeClaimConflict},
 		{name: "explicit storage conflict", configure: func(claim *corev1.PersistentVolumeClaim) {
 			class := "unexpected-class"
 			claim.Spec.StorageClassName = &class
@@ -188,7 +188,7 @@ func TestWorktreeCloneRecoveryUsesCommittedClaim(t *testing.T) {
 			require.NoError(t, c.Update(ctx, worktree))
 			// Legacy children keep their creation-time RWX default even on an RWO
 			// source. Only explicit Worktree storage constrains an existing child.
-			plan := worktreestorage.Plan{StorageClassName: cloneStorageTestClass, Size: resource.MustParse("60Gi"), AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, VolumeMode: corev1.PersistentVolumeFilesystem}
+			plan := worktreestorage.Plan{StorageClassName: cloneStorageTestClass, Size: resource.MustParse("60Gi"), AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}}
 			claimName := volumeclaim.Name(volumeclaim.Worktree, worktree.Name, 0)
 			claim := worktreeVolumeClaim(worktree, claimName, source.Name, plan)
 			require.NoError(t, controllerutil.SetControllerReference(worktree, claim, c.Scheme()))
@@ -210,7 +210,7 @@ func TestWorktreeCloneRecoveryUsesCommittedClaim(t *testing.T) {
 				repository.Status.VolumeClaimName = cloneStorageTestReplacement
 				require.NoError(t, c.Create(ctx, repository))
 			}
-			r := &WorktreeReconciler{Client: c, Scheme: c.Scheme()}
+			r := &WorktreeReconciler{Client: c, APIReader: c, Scheme: c.Scheme()}
 			key := client.ObjectKeyFromObject(worktree)
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			require.NoError(t, err)
@@ -222,6 +222,12 @@ func TestWorktreeCloneRecoveryUsesCommittedClaim(t *testing.T) {
 			if tt.wantReason != "" {
 				assert.Equal(t, tt.wantReason, ready.Reason)
 				assert.Empty(t, jobs.Items, "invalid or unowned storage must not be bootstrapped")
+				if tt.wantReason == repositoriesv1alpha1.WorktreeReasonVolumeClaimConflict {
+					volumeReady := meta.FindStatusCondition(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionVolumeReady)
+					require.NotNil(t, volumeReady)
+					assert.Equal(t, metav1.ConditionFalse, volumeReady.Status, "deferred Workspaces must not mount a foreign claim")
+					assert.Equal(t, tt.wantReason, volumeReady.Reason)
+				}
 			} else {
 				assert.Equal(t, "Initializing", ready.Reason)
 				assert.Equal(t, source.Name, worktree.Status.SourceVolumeClaimName)

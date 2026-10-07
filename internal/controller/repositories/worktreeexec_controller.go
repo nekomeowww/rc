@@ -23,7 +23,6 @@ import (
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
-	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -38,9 +37,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	"github.com/nekomeowww/rc/internal/holdset"
 	"github.com/nekomeowww/rc/internal/runtimepolicy"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
 	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
@@ -55,6 +54,7 @@ var worktreeExecStatus = oneShotStatusAdapter[*repositoriesv1alpha1.WorktreeExec
 		exec.Status.JobName = jobName
 		exec.Status.Conditions = conditions
 	},
+	completedAt:   func(exec *repositoriesv1alpha1.WorktreeExec) **metav1.Time { return &exec.Status.CompletedAt },
 	conditionType: repositoriesv1alpha1.WorktreeExecConditionSucceeded,
 	resourceKind:  "WorktreeExec",
 }
@@ -62,6 +62,8 @@ var worktreeExecStatus = oneShotStatusAdapter[*repositoriesv1alpha1.WorktreeExec
 // WorktreeExecReconciler reconciles a WorktreeExec object.
 type WorktreeExecReconciler struct {
 	client.Client
+	// APIReader is required. It bypasses the informer cache; SetupWithManager
+	// sets it from the manager.
 	APIReader   client.Reader
 	Scheme      *runtime.Scheme
 	RunnerImage string
@@ -70,13 +72,13 @@ type WorktreeExecReconciler struct {
 // +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=worktreeexecs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=worktreeexecs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=worktreeexecs/finalizers,verbs=update
-// +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=worktrees,verbs=get;list;watch
+// +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=worktrees,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
-// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
 
-// Reconcile runs one exact argv while holding the Worktree's exclusive-write
-// Lease. The same Lease is used by Workspace runtimes.
+// Reconcile runs one exact argv while holding the Worktree's exclusive writer
+// holder. Workspace runtimes with writable mounts take the same holder mode.
 func (r *WorktreeExecReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	exec := new(repositoriesv1alpha1.WorktreeExec)
 	if err := r.Get(ctx, req.NamespacedName, exec); err != nil {
@@ -84,6 +86,11 @@ func (r *WorktreeExecReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	condition := meta.FindStatusCondition(exec.Status.Conditions, repositoriesv1alpha1.WorktreeExecConditionSucceeded)
 	if condition != nil && condition.Status != metav1.ConditionUnknown {
+		if exec.Status.CompletedAt == nil {
+			if err := worktreeExecStatus.backfillCompletedAt(ctx, r.Client, req.NamespacedName); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		return ctrl.Result{}, r.releaseClaim(ctx, exec)
 	}
 	if len(exec.Spec.Command) == 0 || exec.Spec.Command[0] == "" {
@@ -111,10 +118,10 @@ func (r *WorktreeExecReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		acquired, err := r.acquireClaim(ctx, exec, worktree)
 		if err != nil {
-			return ctrl.Result{RequeueAfter: worktreeExecDependencyRequeue}, r.stopJobAndFail(ctx, exec, job, "WriteLeaseVerificationFailed", fmt.Sprintf("Worktree write Lease could not be verified: %v", err))
+			return ctrl.Result{RequeueAfter: worktreeExecDependencyRequeue}, r.stopJobAndFail(ctx, exec, job, "WriterVerificationFailed", fmt.Sprintf("Worktree writer could not be verified: %v", err))
 		}
 		if !acquired {
-			return ctrl.Result{RequeueAfter: worktreeExecDependencyRequeue}, r.stopJobAndFail(ctx, exec, job, "WriteLeaseLost", "Worktree write Lease is held by another writer")
+			return ctrl.Result{RequeueAfter: worktreeExecDependencyRequeue}, r.stopJobAndFail(ctx, exec, job, "WriterLost", "Worktree is held by another writer")
 		}
 		return ctrl.Result{}, r.reflectJobStatus(ctx, exec, job)
 	case oneShotJobLost:
@@ -164,16 +171,16 @@ func (r *WorktreeExecReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	return r.createClaimedJob(ctx, exec, worktree)
 }
 
-// createClaimedJob checks the persistent deletion fence after claiming the
-// writer Lease. Foreground GC may remove a deletion Lease, but cannot reopen
-// the Worktree itself. An existing exec-owned Lease keeps cleanup waiting.
+// createClaimedJob re-reads readiness after admission. Admission already
+// compared-and-swapped against the deletion fence, so a Close that commits
+// first refuses this exec, and an admitted exec keeps cleanup waiting.
 func (r *WorktreeExecReconciler) createClaimedJob(ctx context.Context, exec *repositoriesv1alpha1.WorktreeExec, worktree *repositoriesv1alpha1.Worktree) (ctrl.Result, error) {
 	current, err := r.readyWorktree(ctx, exec)
 	if err != nil || current.UID != worktree.UID {
 		if releaseErr := r.releaseClaim(ctx, exec); releaseErr != nil {
 			return ctrl.Result{}, releaseErr
 		}
-		return ctrl.Result{RequeueAfter: worktreeExecDependencyRequeue}, r.setSucceeded(ctx, exec, metav1.ConditionFalse, "WorktreeUnavailable", "Worktree changed or closed after acquiring its writer Lease", "")
+		return ctrl.Result{RequeueAfter: worktreeExecDependencyRequeue}, r.setSucceeded(ctx, exec, metav1.ConditionFalse, "WorktreeUnavailable", "Worktree changed or closed after admitting its writer", "")
 	}
 
 	job := worktreeExecJob(exec, worktree, r.RunnerImage)
@@ -187,7 +194,7 @@ func (r *WorktreeExecReconciler) createClaimedJob(ctx context.Context, exec *rep
 	}
 	if err := r.Create(ctx, job); err != nil {
 		// Creation errors can be ambiguous. Keep both the durable Job marker and
-		// the Lease until the next observation proves whether the Job exists.
+		// the holder until the next observation proves whether the Job exists.
 		return ctrl.Result{}, fmt.Errorf("create Worktree Exec Job: %w", err)
 	}
 	logf.FromContext(ctx).Info("Created Worktree Exec Job", "name", job.Name, "worktree", worktree.Name)
@@ -235,10 +242,10 @@ func worktreeExecStoppingFailure(condition *metav1.Condition) (string, string, b
 		return "JobLost", condition.Message, true
 	case "StoppingAfterWorktreeUnavailable":
 		return "WorktreeUnavailable", condition.Message, true
-	case "StoppingAfterWriteLeaseLost":
-		return "WriteLeaseLost", condition.Message, true
-	case "StoppingAfterWriteLeaseVerificationFailed":
-		return "WriteLeaseVerificationFailed", condition.Message, true
+	case "StoppingAfterWriterLost", "StoppingAfterWriteLeaseLost":
+		return "WriterLost", condition.Message, true
+	case "StoppingAfterWriterVerificationFailed", "StoppingAfterWriteLeaseVerificationFailed":
+		return "WriterVerificationFailed", condition.Message, true
 	default:
 		return "", "", false
 	}
@@ -249,11 +256,7 @@ var errWorktreeNotReady = errors.New("referenced Worktree is not ready")
 func (r *WorktreeExecReconciler) readyWorktree(ctx context.Context, exec *repositoriesv1alpha1.WorktreeExec) (*repositoriesv1alpha1.Worktree, error) {
 	worktree := new(repositoriesv1alpha1.Worktree)
 	key := types.NamespacedName{Name: exec.Spec.WorktreeRef.Name, Namespace: exec.Namespace}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
-	if err := reader.Get(ctx, key, worktree); err != nil {
+	if err := r.APIReader.Get(ctx, key, worktree); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, fmt.Errorf("referenced Worktree does not exist")
 		}
@@ -262,50 +265,47 @@ func (r *WorktreeExecReconciler) readyWorktree(ctx context.Context, exec *reposi
 	if worktreeownership.MountsClosed(worktree) {
 		return nil, fmt.Errorf("referenced Worktree is being deleted")
 	}
-	ready := meta.FindStatusCondition(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady)
-	if worktree.Status.ObservedGeneration < worktree.Generation || ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration < worktree.Generation || worktree.Status.VolumeClaimName == "" {
+	if !worktreeownership.ReadyAtCurrentGeneration(worktree) || worktree.Status.VolumeClaimName == "" {
 		return nil, errWorktreeNotReady
 	}
 
 	return worktree, nil
 }
 
+// acquireClaim admits this exec as the Worktree's writer by CAS on the
+// Worktree, the same object the deletion fence closes. A legacy write Lease
+// held by anyone else still blocks it until that Lease disappears.
 func (r *WorktreeExecReconciler) acquireClaim(ctx context.Context, exec *repositoriesv1alpha1.WorktreeExec, worktree *repositoriesv1alpha1.Worktree) (bool, error) {
-	holder := string(exec.UID)
-	lease := &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{Name: worktreeclaim.LeaseName(worktree), Namespace: exec.Namespace, Labels: map[string]string{worktreeclaim.HolderLabel: exec.Name}},
-		Spec:       coordinationv1.LeaseSpec{HolderIdentity: &holder},
+	legacy, err := worktreeownership.LegacyWriterOf(ctx, r.APIReader, worktree)
+	if err != nil {
+		return false, fmt.Errorf("check legacy Worktree write Lease: %w", err)
 	}
-	if err := controllerutil.SetControllerReference(exec, lease, r.Scheme); err != nil {
-		return false, fmt.Errorf("set WorktreeExec owner on Worktree write Lease: %w", err)
+	if legacy != nil && legacy.Holder != exec.UID {
+		return false, nil
 	}
-	if err := r.Create(ctx, lease); err == nil {
-		return true, nil
-	} else if !apierrors.IsAlreadyExists(err) {
-		return false, fmt.Errorf("create Worktree write Lease: %w", err)
+	result, err := r.access().Admit(ctx, worktree, exec, execHolder(exec))
+	if err != nil {
+		return false, fmt.Errorf("admit Worktree writer: %w", err)
 	}
-	current := new(coordinationv1.Lease)
-	if err := r.Get(ctx, client.ObjectKeyFromObject(lease), current); err != nil {
-		return false, fmt.Errorf("get Worktree write Lease: %w", err)
-	}
-	return current.Spec.HolderIdentity != nil && *current.Spec.HolderIdentity == holder, nil
+	return result.Admitted || result.Held, nil
 }
 
+// releaseClaim drops this exec's writer holder after its Pods have stopped,
+// and deletes a legacy write Lease an older controller created for it.
 func (r *WorktreeExecReconciler) releaseClaim(ctx context.Context, exec *repositoriesv1alpha1.WorktreeExec) error {
-	leases := new(coordinationv1.LeaseList)
-	if err := r.List(ctx, leases, client.InNamespace(exec.Namespace), client.MatchingLabels{worktreeclaim.HolderLabel: exec.Name}); err != nil {
-		return fmt.Errorf("list WorktreeExec write Leases: %w", err)
+	key := client.ObjectKey{Namespace: exec.Namespace, Name: exec.Spec.WorktreeRef.Name}
+	if err := r.access().Release(ctx, key, "", execHolder(exec).Key()); err != nil {
+		return fmt.Errorf("release Worktree writer: %w", err)
 	}
-	for index := range leases.Items {
-		lease := &leases.Items[index]
-		if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != string(exec.UID) {
-			continue
-		}
-		if err := r.Delete(ctx, lease); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("release Worktree write Lease: %w", err)
-		}
-	}
-	return nil
+	return worktreeownership.ReleaseLegacyWriteLeases(ctx, r.Client, r.APIReader, exec.Namespace, exec.Name, exec.UID, nil)
+}
+
+func (r *WorktreeExecReconciler) access() worktreeownership.MountAccess {
+	return worktreeownership.MountAccess{Client: r.Client, Reader: r.APIReader}
+}
+
+func execHolder(exec *repositoriesv1alpha1.WorktreeExec) holdset.Holder {
+	return holdset.HolderFor(worktreeownership.KindWorktreeExec, exec, worktreeownership.Write)
 }
 
 func worktreeExecJob(exec *repositoriesv1alpha1.WorktreeExec, worktree *repositoriesv1alpha1.Worktree, runnerImage string) *batchv1.Job {
@@ -339,7 +339,7 @@ func (r *WorktreeExecReconciler) reflectJobStatus(ctx context.Context, exec *rep
 		if err := r.releaseClaim(ctx, exec); err != nil {
 			return err
 		}
-		return r.setSucceeded(ctx, exec, status, reason, message, job.Name)
+		return worktreeExecStatus.setAt(ctx, r.Client, client.ObjectKeyFromObject(exec), status, reason, message, job.Name, jobCompletionTime(job))
 	}
 	return r.setSucceeded(ctx, exec, metav1.ConditionUnknown, "CommandRunning", "Command has not completed", job.Name)
 }
@@ -357,29 +357,6 @@ func (r *WorktreeExecReconciler) execsForWorktree(ctx context.Context, object cl
 	for index := range execs.Items {
 		exec := &execs.Items[index]
 		if exec.Spec.WorktreeRef.Name == object.GetName() {
-			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(exec)})
-		}
-	}
-	return requests
-}
-
-func (r *WorktreeExecReconciler) execsForLease(ctx context.Context, object client.Object) []reconcile.Request {
-	worktreeNames := worktreeNamesForLease(ctx, r.Client, object)
-	if len(worktreeNames) == 0 {
-		return nil
-	}
-	watched := make(map[string]struct{}, len(worktreeNames))
-	for _, name := range worktreeNames {
-		watched[name] = struct{}{}
-	}
-	execs := new(repositoriesv1alpha1.WorktreeExecList)
-	if err := r.List(ctx, execs, client.InNamespace(object.GetNamespace())); err != nil {
-		return nil
-	}
-	requests := make([]reconcile.Request, 0)
-	for index := range execs.Items {
-		exec := &execs.Items[index]
-		if _, exists := watched[exec.Spec.WorktreeRef.Name]; exists {
 			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(exec)})
 		}
 	}
@@ -414,7 +391,6 @@ func (r *WorktreeExecReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&repositoriesv1alpha1.WorktreeExec{}).
 		Owns(&batchv1.Job{}).
-		Watches(&coordinationv1.Lease{}, handler.EnqueueRequestsFromMapFunc(r.execsForLease)).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.execsForJobPod)).
 		Watches(&repositoriesv1alpha1.Worktree{}, handler.EnqueueRequestsFromMapFunc(r.execsForWorktree)).
 		Named("repositories-worktreeexec").

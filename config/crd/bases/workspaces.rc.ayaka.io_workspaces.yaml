@@ -27,6 +27,21 @@ spec:
     - jsonPath: .status.runtimePodName
       name: Pod
       type: string
+    - jsonPath: .status.lifecycle.activeExecutions
+      name: Active
+      type: integer
+    - jsonPath: .status.lifecycle.idleSuspendAt
+      name: Suspend-At
+      priority: 1
+      type: date
+    - jsonPath: .status.lifecycle.deleteAt
+      name: Delete-At
+      priority: 1
+      type: date
+    - jsonPath: .status.conditions[?(@.type=='DeletionBlocked')].reason
+      name: Blocked
+      priority: 1
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -1635,6 +1650,41 @@ spec:
                   deletion. Only the controllers manage this field. It survives restarts and
                   is reopened when deletion is cancelled; it never expires on a wall clock.
                 type: boolean
+              executionHistory:
+                description: |-
+                  executionHistory summarizes WorkspaceExec history under
+                  spec.executionRetention. It is empty for temporary Workspaces.
+                properties:
+                  effectiveMaxEntries:
+                    description: |-
+                      effectiveMaxEntries is maxEntries after defaulting. It is zero when no
+                      policy is set.
+                    format: int32
+                    type: integer
+                  effectiveTTL:
+                    description: |-
+                      effectiveTTL is ttlAfterFinished after defaulting. It is empty when no
+                      policy is set.
+                    type: string
+                  observedGeneration:
+                    description: observedGeneration is the target generation this
+                      summary reflects.
+                    format: int64
+                    type: integer
+                  pendingCleanup:
+                    description: |-
+                      pendingCleanup counts records that are expired under the policy or
+                      already deleting, and still exist. Removals are bounded per pass, so a
+                      large backlog drains over several passes.
+                    format: int32
+                    type: integer
+                  retained:
+                    description: |-
+                      retained counts this target's WorkspaceExec records that the policy keeps,
+                      including active and pinned records.
+                    format: int32
+                    type: integer
+                type: object
               homeVolumeClaimName:
                 description: |-
                   homeVolumeClaimName contains mutable Workspace home state and transcripts.
@@ -1652,6 +1702,26 @@ spec:
                   is collected. It only moves forward.
                 format: date-time
                 type: string
+              lifecycle:
+                description: lifecycle publishes the automatic suspension and deletion
+                  deadlines.
+                properties:
+                  activeExecutions:
+                    description: activeExecutions counts nonterminal WorkspaceExecs
+                      for this Workspace.
+                    format: int32
+                    type: integer
+                  deleteAt:
+                    description: |-
+                      deleteAt is when the Workspace will be deleted: after a temporary
+                      Workspace's processes exit, or after the suspended recovery window.
+                    format: date-time
+                    type: string
+                  idleSuspendAt:
+                    description: idleSuspendAt is when an idle Workspace will be suspended.
+                    format: date-time
+                    type: string
+                type: object
               observedGeneration:
                 description: observedGeneration is the latest generation reflected
                   by status.

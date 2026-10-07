@@ -67,7 +67,7 @@ func (r *WorkspaceEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl
 		reason, message := runtimePlatformCondition(err)
 		return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName,
 			environment.Status.CurrentRevision, environment.Status.CurrentImage, environment.Status.CurrentVolumeClaimName,
-			metav1.ConditionFalse, reason, message)
+			metav1.ConditionFalse, reason, message, nil)
 	}
 	commitHandled, err := r.reconcileEnvironmentCommit(ctx, environment)
 	if err != nil {
@@ -85,22 +85,27 @@ func (r *WorkspaceEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl
 	if revision == 0 {
 		revision = 1
 	}
-	claimName, err := volumeclaim.Resolve(ctx, r.Client, environment, volumeclaim.EnvironmentCurrent, revision, environment.Status.CurrentVolumeClaimName)
+	claimName, claim, err := volumeclaim.Resolve(ctx, r.Client, environment, volumeclaim.EnvironmentCurrent, revision, environment.Status.CurrentVolumeClaimName)
 	if volumeclaim.IsConflict(err) {
-		return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, environment.Status.CurrentImage, environment.Status.CurrentVolumeClaimName, metav1.ConditionFalse, "VolumeClaimConflict", err.Error())
+		return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, environment.Status.CurrentImage, environment.Status.CurrentVolumeClaimName, metav1.ConditionFalse, workspacesv1alpha1.ReasonVolumeClaimConflict, err.Error(),
+			storageReadyCondition(metav1.ConditionFalse, workspacesv1alpha1.ReasonVolumeClaimConflict, err.Error()))
 	}
 	if err != nil {
-		return ctrl.Result{}, err
+		return ctrl.Result{}, fmt.Errorf("get WorkspaceEnvironment current PersistentVolumeClaim: %w", err)
 	}
 	committedImage := environment.Status.CurrentImage
 	if committedImage == "" {
 		committedImage = environment.Spec.Image
 	}
 
-	claim := new(corev1.PersistentVolumeClaim)
-	claimKey := types.NamespacedName{Name: claimName, Namespace: environment.Namespace}
-	err = r.Get(ctx, claimKey, claim)
-	if errors.IsNotFound(err) {
+	if claim == nil && environment.Status.CurrentVolumeClaimName != "" {
+		// A recorded current PVC holds the committed revision. Recreating it
+		// would silently replace committed content with an empty volume.
+		message := fmt.Sprintf("Environment current PVC %s is missing; restore it or recreate the Environment", claimName)
+		return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, committedImage, claimName, metav1.ConditionFalse, workspacesv1alpha1.ReasonVolumeClaimLost, message,
+			storageReadyCondition(metav1.ConditionFalse, workspacesv1alpha1.ReasonVolumeClaimLost, message))
+	}
+	if claim == nil {
 		claim = environmentVolumeClaim(environment, claimName, "")
 		if err := controllerutil.SetControllerReference(environment, claim, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("set WorkspaceEnvironment owner on PersistentVolumeClaim: %w", err)
@@ -110,27 +115,26 @@ func (r *WorkspaceEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 		log.Info("Created WorkspaceEnvironment current PersistentVolumeClaim", "name", claim.Name)
 
-		return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, committedImage, claim.Name, metav1.ConditionFalse, "Provisioning", "Current volume is provisioning")
-	}
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("get WorkspaceEnvironment current PersistentVolumeClaim: %w", err)
-	}
-	if ownerErr := volumeclaim.CheckOwner(claim, environment); ownerErr != nil {
-		return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, committedImage, environment.Status.CurrentVolumeClaimName, metav1.ConditionFalse, "VolumeClaimConflict", ownerErr.Error())
+		return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, committedImage, claim.Name, metav1.ConditionFalse, "Provisioning", "Current volume is provisioning",
+			storageReadyCondition(metav1.ConditionFalse, "Provisioning", "Current volume is provisioning"))
 	}
 	if !environmentStorageMatches(claim, environment.Spec.Storage) {
-		return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, committedImage, claim.Name, metav1.ConditionFalse, "VolumeClaimSpecChanged", "Changing committed Environment storage is not supported")
+		return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, committedImage, claim.Name, metav1.ConditionFalse, "VolumeClaimSpecChanged", "Changing committed Environment storage is not supported",
+			storageReadyCondition(metav1.ConditionFalse, "VolumeClaimSpecChanged", "Changing committed Environment storage is not supported"))
 	}
 	if claim.Status.Phase != corev1.ClaimBound {
 		if failureReason, failureMessage, failureErr := (&WorkspaceReconciler{Client: r.Client}).persistentVolumeClaimFailure(ctx, claim); failureErr != nil {
 			return ctrl.Result{}, failureErr
 		} else if failureReason != "" {
-			return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, committedImage, claim.Name, metav1.ConditionFalse, failureReason, failureMessage)
+			return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, committedImage, claim.Name, metav1.ConditionFalse, failureReason, failureMessage,
+				storageReadyCondition(metav1.ConditionFalse, failureReason, failureMessage))
 		}
-		return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, committedImage, claim.Name, metav1.ConditionFalse, "Provisioning", "Current volume is provisioning")
+		return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, committedImage, claim.Name, metav1.ConditionFalse, "Provisioning", "Current volume is provisioning",
+			storageReadyCondition(metav1.ConditionFalse, "Provisioning", "Current volume is provisioning"))
 	}
 
-	return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, committedImage, claim.Name, metav1.ConditionTrue, "EnvironmentReady", "Current Environment revision is ready")
+	return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, committedImage, claim.Name, metav1.ConditionTrue, "EnvironmentReady", "Current Environment revision is ready",
+		storageReadyCondition(metav1.ConditionTrue, workspacesv1alpha1.ReasonVolumeClaimBound, fmt.Sprintf("Environment current PVC %s is bound", claim.Name)))
 }
 
 func (r *WorkspaceEnvironmentReconciler) reconcileEditorLifecycle(ctx context.Context, environment *workspacesv1alpha1.WorkspaceEnvironment) (ctrl.Result, bool, error) {
@@ -183,7 +187,7 @@ func (r *WorkspaceEnvironmentReconciler) reconcileEditorLifecycle(ctx context.Co
 		if process.Spec.TargetRef.Kind != workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment || process.Spec.TargetRef.Name != environment.Name {
 			continue
 		}
-		if !executionTerminal(process.Status.Phase) {
+		if !process.Status.Phase.Terminal() {
 			return ctrl.Result{}, false, nil
 		}
 		if process.Status.CompletedAt != nil && (lastCompletion == nil || process.Status.CompletedAt.After(lastCompletion.Time)) {
@@ -211,7 +215,7 @@ func (r *WorkspaceEnvironmentReconciler) environmentHasActiveProcess(ctx context
 	}
 	for index := range processes.Items {
 		process := &processes.Items[index]
-		if process.Spec.TargetRef.Kind == workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment && process.Spec.TargetRef.Name == environment.Name && !executionTerminal(process.Status.Phase) {
+		if process.Spec.TargetRef.Kind == workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment && process.Spec.TargetRef.Name == environment.Name && !process.Status.Phase.Terminal() {
 			return true, nil
 		}
 	}
@@ -231,7 +235,7 @@ func (r *WorkspaceEnvironmentReconciler) reconcileEnvironmentCommit(ctx context.
 	}
 	for index := range processes.Items {
 		process := &processes.Items[index]
-		if process.Spec.TargetRef.Kind == workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment && process.Spec.TargetRef.Name == environment.Name && !executionTerminal(process.Status.Phase) {
+		if process.Spec.TargetRef.Kind == workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment && process.Spec.TargetRef.Name == environment.Name && !process.Status.Phase.Terminal() {
 			return true, r.setEnvironmentDraftCondition(ctx, client.ObjectKeyFromObject(environment), "ActiveProcesses", "Environment draft cannot commit while processes are active")
 		}
 	}
@@ -399,6 +403,7 @@ func (r *WorkspaceEnvironmentReconciler) setEnvironmentStatus(
 	conditionStatus metav1.ConditionStatus,
 	reason string,
 	message string,
+	storage *metav1.Condition,
 ) error {
 	current := new(workspacesv1alpha1.WorkspaceEnvironment)
 	if err := r.Get(ctx, key, current); err != nil {
@@ -415,6 +420,10 @@ func (r *WorkspaceEnvironmentReconciler) setEnvironmentStatus(
 		Reason:             reason,
 		Message:            message,
 	})
+	if storage != nil {
+		storage.ObservedGeneration = current.Generation
+		meta.SetStatusCondition(&current.Status.Conditions, *storage)
+	}
 	if err := r.Status().Update(ctx, current); err != nil {
 		return fmt.Errorf("update WorkspaceEnvironment status: %w", err)
 	}

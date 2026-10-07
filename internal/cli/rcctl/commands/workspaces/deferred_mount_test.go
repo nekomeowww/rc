@@ -12,6 +12,7 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
 func TestApplyDeferredWorktreeMount(t *testing.T) {
@@ -37,7 +38,7 @@ func TestApplyDeferredWorktreeMount(t *testing.T) {
 			workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testWorkspaceNamespace, UID: testWorkspaceUID}}
 			worktree := &repositoriesv1alpha1.Worktree{
 				ObjectMeta: metav1.ObjectMeta{Name: "deferred", Namespace: testWorkspaceNamespace, UID: testWorktreeUID, Generation: 2,
-					Labels: map[string]string{"workspaces.rc.ayaka.io/generated-for": scenario.owner}},
+					Labels: map[string]string{worktreeownership.GeneratedForLabel: scenario.owner}},
 				Spec: repositoriesv1alpha1.WorktreeSpec{Branch: "feature"},
 				Status: repositoriesv1alpha1.WorktreeStatus{ObservedGeneration: 2, VolumeClaimName: "child", Conditions: []metav1.Condition{{
 					Type: repositoriesv1alpha1.WorktreeConditionVolumeReady, Status: metav1.ConditionTrue, ObservedGeneration: scenario.volumeGeneration, Reason: "VolumeReady",

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
-	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -21,39 +20,41 @@ import (
 )
 
 const (
-	repoAPI                = "repositories.rc.ayaka.io/v1alpha1"
-	workspaceAPI           = "workspaces.rc.ayaka.io/v1alpha1"
-	pvcKind                = "PersistentVolumeClaim"
-	worktreeKind           = "Worktree"
-	workspaceKind          = "Workspace"
-	workspaceExecKind      = "WorkspaceExec"
-	workspaceExecFinalizer = "workspaces.rc.ayaka.io/workspace-exec"
-	leaseKind              = "Lease"
-	podKind                = "Pod"
-	jobKind                = "Job"
-	ownerRelation          = "owner"
-	pvcRelation            = "storage"
-	runtimeRelation        = "runtime"
-	mountRelation          = "mount"
+	repoAPI                  = "repositories.rc.ayaka.io/v1alpha1"
+	workspaceAPI             = "workspaces.rc.ayaka.io/v1alpha1"
+	pvcKind                  = "PersistentVolumeClaim"
+	worktreeKind             = "Worktree"
+	repositoryKind           = "Repository"
+	workspaceKind            = "Workspace"
+	workspaceEnvironmentKind = "WorkspaceEnvironment"
+	workspaceExecKind        = "WorkspaceExec"
+	worktreeExecKind         = "WorktreeExec"
+	workspaceExecFinalizer   = "workspaces.rc.ayaka.io/workspace-exec"
+	podKind                  = "Pod"
+	jobKind                  = "Job"
+	ownerRelation            = "owner"
+	pvcRelation              = "storage"
+	runtimeRelation          = "runtime"
+	mountRelation            = "mount"
+	holderRelation           = "holder"
 )
 
 // Scan reads all evidence in a namespace (or all namespaces when empty).
 // Callers must provide an uncached client.Reader. Unavailable lists become
 // unknown observations; cancellation and invalid policy are returned as errors.
 func Scan(ctx context.Context, reader client.Reader, namespace string, policy Policy, now time.Time) (Report, error) {
-	inventory, err := scanInventory(ctx, reader, namespace, policy, now)
+	if err := validatePolicy(policy); err != nil {
+		return Report{}, err
+	}
+	inventory, err := scanInventory(ctx, reader, namespace, now)
 	if err != nil {
 		return Report{}, err
 	}
 	return Report{Inventory: inventory, Summary: summarize(inventory), Findings: diagnose(inventory, policy)}, nil
 }
 
-// scanInventory is shared by doctor and the one pre-confirmation review. Prune
-// does not construct diagnostic findings or a second in-memory reference graph.
-func scanInventory(ctx context.Context, reader client.Reader, namespace string, policy Policy, now time.Time) (Inventory, error) {
-	if err := validatePolicy(policy); err != nil {
-		return Inventory{}, err
-	}
+// scanInventory performs doctor's single pass over every evidence kind.
+func scanInventory(ctx context.Context, reader client.Reader, namespace string, now time.Time) (Inventory, error) {
 	inventory := Inventory{Namespace: namespace, ObservedAt: metav1.NewTime(now.UTC().Truncate(time.Second)), Complete: true, Resources: []Resource{}, Coverage: []Observation{}}
 	for _, list := range evidenceLists() {
 		if err := ctx.Err(); err != nil {
@@ -82,7 +83,7 @@ func scanInventory(ctx context.Context, reader client.Reader, namespace string, 
 }
 
 func validatePolicy(policy Policy) error {
-	if policy.UnusedFor <= 0 || policy.HistoryFor <= 0 || policy.UnhealthyFor <= 0 || policy.LargePVCBytes <= 0 {
+	if policy.UnusedFor <= 0 || policy.UnhealthyFor <= 0 || policy.LargePVCBytes <= 0 {
 		return fmt.Errorf("audit ages and requested-capacity threshold must be positive")
 	}
 	return nil
@@ -105,7 +106,6 @@ func evidenceLists() []client.ObjectList {
 		{&corev1.PodList{}, "v1", "PodList"},
 		{&corev1.EventList{}, "v1", "EventList"},
 		{&batchv1.JobList{}, "batch/v1", "JobList"},
-		{&coordinationv1.LeaseList{}, "coordination.k8s.io/v1", "LeaseList"},
 	}
 	result := make([]client.ObjectList, 0, len(lists))
 	for _, item := range lists {
@@ -116,7 +116,7 @@ func evidenceLists() []client.ObjectList {
 }
 
 func project(object client.Object, api, kind string) Resource {
-	r := Resource{object: object, ObjectRef: ObjectRef{APIVersion: api, Kind: kind, Namespace: object.GetNamespace(), Name: object.GetName(), UID: object.GetUID(), ResourceVersion: object.GetResourceVersion()}, CreatedAt: object.GetCreationTimestamp(), DeletingAt: object.GetDeletionTimestamp(), Finalizers: slices.Clone(object.GetFinalizers()), Owners: slices.Clone(object.GetOwnerReferences()), Generation: object.GetGeneration()}
+	r := Resource{ObjectRef: ObjectRef{APIVersion: api, Kind: kind, Namespace: object.GetNamespace(), Name: object.GetName(), UID: object.GetUID(), ResourceVersion: object.GetResourceVersion()}, CreatedAt: object.GetCreationTimestamp(), DeletingAt: object.GetDeletionTimestamp(), Finalizers: slices.Clone(object.GetFinalizers()), Owners: slices.Clone(object.GetOwnerReferences()), Generation: object.GetGeneration()}
 	for _, owner := range r.Owners {
 		r.References = append(r.References, Reference{Relation: ownerRelation, Target: ObjectRef{APIVersion: owner.APIVersion, Kind: owner.Kind, Namespace: r.Namespace, Name: owner.Name, UID: owner.UID}})
 	}
@@ -137,34 +137,30 @@ func projectRC(r *Resource, object client.Object) {
 	switch o := object.(type) {
 	case *repositories.Worktree:
 		r.Conditions, r.ObservedGeneration, r.Locked = o.Status.Conditions, o.Status.ObservedGeneration, o.Spec.Lock
-		r.reference(repoAPI, "Repository", o.Spec.RepositoryRef.Name, "source")
-		name := o.Status.VolumeClaimName
-		if name == "" {
-			name = o.Name
-		}
-		r.reference("v1", pvcKind, name, pvcRelation)
+		r.reference(repoAPI, repositoryKind, o.Spec.RepositoryRef.Name, "source")
+		r.storage(o.Status.VolumeClaimName)
 		r.reference("batch/v1", jobKind, o.Status.JobName, "bootstrap")
+		r.holders(o.Status.UsedBy)
 	case *repositories.Repository:
 		r.Conditions, r.ObservedGeneration = o.Status.Conditions, o.Status.ObservedGeneration
-		name := o.Status.VolumeClaimName
-		if name == "" {
-			name = o.Name
+		r.storage(o.Status.VolumeClaimName)
+		if o.Status.Access != nil {
+			r.holders(o.Status.Access.Holders)
 		}
-		r.reference("v1", pvcKind, name, pvcRelation)
 	case *workspaces.Workspace:
 		r.Conditions, r.ObservedGeneration, r.Phase = o.Status.Conditions, o.Status.ObservedGeneration, string(o.Spec.DesiredState)
-		name := o.Status.HomeVolumeClaimName
-		if name == "" && o.Spec.OS != corev1.OSName("darwin") {
-			name = o.Name
+		r.Lifecycle = o.Status.Lifecycle
+		// Darwin Workspaces use node-local host storage and publish no PVC.
+		if o.Spec.OS != corev1.OSName("darwin") {
+			r.storage(o.Status.HomeVolumeClaimName)
 		}
-		r.reference("v1", pvcKind, name, pvcRelation)
 		r.reference("v1", podKind, o.Status.RuntimePodName, runtimeRelation)
 		for _, mount := range o.Spec.Mounts {
 			if mount.WorktreeRef != nil {
 				r.reference(repoAPI, worktreeKind, mount.WorktreeRef.Name, mountRelation)
 			}
 			if mount.RepositoryRef != nil {
-				r.reference(repoAPI, "Repository", mount.RepositoryRef.Name, mountRelation)
+				r.reference(repoAPI, repositoryKind, mount.RepositoryRef.Name, mountRelation)
 			}
 		}
 	case *workspaces.WorkspaceEnvironment:
@@ -175,39 +171,59 @@ func projectRC(r *Resource, object client.Object) {
 	case *workspaces.WorkspaceExec:
 		r.Conditions, r.ObservedGeneration = o.Status.Conditions, o.Status.ObservedGeneration
 		r.Phase, r.CompletedAt, r.AttachedClients = string(o.Status.Phase), o.Status.CompletedAt, o.Status.AttachedClients
-		r.Terminal = slices.Contains([]string{string(workspaces.WorkspaceExecPhaseSucceeded), string(workspaces.WorkspaceExecPhaseFailed), string(workspaces.WorkspaceExecPhaseStopped), string(workspaces.WorkspaceExecPhaseLost)}, r.Phase)
+		r.Terminal = o.Status.Phase.Terminal()
 		r.reference(workspaceAPI, string(o.Spec.TargetRef.Kind), o.Spec.TargetRef.Name, "execution")
 	case *repositories.WorktreeExec:
 		r.Conditions = o.Status.Conditions
 		r.reference(repoAPI, worktreeKind, o.Spec.WorktreeRef.Name, "execution")
 		r.reference("batch/v1", jobKind, o.Status.JobName, "execution-job")
-		projectResult(r)
+		projectResult(r, o.Status.CompletedAt)
 	case *repositories.RepositoryExec:
 		r.Conditions = o.Status.Conditions
-		r.reference(repoAPI, "Repository", o.Spec.RepositoryRef.Name, "execution")
+		r.reference(repoAPI, repositoryKind, o.Spec.RepositoryRef.Name, "execution")
 		r.reference("batch/v1", jobKind, o.Status.JobName, "execution-job")
-		projectResult(r)
+		projectResult(r, o.Status.CompletedAt)
 	case *repositories.RepositorySync:
 		r.Conditions = o.Status.Conditions
-		r.reference(repoAPI, "Repository", o.Spec.RepositoryRef.Name, "execution")
+		r.reference(repoAPI, repositoryKind, o.Spec.RepositoryRef.Name, "execution")
 		r.reference("batch/v1", jobKind, o.Status.JobName, "execution-job")
-		projectResult(r)
-		if o.Status.CompletedAt != nil {
-			r.CompletedAt = o.Status.CompletedAt
-		}
+		projectResult(r, o.Status.CompletedAt)
 	}
 }
 
-func projectResult(r *Resource) {
+// storage records the PVC named in status. Names are never predicted from the
+// object name: an empty name means the controller has not published storage.
+func (r *Resource) storage(name string) {
+	r.StorageUnpublished = name == ""
+	r.reference("v1", pvcKind, name, pvcRelation)
+}
+
+// holders records the published holders and references each one by UID, so
+// doctor attributes a Worktree or Repository to the resources that hold it.
+func (r *Resource) holders(holders []repositories.UsageReference) {
+	r.Holders = slices.Clone(holders)
+	for _, holder := range holders {
+		api := repoAPI
+		if holder.Kind == workspaceKind {
+			api = workspaceAPI
+		}
+		r.References = append(r.References, Reference{Relation: holderRelation, Target: ObjectRef{APIVersion: api, Kind: holder.Kind, Namespace: r.Namespace, Name: holder.Name, UID: holder.UID}})
+	}
+}
+
+// projectResult reads the controller-published completion time. A terminal
+// record without status.completedAt stays undated, which keeps it active for
+// age-based evidence.
+func projectResult(r *Resource, completedAt *metav1.Time) {
 	condition := meta.FindStatusCondition(r.Conditions, repositories.WorktreeExecConditionSucceeded)
 	if condition == nil || (condition.Status != metav1.ConditionTrue && condition.Status != metav1.ConditionFalse) {
 		return
 	}
 	r.Terminal = true
-	r.CompletedAt = &condition.LastTransitionTime
+	r.CompletedAt = completedAt
 	r.Phase = string(workspaces.WorkspaceExecPhaseSucceeded)
 	if condition.Status == metav1.ConditionFalse {
-		r.Phase = "Failed"
+		r.Phase = string(workspaces.WorkspaceExecPhaseFailed)
 	}
 }
 
@@ -237,12 +253,6 @@ func projectKubernetes(r *Resource, object client.Object) {
 			}
 		}
 		projectVolumes(r, o.Spec.Template.Spec.Volumes)
-	case *coordinationv1.Lease:
-		if o.Spec.HolderIdentity != nil {
-			r.Holder = *o.Spec.HolderIdentity
-		}
-		// Repository reservations are durable; expiration is never a release.
-		r.Reservation = o.Annotations["repositories.rc.ayaka.io/access"]
 	case *corev1.Event:
 		r.Reason, r.Phase, r.Message = o.Reason, o.Type, o.Message
 		r.References = append(r.References, Reference{Relation: "event", Target: ObjectRef{APIVersion: o.InvolvedObject.APIVersion, Kind: o.InvolvedObject.Kind, Namespace: o.InvolvedObject.Namespace, Name: o.InvolvedObject.Name, UID: o.InvolvedObject.UID}})

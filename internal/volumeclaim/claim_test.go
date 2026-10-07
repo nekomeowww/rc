@@ -79,27 +79,34 @@ func TestResolvePreservesOwnedClaimsAndRejectsForeignReferences(t *testing.T) {
 			legacy := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: legacyName(role, owner.Name, 1), Namespace: owner.Namespace}}
 			require.NoError(t, controllerutil.SetControllerReference(owner, legacy, scheme))
 			kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(legacy).Build()
-			name, err := Resolve(t.Context(), kube, owner, role, 1, "")
+			name, claim, err := Resolve(t.Context(), kube, owner, role, 1, "")
 			require.NoError(t, err)
 			assert.Equal(t, legacy.Name, name, "recover legacy ownership if status update was interrupted")
-			name, err = Resolve(t.Context(), kube, owner, role, 1, legacy.Name)
+			require.NotNil(t, claim)
+			assert.Equal(t, legacy.Name, claim.Name)
+			name, claim, err = Resolve(t.Context(), kube, owner, role, 1, legacy.Name)
 			require.NoError(t, err)
 			assert.Equal(t, legacy.Name, name)
+			require.NotNil(t, claim)
+			assert.Equal(t, legacy.Name, claim.Name)
 			// A recorded arbitrary name catches recomputing CR-derived names,
 			// even when an owned legacy claim is also available for recovery.
 			recorded := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "recorded-storage", Namespace: owner.Namespace}}
 			require.NoError(t, controllerutil.SetControllerReference(owner, recorded, scheme))
 			require.NoError(t, kube.Create(t.Context(), recorded))
-			name, err = Resolve(t.Context(), kube, owner, role, 1, recorded.Name)
+			name, claim, err = Resolve(t.Context(), kube, owner, role, 1, recorded.Name)
 			require.NoError(t, err)
 			assert.Equal(t, recorded.Name, name)
+			require.NotNil(t, claim)
+			assert.Equal(t, recorded.Name, claim.Name)
 			owner.UID = "recreated"
-			_, err = Resolve(t.Context(), kube, owner, role, 1, legacy.Name)
+			_, _, err = Resolve(t.Context(), kube, owner, role, 1, legacy.Name)
 			require.True(t, IsConflict(err), "a recorded PVC from another UID must never be adopted")
 			assert.ErrorContains(t, err, "current")
-			name, err = Resolve(t.Context(), kube, owner, role, 1, "")
+			name, claim, err = Resolve(t.Context(), kube, owner, role, 1, "")
 			require.NoError(t, err)
 			assert.Equal(t, Name(role, owner.Name, 1), name, "foreign legacy names do not block new typed storage")
+			assert.Nil(t, claim, "an absent typed claim is reported as nil")
 		})
 	}
 }
@@ -145,7 +152,7 @@ func TestResolvePropagatesReadFailures(t *testing.T) {
 		},
 	}).Build()
 	owner := &workspaces.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testName, Namespace: "default", UID: "uid"}}
-	_, err := Resolve(t.Context(), kube, owner, WorkspaceHome, 0, "")
+	_, _, err := Resolve(t.Context(), kube, owner, WorkspaceHome, 0, "")
 	require.ErrorIs(t, err, denied)
 	require.ErrorIs(t, Preflight(t.Context(), kube, owner, WorkspaceHome, 0), denied)
 }

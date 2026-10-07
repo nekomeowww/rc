@@ -35,11 +35,11 @@ func TestAdmissionConflictsWithClosureAfterRead(t *testing.T) {
 		SubResourceUpdate: func(ctx context.Context, kubeClient client.Client, subResource string, object client.Object, opts ...client.SubResourceUpdateOption) error {
 			current := new(workspaces.Workspace)
 			require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(workspace), current))
-			require.NoError(t, (Gate{Client: kubeClient}).Close(ctx, current))
+			require.NoError(t, (Gate{Client: kubeClient, Reader: kubeClient}).Close(ctx, current))
 			return kubeClient.SubResource(subResource).Update(ctx, object, opts...)
 		},
 	}).Build()
-	err := (Gate{Client: kubeClient}).Admit(ctx, workspace, process)
+	err := (Gate{Client: kubeClient, Reader: kubeClient}).Admit(ctx, workspace, process)
 	require.True(t, apierrors.IsConflict(err), "%v", err)
 	current := new(workspaces.Workspace)
 	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(workspace), current))
@@ -52,10 +52,10 @@ func TestReopeningCancelsPreparedDeleteAndSurvivesRestart(t *testing.T) {
 	scheme, workspace, process := admissionObjects(t)
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace).WithObjects(workspace, process).Build()
 	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(workspace), workspace))
-	gate := Gate{Client: kubeClient}
+	gate := Gate{Client: kubeClient, Reader: kubeClient}
 	require.NoError(t, gate.Close(ctx, workspace))
 	preparedDelete := client.Preconditions{UID: &workspace.UID, ResourceVersion: &workspace.ResourceVersion}
-	restarted := Gate{Client: kubeClient}
+	restarted := Gate{Client: kubeClient, Reader: kubeClient}
 	require.ErrorIs(t, restarted.Admit(ctx, workspace, process), ErrClosed)
 	require.NoError(t, restarted.Reopen(ctx, workspace))
 	require.NoError(t, restarted.Admit(ctx, workspace, process))
@@ -69,7 +69,7 @@ func TestAdmissionCannotRetargetRecreatedOwner(t *testing.T) {
 	replacement := workspace.DeepCopy()
 	replacement.UID = "replacement-uid"
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace).WithObjects(replacement, process).Build()
-	gate := Gate{Client: kubeClient}
+	gate := Gate{Client: kubeClient, Reader: kubeClient}
 	require.ErrorIs(t, gate.Admit(ctx, workspace, process), ErrOwnerChanged)
 	controller := true
 	process.OwnerReferences = []metav1.OwnerReference{{APIVersion: workspaces.SchemeGroupVersion.String(), Kind: "Workspace", Name: workspace.Name, UID: workspace.UID, Controller: &controller}}
@@ -90,5 +90,5 @@ func TestCloseFailsWhenServerDoesNotPersistFence(t *testing.T) {
 		},
 	}).Build()
 	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(workspace), workspace))
-	require.Error(t, (Gate{Client: kubeClient}).Close(ctx, workspace), "pruned fences must never authorize automatic deletion")
+	require.Error(t, (Gate{Client: kubeClient, Reader: kubeClient}).Close(ctx, workspace), "pruned fences must never authorize automatic deletion")
 }

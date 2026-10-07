@@ -40,6 +40,8 @@ import (
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	processruntime "github.com/nekomeowww/rc/internal/execution"
+	"github.com/nekomeowww/rc/internal/holdset"
+	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
 // ROOT CAUSE: a terminal owned runtime is never Ready, but the original
@@ -74,16 +76,17 @@ func TestWorkspaceTerminalRuntimeRecovery(t *testing.T) {
 				if phase == corev1.PodSucceeded {
 					reason = "RuntimeCompleted"
 				}
-				require.Equal(t, reason, condition.Reason, "terminal runtime must leave Starting with its actual exit diagnosis")
+				require.Equal(t, workspacesv1alpha1.WorkspaceReasonRuntimeTerminal, condition.Reason, "terminal runtime must leave Starting")
 				require.Equal(t, metav1.ConditionFalse, condition.Status)
 				require.True(t, meta.IsStatusConditionTrue(workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionDegraded))
+				require.Equal(t, reason, meta.FindStatusCondition(workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionDegraded).Reason, "Degraded carries the actual exit diagnosis")
 				require.Contains(t, condition.Message, "exitCode=0")
 				if active {
 					fixture.restart()
 					fixture.reconcile(t)
 					require.NoError(t, kubeClient.Get(ctx, key, new(corev1.Pod)), "wait for bound executions before deleting")
 					processRuntime := &recordingProcessRuntime{}
-					execReconciler := &WorkspaceExecReconciler{Client: kubeClient, Runtime: processRuntime}
+					execReconciler := &WorkspaceExecReconciler{Client: kubeClient, APIReader: kubeClient, Runtime: processRuntime}
 					execKey := client.ObjectKey{Namespace: workspace.Namespace, Name: "bound-execution"}
 					for range 2 {
 						_, err := execReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: execKey})
@@ -128,7 +131,7 @@ func TestWorkspaceExecTerminalPodBecomesLost(t *testing.T) {
 			}
 			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(process, pod).WithObjects(process, pod).Build()
 			processRuntime := &recordingProcessRuntime{}
-			reconciler := &WorkspaceExecReconciler{Client: kubeClient, Runtime: processRuntime}
+			reconciler := &WorkspaceExecReconciler{Client: kubeClient, APIReader: kubeClient, Runtime: processRuntime}
 			request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(process)}
 			_, err := reconciler.Reconcile(ctx, request)
 			require.NoError(t, err)
@@ -177,7 +180,7 @@ func newRuntimeRecoveryFixture(t *testing.T) *runtimeRecoveryFixture {
 		WithStatusSubresource(workspace, &workspacesv1alpha1.WorkspaceExec{}, home, &corev1.Pod{}).
 		WithObjects(workspace, home).Build()
 	fixture := &runtimeRecoveryFixture{ctx: ctx, client: kubeClient, workspace: workspace}
-	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
+	reconciler := &WorkspaceReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
 	fixture.reconciler = reconciler
 	key := client.ObjectKeyFromObject(workspace)
 	request := reconcile.Request{NamespacedName: key}
@@ -191,6 +194,27 @@ func newRuntimeRecoveryFixture(t *testing.T) *runtimeRecoveryFixture {
 	require.NoError(t, kubeClient.Get(ctx, key, workspace))
 	fixture.pod = pod
 	return fixture
+}
+
+// admitWriter records this Workspace as the writer of a new Ready Worktree.
+func (fixture *runtimeRecoveryFixture) admitWriter(t *testing.T, name string) *repositoriesv1alpha1.Worktree {
+	t.Helper()
+	worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: fixture.workspace.Namespace, UID: types.UID(name + "-uid")}}
+	require.NoError(t, fixture.client.Create(fixture.ctx, worktree))
+	reason, message, err := fixture.reconciler.admitWorktreeMounts(fixture.ctx, fixture.workspace, []*repositoriesv1alpha1.Worktree{worktree}, map[string]holdset.Mode{name: worktreeownership.Write})
+	require.NoError(t, err)
+	require.Empty(t, reason, message)
+	return worktree
+}
+
+func (fixture *runtimeRecoveryFixture) holdsWriter(t *testing.T, worktree *repositoriesv1alpha1.Worktree) bool {
+	t.Helper()
+	current := new(repositoriesv1alpha1.Worktree)
+	require.NoError(t, fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(worktree), current))
+	state, err := worktreeownership.Decode(current)
+	require.NoError(t, err)
+	holder, found := state.Find(worktreeownership.WorkspaceHolder(fixture.workspace, worktreeownership.Write).Key())
+	return found && holder.Mode == worktreeownership.Write
 }
 
 // restart discards controller memory while preserving only API objects.
@@ -226,10 +250,7 @@ func TestRuntimeRecoveryWaitsForMountCleanupAndPodDeletion(t *testing.T) {
 	require.NoError(t, fixture.client.Update(fixture.ctx, fixture.pod))
 	fixture.pod.Status.Phase = corev1.PodFailed
 	require.NoError(t, fixture.client.Status().Update(fixture.ctx, fixture.pod))
-	claims := []workspaceWriteClaim{{leaseName: "old-write-lease", worktree: "old-worktree"}}
-	acquired, _, err := fixture.reconciler.acquireWriteClaims(fixture.ctx, fixture.workspace, claims)
-	require.NoError(t, err)
-	require.True(t, acquired)
+	worktree := fixture.admitWriter(t, "old-worktree")
 	helper, err := hotMountHelperPod(fixture.workspace, fixture.pod, hotWorktreeMount{name: recoveryMountName, worktree: "old-worktree", path: recoveryMountName, claimName: "old-pvc"}, testRunnerImage)
 	require.NoError(t, err)
 	helper.OwnerReferences = []metav1.OwnerReference{{UID: fixture.workspace.UID, Controller: boolPointer(true)}}
@@ -242,8 +263,7 @@ func TestRuntimeRecoveryWaitsForMountCleanupAndPodDeletion(t *testing.T) {
 	require.Equal(t, "old-node", cleaner.Spec.NodeName)
 	require.NoError(t, fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.pod), fixture.pod), "keep old runtime while failed mount cleanup is incomplete")
 	require.True(t, fixture.pod.DeletionTimestamp.IsZero())
-	leaseKey := client.ObjectKey{Namespace: fixture.workspace.Namespace, Name: claims[0].leaseName}
-	require.NoError(t, fixture.client.Get(fixture.ctx, leaseKey, new(coordinationv1.Lease)))
+	require.True(t, fixture.holdsWriter(t, worktree))
 	cleaner.Status.Phase = corev1.PodSucceeded
 	require.NoError(t, fixture.client.Status().Update(fixture.ctx, cleaner))
 	// First remove the helper, then its cleanup Pod, then request runtime deletion.
@@ -256,22 +276,20 @@ func TestRuntimeRecoveryWaitsForMountCleanupAndPodDeletion(t *testing.T) {
 	require.NoError(t, fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.pod), fixture.pod))
 	require.False(t, fixture.pod.DeletionTimestamp.IsZero())
 	fixture.reconcile(t)
-	require.NoError(t, fixture.client.Get(fixture.ctx, leaseKey, new(coordinationv1.Lease)), "terminating runtime still holds its write Lease")
+	require.True(t, fixture.holdsWriter(t, worktree), "terminating runtime still holds its writer")
 	fixture.pod.Finalizers = nil
 	require.NoError(t, fixture.client.Update(fixture.ctx, fixture.pod))
 	fixture.restart()
 	fixture.reconcile(t)
-	require.True(t, apierrors.IsNotFound(fixture.client.Get(fixture.ctx, leaseKey, new(coordinationv1.Lease))), "only release after runtime and helper absence")
+	require.False(t, fixture.holdsWriter(t, worktree), "only release after runtime and helper absence")
 	replacement := new(corev1.Pod)
 	require.NoError(t, fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.workspace), replacement))
 	require.NotEqual(t, fixture.pod.UID, replacement.UID)
 }
 
-func TestAbsentRuntimeKeepsLeaseUntilOrphanMountIsGone(t *testing.T) {
+func TestAbsentRuntimeKeepsWriterUntilOrphanMountIsGone(t *testing.T) {
 	fixture := newRuntimeRecoveryFixture(t)
-	claims := []workspaceWriteClaim{{leaseName: "orphan-write-lease", worktree: "orphan-worktree"}}
-	_, _, err := fixture.reconciler.acquireWriteClaims(fixture.ctx, fixture.workspace, claims)
-	require.NoError(t, err)
+	worktree := fixture.admitWriter(t, "orphan-worktree")
 	helper := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name: "orphan-helper", Namespace: fixture.workspace.Namespace,
 		Labels:          map[string]string{workspaceManagedByLabel: fixture.workspace.Name, hotMountHelperLabel: hotMountLabelValue},
@@ -281,14 +299,13 @@ func TestAbsentRuntimeKeepsLeaseUntilOrphanMountIsGone(t *testing.T) {
 	require.NoError(t, fixture.client.Create(fixture.ctx, helper))
 	require.NoError(t, fixture.client.Delete(fixture.ctx, fixture.pod))
 	fixture.reconcile(t)
-	leaseKey := client.ObjectKey{Namespace: fixture.workspace.Namespace, Name: claims[0].leaseName}
-	require.NoError(t, fixture.client.Get(fixture.ctx, leaseKey, new(coordinationv1.Lease)))
+	require.True(t, fixture.holdsWriter(t, worktree))
 	require.True(t, apierrors.IsNotFound(fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.pod), new(corev1.Pod))), "do not create a runtime with stale mounts")
 	require.NoError(t, fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(helper), helper))
 	helper.Finalizers = nil
 	require.NoError(t, fixture.client.Update(fixture.ctx, helper))
 	fixture.reconcile(t)
-	require.True(t, apierrors.IsNotFound(fixture.client.Get(fixture.ctx, leaseKey, new(coordinationv1.Lease))))
+	require.False(t, fixture.holdsWriter(t, worktree))
 }
 
 func TestTerminalRuntimeRecoveryPrecedesUnavailableDependencies(t *testing.T) {
@@ -299,7 +316,8 @@ func TestTerminalRuntimeRecoveryPrecedesUnavailableDependencies(t *testing.T) {
 	fixture.workspace.Spec.Mounts = []workspacesv1alpha1.WorkspaceMount{{Name: missingMount, Path: missingMount, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: "missing-worktree"}}}
 	require.NoError(t, fixture.client.Update(fixture.ctx, fixture.workspace))
 	fixture.reconcile(t)
-	require.Equal(t, "RuntimeCompleted", meta.FindStatusCondition(fixture.workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady).Reason)
+	require.Equal(t, workspacesv1alpha1.WorkspaceReasonRuntimeTerminal, meta.FindStatusCondition(fixture.workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady).Reason)
+	require.Equal(t, "RuntimeCompleted", meta.FindStatusCondition(fixture.workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionDegraded).Reason)
 	require.True(t, apierrors.IsNotFound(fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.pod), new(corev1.Pod))))
 	fixture.reconcile(t)
 	require.Equal(t, "WorktreeNotFound", meta.FindStatusCondition(fixture.workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady).Reason)
@@ -369,7 +387,7 @@ func TestTerminalRecoveryResumesAfterFailedWrite(t *testing.T) {
 				faults.Delete = func(ctx context.Context, c client.WithWatch, _ client.Object, _ ...client.DeleteOption) error {
 					current := new(workspacesv1alpha1.Workspace)
 					require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(fixture.workspace), current))
-					require.Equal(t, "RuntimeFailed", meta.FindStatusCondition(current.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady).Reason, "persist exit before requesting deletion")
+					require.Equal(t, "RuntimeFailed", meta.FindStatusCondition(current.Status.Conditions, workspacesv1alpha1.WorkspaceConditionDegraded).Reason, "persist exit before requesting deletion")
 					return interrupted
 				}
 			}

@@ -132,7 +132,7 @@ func TestWorkspaceExecReconcileStartsCommandAtReadyWorkspace(t *testing.T) {
 	runtimeClient := &recordingProcessRuntime{startState: processruntime.State{
 		ID: process.Name, UID: string(process.UID), Phase: testRuntimeRunningPhase, PID: 42,
 	}}
-	reconciler := &WorkspaceExecReconciler{Client: kubeClient, Scheme: scheme, Runtime: runtimeClient}
+	reconciler := &WorkspaceExecReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, Runtime: runtimeClient}
 	key := types.NamespacedName{Name: process.Name, Namespace: process.Namespace}
 
 	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
@@ -194,9 +194,11 @@ func TestProcessCredentialProjectsFilesAndEnvsIndependently(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "tool-process", Namespace: testNamespace},
 		Spec:       workspacesv1alpha1.WorkspaceExecSpec{CredentialRefs: []workspacesv1alpha1.LocalReference{{Name: credentialName}}},
 	}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, credential, secret).Build()
 	reconciler := &WorkspaceExecReconciler{
-		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, credential, secret).Build(),
-		Scheme: scheme,
+		Client:    kube,
+		APIReader: kube,
+		Scheme:    scheme,
 	}
 
 	agentHome, files, err := reconciler.resolveProcessCredentials(ctx, workspace, process)
@@ -255,9 +257,11 @@ func TestSSHCredentialProjectsNativeConfiguration(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "ssh-process", Namespace: testNamespace},
 		Spec:       workspacesv1alpha1.WorkspaceExecSpec{CredentialRefs: []workspacesv1alpha1.LocalReference{{Name: credentialName}}},
 	}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(credential, secret).Build()
 	reconciler := &WorkspaceExecReconciler{
-		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(credential, secret).Build(),
-		Scheme: scheme,
+		Client:    kube,
+		APIReader: kube,
+		Scheme:    scheme,
 	}
 
 	_, files, err := reconciler.resolveProcessCredentials(ctx, workspace, process)
@@ -300,7 +304,7 @@ func TestRunningWorkspaceExecBecomesLostWhenOriginalPodDisappears(t *testing.T) 
 		Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseRunning, RuntimePodName: testWorkspaceName, RuntimePodUID: "original-uid"},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(process).WithObjects(process).Build()
-	reconciler := &WorkspaceExecReconciler{Client: kubeClient, Scheme: scheme, Runtime: &recordingProcessRuntime{}}
+	reconciler := &WorkspaceExecReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, Runtime: &recordingProcessRuntime{}}
 	key := types.NamespacedName{Name: process.Name, Namespace: process.Namespace}
 	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
 	requirements.NoError(err, "install WorkspaceExec finalizer")
@@ -351,7 +355,7 @@ func TestRuntimePodEventEnqueuesBoundActiveWorkspaceExecs(t *testing.T) {
 		WithObjects(running, starting, terminal, unrelated).
 		WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionPodIndex, executionPodNames).
 		Build()
-	reconciler := &WorkspaceExecReconciler{Client: kubeClient, Scheme: scheme}
+	reconciler := &WorkspaceExecReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme}
 
 	requests := reconciler.executionsForRuntimePod(context.Background(), pod)
 
@@ -403,7 +407,7 @@ func TestDeletingActiveWorkspaceExecStopsOriginalRuntimeBeforeRemovingFinalizer(
 			runtimeClient := &recordingProcessRuntime{stopState: processruntime.State{
 				ID: process.Name, UID: string(process.UID), Phase: "Stopped",
 			}}
-			reconciler := &WorkspaceExecReconciler{Client: kubeClient, Scheme: scheme, Runtime: runtimeClient}
+			reconciler := &WorkspaceExecReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, Runtime: runtimeClient}
 			key := client.ObjectKeyFromObject(process)
 
 			requirements.NoError(kubeClient.Delete(ctx, process), "request direct WorkspaceExec deletion")

@@ -13,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
 func TestWindowsDeferredBootstrapWaitsForRuntimeReadiness(t *testing.T) {
@@ -21,10 +22,10 @@ func TestWindowsDeferredBootstrapWaitsForRuntimeReadiness(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, repositoriesv1alpha1.AddToScheme(scheme))
-	worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: "test", Labels: map[string]string{"workspaces.rc.ayaka.io/generated-for": workspaceName}}}
+	worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: "test", Labels: map[string]string{worktreeownership.GeneratedForLabel: workspaceName}}}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: workspaceName, Namespace: "test", Labels: map[string]string{"workspaces.rc.ayaka.io/workspace": workspaceName}}, Spec: corev1.PodSpec{OS: &corev1.PodOS{Name: corev1.Windows}, Volumes: []corev1.Volume{{Name: "code", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "child"}}}}}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(worktree, pod).WithObjects(worktree, pod).Build()
-	reconciler := &WorktreeReconciler{Client: kubeClient}
+	reconciler := &WorktreeReconciler{Client: kubeClient, APIReader: kubeClient}
 	ctx := context.Background()
 	require.NoError(t, reconciler.reconcileWorkspaceBootstrap(ctx, worktree, "child", "source", "/repository"))
 	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(worktree), worktree))

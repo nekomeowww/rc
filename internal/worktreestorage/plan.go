@@ -27,7 +27,6 @@ type Plan struct {
 	StorageClassName string
 	Size             resource.Quantity
 	AccessModes      []corev1.PersistentVolumeAccessMode
-	VolumeMode       corev1.PersistentVolumeMode
 }
 
 // PlanError describes a rejected plan, suitable for a Worktree Ready Condition.
@@ -43,12 +42,6 @@ func (e *PlanError) Error() string { return e.Message }
 
 // Retryable reports whether new source observations may complete this plan.
 func (e *PlanError) Retryable() bool { return e.Reason == SourceNotReady }
-
-// IsTerminalReason lets clients stop waiting when controller planning rejects
-// immutable Worktree input, without duplicating the planner's error taxonomy.
-func IsTerminalReason(reason string) bool {
-	return reason == SizeTooSmall || reason == StorageInvalid
-}
 
 // PlanClone validates a new Worktree clone against the actual source PVC.
 // Defaults inherit the source class and access modes. Repository size is only a
@@ -90,7 +83,6 @@ func PlanClone(source *corev1.PersistentVolumeClaim, repository *repositoriesv1a
 		StorageClassName: *source.Spec.StorageClassName,
 		Size:             minimum.DeepCopy(),
 		AccessModes:      slices.Clone(source.Spec.AccessModes),
-		VolumeMode:       corev1.PersistentVolumeFilesystem,
 	}
 	if repository.Spec.Storage.Size.Cmp(plan.Size) > 0 {
 		plan.Size = repository.Spec.Storage.Size.DeepCopy()

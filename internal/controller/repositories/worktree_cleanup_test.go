@@ -22,8 +22,8 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/holdset"
 	"github.com/nekomeowww/rc/internal/volumeclaim"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
 	"github.com/nekomeowww/rc/internal/worktreeownership"
 	"github.com/nekomeowww/rc/internal/worktreestorage"
 )
@@ -42,12 +42,17 @@ func ownershipScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
+// indexedFake registers the Workspace mount index the manager registers.
+func indexedFake(scheme *runtime.Scheme) *fake.ClientBuilder {
+	return fake.NewClientBuilder().WithScheme(scheme).WithIndex(&workspacesv1alpha1.Workspace{}, worktreeownership.WorkspaceWorktreeIndex, worktreeownership.WorkspaceWorktreeIndexValues)
+}
+
 func ownershipStorage(t *testing.T) (*repositoriesv1alpha1.Repository, *repositoriesv1alpha1.Worktree, *corev1.PersistentVolumeClaim) {
 	t.Helper()
 	repository := &repositoriesv1alpha1.Repository{ObjectMeta: metav1.ObjectMeta{Name: "ownership-parent", Namespace: ownershipNamespace}, Spec: repositoriesv1alpha1.RepositorySpec{Storage: repositoriesv1alpha1.RepositoryStorageSpec{Size: resource.MustParse("1Gi"), StorageClassName: ownershipStorageClass}}, Status: repositoriesv1alpha1.RepositoryStatus{VolumeClaimName: "ownership-parent"}}
 	claimName := volumeclaim.Name(volumeclaim.Worktree, ownershipWorktreeName, 0)
 	worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: ownershipWorktreeName, Namespace: ownershipNamespace, UID: ownershipWorktreeUID, Finalizers: []string{worktreeDeletionFinalizer}, Labels: map[string]string{worktreeownership.GeneratedForLabel: ownershipWorkspaceName}}, Spec: repositoriesv1alpha1.WorktreeSpec{RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: repository.Name}, Branch: "feature"}, Status: repositoriesv1alpha1.WorktreeStatus{VolumeClaimName: claimName, Conditions: []metav1.Condition{{Type: repositoriesv1alpha1.WorktreeConditionReady, Status: metav1.ConditionTrue}, {Type: repositoriesv1alpha1.WorktreeConditionVolumeReady, Status: metav1.ConditionTrue}}}}
-	claim := worktreeVolumeClaim(worktree, claimName, repository.Name, worktreestorage.Plan{StorageClassName: ownershipStorageClass, Size: resource.MustParse("1Gi"), AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, VolumeMode: corev1.PersistentVolumeFilesystem})
+	claim := worktreeVolumeClaim(worktree, claimName, repository.Name, worktreestorage.Plan{StorageClassName: ownershipStorageClass, Size: resource.MustParse("1Gi"), AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}})
 	require.NoError(t, controllerutil.SetControllerReference(worktree, claim, ownershipScheme(t)))
 	claim.Status.Phase = corev1.ClaimBound
 	return repository, worktree, claim
@@ -57,7 +62,7 @@ func TestDirectLiveWorktreePVCDeletionConverges(t *testing.T) {
 	ctx := t.Context()
 	repository, worktree, claim := ownershipStorage(t)
 	scheme := ownershipScheme(t)
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(worktree, claim).WithObjects(repository, worktree, claim).Build()
+	kube := indexedFake(scheme).WithStatusSubresource(worktree, claim).WithObjects(repository, worktree, claim).Build()
 	require.NoError(t, kube.Delete(ctx, claim))
 	r := WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 	// ROOT CAUSE: the live Worktree path skipped terminating PVCs in
@@ -79,7 +84,7 @@ func TestDirectPVCDeletionWaitsForConsumerAndNeverReclones(t *testing.T) {
 	scheme := ownershipScheme(t)
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "external-reader", Namespace: ownershipNamespace}, Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim.Name, ReadOnly: true}}}}}}
 	// The Repository is intentionally absent. Storage cleanup must remain reachable.
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(worktree, claim).WithObjects(worktree, claim, pod).Build()
+	kube := indexedFake(scheme).WithStatusSubresource(worktree, claim).WithObjects(worktree, claim, pod).Build()
 	require.NoError(t, kube.Delete(ctx, claim))
 	r := WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(worktree)}
@@ -108,7 +113,7 @@ func TestDirectPVCDeletionIgnoresUnadmittedDesiredMount(t *testing.T) {
 	_, worktree, claim := ownershipStorage(t)
 	scheme := ownershipScheme(t)
 	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "suspended-consumer", Namespace: ownershipNamespace}, Spec: workspacesv1alpha1.WorkspaceSpec{DesiredState: workspacesv1alpha1.WorkspaceDesiredStateSuspended, Mounts: []workspacesv1alpha1.WorkspaceMount{{Name: ownershipWorktreeName, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: worktree.Name}, ReadOnly: true}}}}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(worktree, claim).WithObjects(worktree, claim, workspace).Build()
+	kube := indexedFake(scheme).WithStatusSubresource(worktree, claim).WithObjects(worktree, claim, workspace).Build()
 	require.NoError(t, kube.Delete(ctx, claim))
 	r := WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 	for range 3 {
@@ -137,11 +142,11 @@ func TestDeletingWorkspaceDoesNotBlockWorktreeGC(t *testing.T) {
 	now := metav1.Now()
 	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: ownershipWorkspaceName, Namespace: ownershipNamespace, UID: ownershipWorkspaceUID, DeletionTimestamp: &now, Finalizers: []string{metav1.FinalizerDeleteDependents}}, Spec: workspacesv1alpha1.WorkspaceSpec{Mounts: []workspacesv1alpha1.WorkspaceMount{{Name: ownershipWorktreeName, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: ownershipWorktreeName}}}}}
 	worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: ownershipWorktreeName, Namespace: ownershipNamespace, UID: ownershipWorktreeUID, DeletionTimestamp: &now, Finalizers: []string{worktreeDeletionFinalizer}}}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, worktree).Build()
-	r := &WorktreeReconciler{Client: kube, Scheme: scheme}
+	kube := indexedFake(scheme).WithObjects(workspace, worktree).Build()
+	r := &WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 	// ROOT CAUSE: foreground GC waits for the dependent's finalizer, while
 	// the finalizer counted its deleting owner as a live reference forever.
-	blockers, err := r.worktreeReferenceBlockers(context.Background(), worktree)
+	blockers, err := r.cleanupReferenceBlockers(context.Background(), worktree)
 	require.NoError(t, err)
 	assert.Empty(t, blockers)
 	result, err := r.reconcileDelete(context.Background(), worktree)
@@ -159,19 +164,19 @@ func TestWorktreeGCWaitsForRuntimeCleanupAndWriterThenFinishes(t *testing.T) {
 	now := metav1.Now()
 	owner := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: ownershipWorkspaceName, Namespace: ownershipNamespace, UID: ownershipWorkspaceUID, DeletionTimestamp: &now, Finalizers: []string{worktreeownership.WorkspaceCleanupFinalizer, metav1.FinalizerDeleteDependents}}, Spec: workspacesv1alpha1.WorkspaceSpec{Mounts: []workspacesv1alpha1.WorkspaceMount{{Name: ownershipWorktreeName, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: ownershipWorktreeName}}}}}
 	worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: ownershipWorktreeName, Namespace: ownershipNamespace, UID: ownershipWorktreeUID, DeletionTimestamp: &now, Finalizers: []string{worktreeDeletionFinalizer}}}
-	holder := string(owner.UID)
-	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: worktreeclaim.LeaseName(worktree), Namespace: ownershipNamespace}, Spec: coordinationv1.LeaseSpec{HolderIdentity: &holder}}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, worktree, lease).Build()
+	writer := holdset.Holder{Kind: worktreeownership.KindWorktreeExec, Name: "independent-writer", UID: "independent-writer-uid", Mode: worktreeownership.Write}
+	require.NoError(t, holdset.Encode(worktree, worktreeownership.HoldersAnnotation, holdset.State{Holders: []holdset.Holder{writer}}))
+	kube := indexedFake(scheme).WithObjects(owner, worktree).Build()
 	r := &WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}
-	blockers, err := r.worktreeReferenceBlockers(ctx, worktree)
+	blockers, err := r.cleanupReferenceBlockers(ctx, worktree)
 	require.NoError(t, err)
-	assert.Equal(t, []string{owner.Name}, blockers, "runtime teardown still protects read-only and hot mounts even if GC removes writer Leases")
+	assert.Equal(t, []string{owner.Name}, blockers, "runtime teardown still protects read-only and hot mounts")
 	owner.Finalizers = []string{metav1.FinalizerDeleteDependents}
 	require.NoError(t, kube.Update(ctx, owner))
 	result, err := r.reconcileDelete(ctx, worktree)
 	require.NoError(t, err)
 	assert.Positive(t, result.RequeueAfter, "an independent writer must still finish")
-	require.NoError(t, kube.Delete(ctx, lease))
+	require.NoError(t, (worktreeownership.MountAccess{Client: kube, Reader: kube}).Release(ctx, client.ObjectKeyFromObject(worktree), worktree.UID, writer.Key()))
 	result, err = r.reconcileDelete(ctx, worktree)
 	require.NoError(t, err)
 	assert.Zero(t, result.RequeueAfter)
@@ -179,7 +184,7 @@ func TestWorktreeGCWaitsForRuntimeCleanupAndWriterThenFinishes(t *testing.T) {
 }
 
 func TestWorktreeVolumeIsProtectedFromFirstCreation(t *testing.T) {
-	claim := worktreeVolumeClaim(&repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: ownershipWorktreeName, Namespace: ownershipNamespace}}, volumeclaim.Name(volumeclaim.Worktree, ownershipWorktreeName, 0), "repo", worktreestorage.Plan{StorageClassName: ownershipStorageClass, Size: resource.MustParse("1Gi"), AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, VolumeMode: corev1.PersistentVolumeFilesystem})
+	claim := worktreeVolumeClaim(&repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: ownershipWorktreeName, Namespace: ownershipNamespace}}, volumeclaim.Name(volumeclaim.Worktree, ownershipWorktreeName, 0), "repo", worktreestorage.Plan{StorageClassName: ownershipStorageClass, Size: resource.MustParse("1Gi"), AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}})
 	assert.Contains(t, claim.Finalizers, worktreeownership.VolumeProtectionFinalizer)
 }
 
@@ -189,7 +194,7 @@ func TestWorktreeDeletionFinishesWhenGCRacesFinalizerPatch(t *testing.T) {
 	now := metav1.Now()
 	worktree.DeletionTimestamp = &now
 	injected := false
-	kube := fake.NewClientBuilder().WithScheme(ownershipScheme(t)).WithObjects(worktree).WithInterceptorFuncs(interceptor.Funcs{
+	kube := indexedFake(ownershipScheme(t)).WithObjects(worktree).WithInterceptorFuncs(interceptor.Funcs{
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 			if current, ok := obj.(*repositoriesv1alpha1.Worktree); ok && !controllerutil.ContainsFinalizer(current, worktreeDeletionFinalizer) {
 				// ROOT CAUSE: real foreground GC can finish deletion between the final
@@ -211,22 +216,32 @@ func TestWorktreeDeletionFinishesWhenGCRacesFinalizerPatch(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(kube.Get(ctx, client.ObjectKeyFromObject(worktree), new(repositoriesv1alpha1.Worktree))))
 }
 
-func TestWorktreeCleanupRetriesWhenDeletionLeaseDisappears(t *testing.T) {
+// Formerly TestWorktreeCleanupRetriesWhenDeletionLeaseDisappears. The deletion
+// Lease is gone; its premise is now the fence: a writer whose admission commits
+// while cleanup closes the Worktree keeps deletion waiting, and a deletion
+// Lease left by an older rcctl never stops cleanup from finishing.
+func TestWorktreeCleanupWaitsForWriterAdmittedDuringClose(t *testing.T) {
 	ctx := t.Context()
 	_, worktree, _ := ownershipStorage(t)
 	now := metav1.Now()
 	worktree.DeletionTimestamp = &now
-	lease := worktreeclaim.DeletionLease(worktree)
+	deletionHolder := worktreeownership.LegacyDeletionHolder(worktree)
+	legacy := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: worktreeownership.LegacyWriteLeaseName(worktree), Namespace: worktree.Namespace}, Spec: coordinationv1.LeaseSpec{HolderIdentity: &deletionHolder}}
+	writer := holdset.Holder{Kind: worktreeownership.KindWorktreeExec, Name: "racing-exec", UID: "racing-exec-uid", Mode: worktreeownership.Write}
 	injected := false
-	kube := fake.NewClientBuilder().WithScheme(ownershipScheme(t)).WithObjects(worktree, lease).WithInterceptorFuncs(interceptor.Funcs{
-		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-			if _, ok := obj.(*coordinationv1.Lease); ok && !injected {
-				// ROOT CAUSE: foreground GC may delete the Lease after Create returns
-				// AlreadyExists. Cleanup must requeue without bypassing the writer check.
+	kube := indexedFake(ownershipScheme(t)).WithObjects(worktree, legacy).WithInterceptorFuncs(interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if _, ok := obj.(*repositoriesv1alpha1.Worktree); ok && !injected {
+				// ROOT CAUSE: a writer admitted between the fence's read and its write
+				// must either fail its CAS or be visible to the retried fence.
 				injected = true
-				require.NoError(t, c.Delete(ctx, lease))
+				_, err := holdset.Update(ctx, (worktreeownership.MountAccess{Client: c, Reader: c}).Store(client.ObjectKeyFromObject(worktree), worktree.UID), func(_ client.Object, state *holdset.State) (bool, error) {
+					state.Put(writer)
+					return true, nil
+				})
+				require.NoError(t, err)
 			}
-			return c.Get(ctx, key, obj, opts...)
+			return c.Patch(ctx, obj, patch, opts...)
 		},
 	}).Build()
 	r := WorktreeReconciler{Client: kube, APIReader: kube, Scheme: kube.Scheme()}
@@ -237,7 +252,9 @@ func TestWorktreeCleanupRetriesWhenDeletionLeaseDisappears(t *testing.T) {
 	assert.Positive(t, result.RequeueAfter)
 	require.NoError(t, kube.Get(ctx, req.NamespacedName, worktree))
 	assert.Contains(t, worktree.Finalizers, worktreeDeletionFinalizer)
+	require.NoError(t, (worktreeownership.MountAccess{Client: kube, Reader: kube}).Release(ctx, req.NamespacedName, worktree.UID, writer.Key()))
 	_, err = r.Reconcile(ctx, req)
 	require.NoError(t, err)
 	assert.True(t, apierrors.IsNotFound(kube.Get(ctx, req.NamespacedName, new(repositoriesv1alpha1.Worktree))))
+	assert.True(t, apierrors.IsNotFound(kube.Get(ctx, client.ObjectKeyFromObject(legacy), new(coordinationv1.Lease))), "the old deletion protocol's Lease is removed")
 }

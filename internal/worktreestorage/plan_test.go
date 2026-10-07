@@ -75,7 +75,6 @@ func TestPlanClone(t *testing.T) {
 				assert.Equal(t, tt.wantReason, err.Reason)
 				assert.NotEmpty(t, err.Error())
 				assert.False(t, err.Retryable())
-				assert.True(t, IsTerminalReason(err.Reason))
 				assert.Equal(t, Plan{}, plan, "failed plans must not expose a usable partial PVC spec")
 			} else {
 				require.Nil(t, err)
@@ -90,7 +89,6 @@ func TestPlanClone(t *testing.T) {
 					wantModes = source.Spec.AccessModes
 				}
 				assert.Equal(t, wantModes, plan.AccessModes)
-				assert.Equal(t, corev1.PersistentVolumeFilesystem, plan.VolumeMode)
 				// Returned state is independently owned; consumers may build a PVC from it.
 				plan.AccessModes[0] = corev1.ReadOnlyMany
 				plan.Size.Add(resource.MustParse("1Gi"))
@@ -129,7 +127,7 @@ func TestPlanCloneRequiresObservedSource(t *testing.T) {
 			require.NotNil(t, err)
 			assert.Equal(t, tt.reason, err.Reason)
 			assert.Equal(t, tt.reason == SourceNotReady, err.Retryable())
-			assert.Equal(t, !err.Retryable(), IsTerminalReason(err.Reason))
+			assert.Equal(t, !err.Retryable(), err.Reason == SizeTooSmall || err.Reason == StorageInvalid, "Worktree waiters treat every non-retryable reason as terminal")
 			assert.Equal(t, Plan{}, plan)
 		})
 	}

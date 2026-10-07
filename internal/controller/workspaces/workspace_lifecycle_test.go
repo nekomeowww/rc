@@ -54,7 +54,7 @@ func reconcileLifecycle(t *testing.T, kubeClient client.Client, now time.Time) (
 	t.Helper()
 	key := client.ObjectKey{Namespace: testNamespace, Name: "lifecycle"}
 	// Construct a fresh reconciler each time: all deadlines must survive restart.
-	result, err := (&WorkspaceRetentionReconciler{Client: kubeClient, Now: func() time.Time { return now }}).Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+	result, err := (&WorkspaceRetentionReconciler{Client: kubeClient, APIReader: kubeClient, Now: func() time.Time { return now }}).Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
 	require.NoError(t, err)
 	persisted := new(workspacesv1alpha1.Workspace)
 	require.NoError(t, kubeClient.Get(context.Background(), key, persisted))
@@ -203,7 +203,7 @@ func TestConfirmedSuspensionHasItsOwnClock(t *testing.T) {
 	workspace.Spec.DesiredState = workspacesv1alpha1.WorkspaceDesiredStateSuspended
 	workspace.Status.Conditions = []metav1.Condition{{Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionFalse, Reason: "Stopping", LastTransitionTime: metav1.NewTime(now.Add(-24 * time.Hour))}}
 	kubeClient := lifecycleClient(t, workspace)
-	reconciler := &WorkspaceReconciler{Client: kubeClient}
+	reconciler := &WorkspaceReconciler{Client: kubeClient, APIReader: kubeClient}
 	key := client.ObjectKeyFromObject(workspace)
 	require.NoError(t, reconciler.setWorkspaceStatus(context.Background(), key, nil, metav1.ConditionFalse, reasonSuspended, "stopped"))
 	persisted := new(workspacesv1alpha1.Workspace)
@@ -257,7 +257,7 @@ func TestLifecycleDeletePreconditionProtectsConcurrentPolicyEdit(t *testing.T) {
 			return kubeClient.Delete(ctx, object, opts...)
 		},
 	}).Build()
-	_, err := (&WorkspaceRetentionReconciler{Client: kubeClient, Now: func() time.Time { return now }}).Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
+	_, err := (&WorkspaceRetentionReconciler{Client: kubeClient, APIReader: kubeClient, Now: func() time.Time { return now }}).Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
 	require.True(t, apierrors.IsConflict(err), "do not delete with a stale resource version: %v", err)
 	persisted := new(workspacesv1alpha1.Workspace)
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(workspace), persisted))
@@ -297,7 +297,7 @@ func TestAutomaticDeletionFencesDirectAPICreationAtDelete(t *testing.T) {
 			process := lifecycleExec(workspace, "")
 			process.UID = "late-exec-uid"
 			require.NoError(t, kubeClient.Create(ctx, process), "direct API create after the last active list")
-			reconciler := &WorkspaceExecReconciler{Client: kubeClient, Scheme: scheme, Runtime: runtimeClient}
+			reconciler := &WorkspaceExecReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, Runtime: runtimeClient}
 			request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(process)}
 			_, err := reconciler.Reconcile(ctx, request)
 			require.NoError(t, err)
@@ -338,7 +338,7 @@ func TestAutomaticDeletionLosesToExecutionAdmissionBeforeClosure(t *testing.T) {
 				process := lifecycleExec(workspace, "")
 				process.UID = "winning-execution-uid"
 				require.NoError(t, kubeClient.Create(ctx, process))
-				reconciler := &WorkspaceExecReconciler{Client: kubeClient, Scheme: scheme, Runtime: runtimeClient}
+				reconciler := &WorkspaceExecReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, Runtime: runtimeClient}
 				request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(process)}
 				_, err := reconciler.Reconcile(ctx, request)
 				require.NoError(t, err)
@@ -348,7 +348,7 @@ func TestAutomaticDeletionLosesToExecutionAdmissionBeforeClosure(t *testing.T) {
 			return kubeClient.SubResource(subResource).Patch(ctx, object, patch, opts...)
 		},
 	}).Build()
-	_, err := (&WorkspaceRetentionReconciler{Client: kubeClient, Now: func() time.Time { return now }}).Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
+	_, err := (&WorkspaceRetentionReconciler{Client: kubeClient, APIReader: kubeClient, Now: func() time.Time { return now }}).Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
 	require.True(t, err == nil || apierrors.IsConflict(err), "%v", err)
 	require.True(t, intercepted)
 	persisted := new(workspacesv1alpha1.Workspace)
@@ -402,7 +402,7 @@ func TestRetentionRecoversFenceAfterRestartOrDeleteError(t *testing.T) {
 				return fmt.Errorf("injected delete failure")
 			},
 		}).Build()
-		_, err := (&WorkspaceRetentionReconciler{Client: kubeClient, Now: func() time.Time { return now }}).Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
+		_, err := (&WorkspaceRetentionReconciler{Client: kubeClient, APIReader: kubeClient, Now: func() time.Time { return now }}).Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
 		require.ErrorContains(t, err, "injected delete failure")
 		persisted := new(workspacesv1alpha1.Workspace)
 		require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(workspace), persisted))

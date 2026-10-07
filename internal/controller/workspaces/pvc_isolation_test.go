@@ -127,7 +127,7 @@ var _ = Describe("PVC isolation", func() {
 		Expect(pods.Items[0].Spec.Volumes).To(ContainElement(HaveField(persistentVolumeClaimKind, HaveField("ClaimName", Equal(legacy.Name)))))
 
 		process := &workspaces.WorkspaceExec{ObjectMeta: metav1.ObjectMeta{Namespace: namespace.Name}, Spec: workspaces.WorkspaceExecSpec{TargetRef: workspaces.WorkspaceExecTargetReference{Name: environment.Name}}}
-		execController := &WorkspaceExecReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		execController := &WorkspaceExecReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme()}
 		for range 2 {
 			_, reason, _, err := execController.resolveEnvironmentProcessTarget(ctx, process)
 			Expect(err).NotTo(HaveOccurred())
@@ -160,13 +160,13 @@ func isolationResource(ctx context.Context, kind, name, namespace string) (clien
 			Remote:  repositories.RepositoryRemoteSpec{URL: "https://example.test/repository.git"},
 			Storage: repositories.RepositoryStorageSpec{StorageClassName: isolationStorageClass, Size: resource.MustParse("1Gi")},
 		}}
-		controller = &repositorycontrollers.RepositoryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: testRunnerImage}
+		controller = &repositorycontrollers.RepositoryReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: testRunnerImage}
 	case isolationWorktree:
 		object = &repositories.Worktree{ObjectMeta: metadata, Spec: repositories.WorktreeSpec{RepositoryRef: repositories.RepositoryReference{Name: "clone-source"}, Branch: isolationStorageClass}}
-		controller = &repositorycontrollers.WorktreeReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: testRunnerImage}
+		controller = &repositorycontrollers.WorktreeReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: testRunnerImage}
 	case isolationWorkspace:
 		object = &workspaces.Workspace{ObjectMeta: metadata, Spec: workspaces.WorkspaceSpec{Image: testRunnerImage, Storage: &storage}}
-		controller = &WorkspaceReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: testRunnerImage}
+		controller = &WorkspaceReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: testRunnerImage}
 	default:
 		object = &workspaces.WorkspaceEnvironment{ObjectMeta: metadata, Spec: workspaces.WorkspaceEnvironmentSpec{Image: testRunnerImage, Storage: storage}}
 		controller = &WorkspaceEnvironmentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}

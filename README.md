@@ -158,13 +158,13 @@ The top-level command groups follow the rc resource model:
 | `rcctl repo` | Clone, inspect, execute commands in, and delete Repository mirrors |
 | `rcctl worktree` | Create, inspect, execute in, and delete independent Git checkouts |
 | `rcctl doctor` | Audit references, storage requests, runtime failures and deletion blockers |
-| `rcctl prune --dry-run` / `prune` | Review cleanup evidence and conditionally delete old terminal records |
+| `rcctl prune` | Report terminal execution history awaiting controller cleanup (read-only) |
 | `rcctl env` | Prepare and commit reusable Workspace home environments |
 | `rcctl workspace` | Create persistent development machines and manage their mounts |
 | `rcctl run` / `rcctl exec` | Run commands in a new / existing Workspace |
 | `rcctl ps` / `attach` / `logs` / `stop` / `inspect` / `rm` | List and manage processes |
 
-For read-only diagnostics and reviewed cleanup, see [Doctor and safe pruning](docs/doctor-prune.md).
+For read-only diagnostics and the execution history report, see [Doctor and the execution history report](docs/doctor-prune.md).
 
 In most cases, it takes only a few steps to get started with rcctl:
 
@@ -274,7 +274,7 @@ rcctl -n development worktree list
 rcctl -n development worktree exec rc-readme -- git status --short
 ```
 
-The add command creates a child PVC through CSI cloning and initializes the requested Git checkout in the clone root. `worktree exec` is the lightweight path for short commands that need only the base Runner Image: it runs in a separate Job, does not allocate a Workspace home PVC, and holds the same exclusive write Lease as a Workspace mount. It intentionally does not provide Workspace Environment state, caches, credentials, process persistence, or an interactive terminal. Use `run --rm --worktree rc-readme -- COMMAND` when a command needs those Workspace capabilities. Checkout modes remain available through flags such as `--ref`, `--detach`, `--orphan`, and `--no-checkout`. `--lock` and `--reason` record their requested intent, but no Git lock is required because the clone root has no linked-worktree metadata to prune. Delete an unmounted Worktree and its owned PVC and bootstrap Job with `rcctl worktree rm rc-readme`.
+The add command creates a child PVC through CSI cloning and initializes the requested Git checkout in the clone root. `worktree exec` is the lightweight path for short commands that need only the base Runner Image: it runs in a separate Job, does not allocate a Workspace home PVC, and holds the Worktree's exclusive writer, like a writable Workspace mount. It intentionally does not provide Workspace Environment state, caches, credentials, process persistence, or an interactive terminal. Use `run --rm --worktree rc-readme -- COMMAND` when a command needs those Workspace capabilities. Checkout modes remain available through flags such as `--ref`, `--detach`, `--orphan`, and `--no-checkout`. `--lock` and `--reason` record their requested intent, but no Git lock is required because the clone root has no linked-worktree metadata to prune. Delete an unmounted Worktree and its owned PVC and bootstrap Job with `rcctl worktree rm rc-readme`.
 
 New Worktrees inherit their source PVC access modes and StorageClass. The default
 size covers both the source's requested and reported capacity; a smaller explicit

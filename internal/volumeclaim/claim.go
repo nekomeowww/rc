@@ -99,28 +99,34 @@ func CheckOwner(claim *corev1.PersistentVolumeClaim, owner client.Object) error 
 // Resolve pins recorded names, recovers an owned legacy PVC after an interrupted
 // status update, and otherwise selects the typed name. It never adopts a PVC or
 // changes a recorded identity. API errors are propagated, not treated as absence.
-func Resolve(ctx context.Context, reader client.Reader, owner client.Object, role Role, revision int64, recorded string) (string, error) {
+// The returned claim is the PVC read under the resolved name, or nil when it does
+// not exist yet; callers reuse it instead of reading and checking it again.
+func Resolve(ctx context.Context, reader client.Reader, owner client.Object, role Role, revision int64, recorded string) (string, *corev1.PersistentVolumeClaim, error) {
 	if recorded != "" {
-		return recorded, checkName(ctx, reader, owner, recorded)
+		claim, err := lookup(ctx, reader, owner, recorded)
+		return recorded, claim, err
 	}
 	legacy := new(corev1.PersistentVolumeClaim)
 	err := reader.Get(ctx, client.ObjectKey{Namespace: owner.GetNamespace(), Name: legacyName(role, owner.GetName(), revision)}, legacy)
 	if err == nil && owner.GetUID() != "" && metav1.IsControlledBy(legacy, owner) {
-		return legacy.Name, CheckOwner(legacy, owner)
+		return legacy.Name, legacy, CheckOwner(legacy, owner)
 	}
 	if err != nil && !apierrors.IsNotFound(err) {
-		return "", err
+		return "", nil, err
 	}
 	name := Name(role, owner.GetName(), revision)
-	return name, checkName(ctx, reader, owner, name)
+	claim, err := lookup(ctx, reader, owner, name)
+	return name, claim, err
 }
 
-func checkName(ctx context.Context, reader client.Reader, owner client.Object, name string) error {
+// lookup reads a PVC by name and checks its owner. A missing PVC returns nil
+// without error; a present PVC is returned even when the owner check fails.
+func lookup(ctx context.Context, reader client.Reader, owner client.Object, name string) (*corev1.PersistentVolumeClaim, error) {
 	claim := new(corev1.PersistentVolumeClaim)
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: owner.GetNamespace(), Name: name}, claim); err != nil {
-		return client.IgnoreNotFound(err)
+		return nil, client.IgnoreNotFound(err)
 	}
-	return CheckOwner(claim, owner)
+	return claim, CheckOwner(claim, owner)
 }
 
 // Preflight checks the typed PVC selected by the caller before creating a CR.
@@ -128,7 +134,7 @@ func checkName(ctx context.Context, reader client.Reader, owner client.Object, n
 // Callers choose the role/revision and skip resources that do not allocate PVCs.
 // This is advisory: controllers recheck ownership because creation can race.
 func Preflight(ctx context.Context, reader client.Reader, owner client.Object, role Role, revision int64) error {
-	if err := checkName(ctx, reader, owner, Name(role, owner.GetName(), revision)); err != nil {
+	if _, err := lookup(ctx, reader, owner, Name(role, owner.GetName(), revision)); err != nil {
 		return fmt.Errorf("PVC preflight for %s/%s: %w", owner.GetNamespace(), owner.GetName(), err)
 	}
 	return nil

@@ -78,7 +78,7 @@ func TestTargetTranscriptBatchRetriesAndAcknowledgesBeforeRemoval(t *testing.T) 
 	pinned.Name, pinned.UID, pinned.ResourceVersion = "pinned", "pinned-uid", ""
 	pinned.Spec.Retain = true
 	require.NoError(t, kube.Create(ctx, pinned))
-	r := &executionRetentionService{Client: kube}
+	r := &executionRetentionService{Client: kube, APIReader: kube}
 	require.NoError(t, r.reconcileTranscripts(ctx, ws, ws.Spec.ExecutionRetention))
 	key := client.ObjectKey{Namespace: ws.Namespace, Name: transcriptCleanupName(ws)}
 	pod := new(corev1.Pod)
@@ -92,7 +92,7 @@ func TestTargetTranscriptBatchRetriesAndAcknowledgesBeforeRemoval(t *testing.T) 
 	pod.Status.Phase = corev1.PodFailed
 	require.NoError(t, kube.Status().Update(ctx, pod))
 	require.ErrorContains(t, r.reconcileTranscripts(ctx, ws, ws.Spec.ExecutionRetention), "cleanup Pod failed")
-	r = &executionRetentionService{Client: kube}
+	r = &executionRetentionService{Client: kube, APIReader: kube}
 	require.NoError(t, r.reconcileTranscripts(ctx, ws, ws.Spec.ExecutionRetention))
 	require.NoError(t, kube.Get(ctx, key, pod))
 	// Execute the actual offline batch on files; Pod phase here models the exit.
@@ -112,9 +112,9 @@ func TestTargetTranscriptBatchRetriesAndAcknowledgesBeforeRemoval(t *testing.T) 
 	broken := interceptor.NewClient(kube, interceptor.Funcs{SubResourceUpdate: func(_ context.Context, _ client.Client, _ string, _ client.Object, _ ...client.SubResourceUpdateOption) error {
 		return errors.New("lost acknowledgement")
 	}})
-	require.ErrorContains(t, (&executionRetentionService{Client: broken}).reconcileTranscripts(ctx, ws, ws.Spec.ExecutionRetention), "lost acknowledgement")
+	require.ErrorContains(t, (&executionRetentionService{Client: broken, APIReader: broken}).reconcileTranscripts(ctx, ws, ws.Spec.ExecutionRetention), "lost acknowledgement")
 	require.NoError(t, kube.Get(ctx, key, pod), "success survives a failed acknowledgement")
-	require.NoError(t, (&executionRetentionService{Client: kube}).reconcileTranscripts(ctx, ws, ws.Spec.ExecutionRetention))
+	require.NoError(t, (&executionRetentionService{Client: kube, APIReader: kube}).reconcileTranscripts(ctx, ws, ws.Spec.ExecutionRetention))
 	require.True(t, apierrors.IsNotFound(kube.Get(ctx, key, pod)))
 	require.NoError(t, r.reconcileTranscripts(ctx, ws, ws.Spec.ExecutionRetention))
 	require.NoError(t, kube.Get(ctx, key, pod))
@@ -146,17 +146,47 @@ func TestDeletedExecUsesTargetServiceWithPolicyDisabled(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(directory, process.Name, "owner.uid"), []byte(process.UID), 0o600))
 	require.NoError(t, kube.Delete(ctx, process))
 	request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(process)}
-	exec := &WorkspaceExecReconciler{Client: kube}
+	exec := &WorkspaceExecReconciler{Client: kube, APIReader: kube}
 	_, err := exec.Reconcile(ctx, request)
 	require.NoError(t, err)
 	boundary := &filesystemProcessRuntime{supervisor: rckube.NewSupervisor(directory, time.Second), failure: errors.New("disk failure")}
-	r := &executionRetentionService{Client: kube, Runtime: boundary}
+	r := &executionRetentionService{Client: kube, APIReader: kube, Runtime: boundary}
 	require.ErrorContains(t, r.reconcileTranscripts(ctx, ws, nil), "disk failure")
 	require.FileExists(t, transcript)
 	require.NoError(t, kube.Get(ctx, request.NamespacedName, process))
 	require.True(t, transcriptRequested(process))
-	r = &executionRetentionService{Client: kube, Runtime: &filesystemProcessRuntime{supervisor: rckube.NewSupervisor(directory, time.Second)}}
+	r = &executionRetentionService{Client: kube, APIReader: kube, Runtime: &filesystemProcessRuntime{supervisor: rckube.NewSupervisor(directory, time.Second)}}
 	require.NoError(t, r.reconcileTranscripts(ctx, ws, nil))
+	_, err = exec.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.True(t, apierrors.IsNotFound(kube.Get(ctx, request.NamespacedName, process)))
+	require.NoFileExists(t, transcript)
+}
+
+// ROOT CAUSE: the Workspace retention controller skipped the target service
+// without a policy, so an explicitly deleted execution never released.
+func TestWorkspaceRetentionDischargesDeletedExecWithoutPolicy(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	kube, ws, process := transcriptFixture(t)
+	ws.Spec.ExecutionRetention = nil
+	require.NoError(t, kube.Update(ctx, ws))
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "live-runtime", Namespace: testNamespace, UID: "pod-uid", Labels: map[string]string{workspaceManagedByLabel: ws.Name}}, Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: transcriptHomeVolumeName, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: testTranscriptHomeClaim}}}}}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+	require.NoError(t, controllerutil.SetControllerReference(ws, pod, kube.Scheme()))
+	require.NoError(t, kube.Create(ctx, pod))
+	directory := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(directory, process.Name), 0o700))
+	transcript := filepath.Join(directory, process.Name, "transcript.log")
+	require.NoError(t, os.WriteFile(transcript, []byte("history"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, process.Name, "owner.uid"), []byte(process.UID), 0o600))
+	require.NoError(t, kube.Delete(ctx, process))
+	request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(process)}
+	exec := &WorkspaceExecReconciler{Client: kube, APIReader: kube}
+	_, err := exec.Reconcile(ctx, request)
+	require.NoError(t, err)
+	retention := &WorkspaceRetentionReconciler{Client: kube, APIReader: kube, Runtime: &filesystemProcessRuntime{supervisor: rckube.NewSupervisor(directory, time.Second)}}
+	_, err = retention.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(ws)})
+	require.NoError(t, err)
 	_, err = exec.Reconcile(ctx, request)
 	require.NoError(t, err)
 	require.True(t, apierrors.IsNotFound(kube.Get(ctx, request.NamespacedName, process)))
@@ -195,7 +225,7 @@ func TestWholeStorageLifecycleReleasesExecutionWithoutWorker(t *testing.T) {
 				require.NoError(t, kube.Delete(ctx, claim))
 			}
 			require.NoError(t, kube.Delete(ctx, process))
-			_, err := (&WorkspaceExecReconciler{Client: kube}).Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(process)})
+			_, err := (&WorkspaceExecReconciler{Client: kube, APIReader: kube}).Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(process)})
 			require.NoError(t, err)
 			require.True(t, apierrors.IsNotFound(kube.Get(ctx, client.ObjectKeyFromObject(process), process)))
 			pods := new(corev1.PodList)
@@ -223,7 +253,7 @@ func TestEnvironmentRetentionUsesTypedTargetAndOriginalPVC(t *testing.T) {
 	request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(env)}
 	require.Empty(t, retentionTargetForProcess(workspacesv1alpha1.WorkspaceExecTargetWorkspace)(ctx, process))
 	require.Equal(t, []reconcile.Request{request}, retentionTargetForProcess(workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment)(ctx, process))
-	_, err := (&WorkspaceEnvironmentRetentionReconciler{Client: kube}).Reconcile(ctx, request)
+	_, err := (&WorkspaceEnvironmentRetentionReconciler{Client: kube, APIReader: kube}).Reconcile(ctx, request)
 	require.NoError(t, err)
 	pod := new(corev1.Pod)
 	require.NoError(t, kube.Get(ctx, client.ObjectKey{Namespace: env.Namespace, Name: transcriptCleanupName(env)}, pod))
@@ -262,7 +292,7 @@ func TestTranscriptRechecksPinBeforeBatchDispatch(t *testing.T) {
 				process.Spec.Retain = true
 				return kube.Update(ctx, process)
 			}})
-			require.NoError(t, (&executionRetentionService{Client: boundary}).reconcileTranscripts(ctx, ws, ws.Spec.ExecutionRetention))
+			require.NoError(t, (&executionRetentionService{Client: boundary, APIReader: boundary}).reconcileTranscripts(ctx, ws, ws.Spec.ExecutionRetention))
 			pods := new(corev1.PodList)
 			require.NoError(t, kube.List(ctx, pods))
 			if boundaryName == "a" {
@@ -284,7 +314,7 @@ func TestDeletingPVCDischargesPendingBatch(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	kube, ws, process := transcriptFixture(t)
-	r := &executionRetentionService{Client: kube}
+	r := &executionRetentionService{Client: kube, APIReader: kube}
 	require.NoError(t, r.reconcileTranscripts(ctx, ws, ws.Spec.ExecutionRetention))
 	claim := new(corev1.PersistentVolumeClaim)
 	require.NoError(t, kube.Get(ctx, client.ObjectKey{Namespace: ws.Namespace, Name: testTranscriptHomeClaim}, claim))

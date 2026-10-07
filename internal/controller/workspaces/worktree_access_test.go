@@ -107,10 +107,10 @@ func TestReadyWorkspaceAdmitsCurrentMountsWithoutListingWorktrees(t *testing.T) 
 	require.NoError(t, kube.Update(ctx, helper))
 	_, err = r.Reconcile(ctx, req)
 	require.NoError(t, err)
-	gate := worktreeownership.MountAccess{Client: kube}
-	drained, err := gate.Close(ctx, worktree)
+	gate := worktreeownership.MountAccess{Client: kube, Reader: kube}
+	remaining, err := gate.Close(ctx, worktree)
 	require.NoError(t, err)
-	assert.False(t, drained, "terminating helpers retain their admission")
+	assert.NotEmpty(t, remaining, "terminating helpers retain their admission")
 	require.NoError(t, kube.Get(ctx, client.ObjectKeyFromObject(helper), helper))
 	helper.Finalizers = nil
 	require.NoError(t, kube.Update(ctx, helper))
@@ -122,9 +122,9 @@ func TestReadyWorkspaceAdmitsCurrentMountsWithoutListingWorktrees(t *testing.T) 
 	r = WorkspaceReconciler{Client: kube, APIReader: kube, Scheme: scheme, RunnerImage: testRunnerImage}
 	_, err = r.Reconcile(ctx, req)
 	require.NoError(t, err)
-	drained, err = gate.Close(ctx, worktree)
+	remaining, err = gate.Close(ctx, worktree)
 	require.NoError(t, err)
-	assert.True(t, drained, "topology cleanup releases a removed Worktree")
+	assert.Empty(t, remaining, "topology cleanup releases a removed Worktree")
 	lists = 0
 	_, err = r.Reconcile(ctx, req)
 	require.NoError(t, err)
@@ -144,13 +144,13 @@ func TestSuspendingWorkspaceReleasesClosedMount(t *testing.T) {
 	require.NoError(t, controllerutil.SetControllerReference(workspace, home, scheme))
 	require.NoError(t, controllerutil.SetControllerReference(workspace, pod, scheme))
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(worktree, workspace, home).WithObjects(worktree, workspace, home, pod).Build()
-	gate := worktreeownership.MountAccess{Client: kube}
-	admitted, err := gate.Admit(ctx, worktree, workspace)
+	gate := worktreeownership.MountAccess{Client: kube, Reader: kube}
+	admitted, err := gate.Admit(ctx, worktree, workspace, worktreeownership.WorkspaceHolder(workspace, worktreeownership.Read))
 	require.NoError(t, err)
-	require.True(t, admitted)
-	drained, err := gate.Close(ctx, worktree)
+	require.True(t, admitted.Admitted)
+	remaining, err := gate.Close(ctx, worktree)
 	require.NoError(t, err)
-	require.False(t, drained)
+	require.NotEmpty(t, remaining)
 	r := WorkspaceReconciler{Client: kube, APIReader: kube, Scheme: scheme, RunnerImage: testRunnerImage}
 	// ROOT CAUSE: dependency resolution rejected the deletion fence before the
 	// suspend path could tear down its runtime and release the admitted mount.
@@ -159,7 +159,7 @@ func TestSuspendingWorkspaceReleasesClosedMount(t *testing.T) {
 		require.NoError(t, err)
 	}
 	assert.True(t, apierrors.IsNotFound(kube.Get(ctx, client.ObjectKeyFromObject(pod), new(corev1.Pod))))
-	drained, err = gate.Close(ctx, worktree)
+	remaining, err = gate.Close(ctx, worktree)
 	require.NoError(t, err)
-	assert.True(t, drained, "suspension must drain storage even after admission closes")
+	assert.Empty(t, remaining, "suspension must drain storage even after admission closes")
 }

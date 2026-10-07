@@ -107,12 +107,10 @@ func (c *WorktreeClient) Wait(ctx context.Context, worktree *repositoriesv1alpha
 			return false, nil
 		}
 		if condition.Status == metav1.ConditionFalse {
-			if worktreestorage.IsTerminalReason(condition.Reason) {
-				result = current
-				return true, nil
-			}
 			switch condition.Reason {
-			case "RepositoryNotFound", "VolumeClaimConflict", "VolumeClaimSpecChanged", "VolumeClaimLost", bootstrapFailedReason, "BootstrapJobConflict":
+			// Planner rejections of immutable Worktree input cannot recover.
+			case worktreestorage.SizeTooSmall, worktreestorage.StorageInvalid,
+				"RepositoryNotFound", "VolumeClaimConflict", "VolumeClaimSpecChanged", "VolumeClaimLost", bootstrapFailedReason, "BootstrapJobConflict":
 				result = current
 				return true, nil
 			}

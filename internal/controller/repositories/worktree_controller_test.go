@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
@@ -50,6 +51,14 @@ var _ = Describe("Worktree Controller", func() {
 		repository.Status = readyRepositoryStatus(repositoryName)
 		Expect(k8sClient.Status().Update(ctx, repository)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, repository)).To(Succeed()) })
+
+		// A ready Repository alone is not storage evidence. Model the observed
+		// Bound source PVC that the controller now reads before planning a clone.
+		source := parentVolumeClaim(repository, repository.Status.VolumeClaimName)
+		Expect(k8sClient.Create(ctx, source)).To(Succeed())
+		source.Status = corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound, Capacity: source.Spec.Resources.Requests.DeepCopy()}
+		Expect(k8sClient.Status().Update(ctx, source)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, source)).To(Succeed()) })
 
 		worktree := &repositoriesv1alpha1.Worktree{
 			ObjectMeta: metav1.ObjectMeta{
@@ -142,6 +151,14 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(k8sClient.Status().Update(ctx, repository)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, repository)).To(Succeed()) })
 
+		// A ready Repository alone is not storage evidence. Model the observed
+		// Bound source PVC that the controller now reads before planning a clone.
+		source := parentVolumeClaim(repository, repository.Status.VolumeClaimName)
+		Expect(k8sClient.Create(ctx, source)).To(Succeed())
+		source.Status = corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound, Capacity: source.Spec.Resources.Requests.DeepCopy()}
+		Expect(k8sClient.Status().Update(ctx, source)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, source)).To(Succeed()) })
+
 		worktree := &repositoriesv1alpha1.Worktree{
 			ObjectMeta: metav1Object(worktreeName),
 			Spec: repositoriesv1alpha1.WorktreeSpec{
@@ -161,7 +178,7 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: "worktree-" + worktreeName}, claim)).To(Succeed())
 		Expect(claim.Spec.DataSource.Kind).To(Equal("PersistentVolumeClaim"))
 		Expect(claim.Spec.DataSource.Name).To(Equal(repositoryName))
-		Expect(claim.Spec.AccessModes).To(Equal([]corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}))
+		Expect(claim.Spec.AccessModes).To(Equal([]corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}))
 
 		claim.Status.Phase = corev1.ClaimBound
 		Expect(k8sClient.Status().Update(ctx, claim)).To(Succeed())
@@ -348,6 +365,11 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(k8sClient.Create(ctx, repository)).To(Succeed())
 		repository.Status = readyRepositoryStatus(repository.Name)
 		Expect(k8sClient.Status().Update(ctx, repository)).To(Succeed())
+		source := parentVolumeClaim(repository, repository.Status.VolumeClaimName)
+		Expect(controllerutil.SetControllerReference(repository, source, k8sClient.Scheme())).To(Succeed())
+		Expect(k8sClient.Create(ctx, source)).To(Succeed())
+		source.Status = corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound, Capacity: source.Spec.Resources.Requests.DeepCopy()}
+		Expect(k8sClient.Status().Update(ctx, source)).To(Succeed())
 		worktree := &repositoriesv1alpha1.Worktree{
 			ObjectMeta: metav1Object("deletion-clone-child"),
 			Spec:       repositoriesv1alpha1.WorktreeSpec{RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: repository.Name}, Branch: "pending"},

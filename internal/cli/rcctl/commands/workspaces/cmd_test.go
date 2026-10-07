@@ -227,10 +227,10 @@ func TestGeneratedWorkspaceWorktreeAccessModes(t *testing.T) {
 		assert.Equal(t, modes, worktree.Spec.Storage.AccessModes, "write every requested access mode to the generated Worktree")
 	})
 
-	t.Run("DefaultReadWriteMany", func(t *testing.T) {
+	t.Run("InheritSourceAccessModes", func(t *testing.T) {
 		worktree := generatedWorkspaceWorktree(workspace, repository, "rc", nil)
 
-		assert.Nil(t, worktree.Spec.Storage, "omit the override so the Worktree controller retains its ReadWriteMany default")
+		assert.Nil(t, worktree.Spec.Storage, "omit the override so the Worktree controller plans from the actual source PVC")
 	})
 }
 

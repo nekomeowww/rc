@@ -12,6 +12,7 @@ import (
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
+	"github.com/nekomeowww/rc/internal/worktreestorage"
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -128,7 +129,7 @@ func TestExistingWorktreeRemainsReadyDuringSync(t *testing.T) {
 	c, repository, request := syncFixture(t)
 	worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: "existing", Namespace: repository.Namespace, UID: "worktree", Generation: 1}, Spec: repositoriesv1alpha1.WorktreeSpec{RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: repository.Name}}, Status: repositoriesv1alpha1.WorktreeStatus{ObservedGeneration: 1, VolumeClaimName: "existing", WorktreePath: "/repository", Conditions: []metav1.Condition{{Type: repositoriesv1alpha1.WorktreeConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1}}}}
 	require.NoError(t, c.Create(t.Context(), worktree))
-	claim := worktreeVolumeClaim(worktree, worktree.Name, repository.Name, "csi", resource.MustParse("1Gi"), []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany})
+	claim := worktreeVolumeClaim(worktree, worktree.Status.VolumeClaimName, repository.Name, worktreestorage.Plan{StorageClassName: "csi", Size: resource.MustParse("1Gi"), AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, VolumeMode: corev1.PersistentVolumeFilesystem})
 	require.NoError(t, controllerutil.SetControllerReference(worktree, claim, c.Scheme()))
 	claim.Status.Phase = corev1.ClaimBound
 	require.NoError(t, c.Create(t.Context(), claim))

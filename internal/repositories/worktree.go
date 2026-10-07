@@ -18,6 +18,7 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	"github.com/nekomeowww/rc/internal/volumeclaim"
+	"github.com/nekomeowww/rc/internal/worktreestorage"
 )
 
 // WorktreeAddRequest describes one independent child volume and Git checkout
@@ -106,8 +107,12 @@ func (c *WorktreeClient) Wait(ctx context.Context, worktree *repositoriesv1alpha
 			return false, nil
 		}
 		if condition.Status == metav1.ConditionFalse {
+			if worktreestorage.IsTerminalReason(condition.Reason) {
+				result = current
+				return true, nil
+			}
 			switch condition.Reason {
-			case "RepositoryNotFound", "VolumeClaimConflict", "VolumeClaimSpecChanged", bootstrapFailedReason, "BootstrapJobConflict":
+			case "RepositoryNotFound", "VolumeClaimConflict", "VolumeClaimSpecChanged", "VolumeClaimLost", bootstrapFailedReason, "BootstrapJobConflict":
 				result = current
 				return true, nil
 			}

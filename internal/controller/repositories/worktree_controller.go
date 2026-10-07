@@ -20,7 +20,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -30,7 +29,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -48,6 +46,7 @@ import (
 	"github.com/nekomeowww/rc/internal/volumeclaim"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
+	"github.com/nekomeowww/rc/internal/worktreestorage"
 )
 
 const (
@@ -85,8 +84,14 @@ type WorktreeReconciler struct {
 //nolint:gocyclo // Reconcile is an explicit resource lifecycle state machine.
 func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	// Both creation evidence and child existence must be read outside the cache;
+	// a stale pre-creation Worktree must not authorize replacing a lost child.
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
 	worktree := new(repositoriesv1alpha1.Worktree)
-	if err := r.Get(ctx, req.NamespacedName, worktree); err != nil {
+	if err := reader.Get(ctx, req.NamespacedName, worktree); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !worktree.DeletionTimestamp.IsZero() {
@@ -101,28 +106,9 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	worktreePath := worktreePath(worktree)
-	repository := new(repositoriesv1alpha1.Repository)
-	repositoryKey := types.NamespacedName{
-		Name:      worktree.Spec.RepositoryRef.Name,
-		Namespace: worktree.Namespace,
-	}
-
-	err := r.Get(ctx, repositoryKey, repository)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "RepositoryNotFound", "Referenced Repository does not exist", "", "", worktreePath)
-		}
-		return ctrl.Result{}, fmt.Errorf("get Repository: %w", err)
-	}
-
-	storageClassName, size, accessModes := effectiveWorktreeStorage(worktree, repository)
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
 	claimName, err := volumeclaim.Resolve(ctx, reader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
 	if volumeclaim.IsConflict(err) {
-		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimConflict", err.Error(), worktree.Status.VolumeClaimName, repository.Status.VolumeClaimName, worktreePath)
+		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimConflict", err.Error(), worktree.Status.VolumeClaimName, worktree.Status.SourceVolumeClaimName, worktreePath)
 	}
 	if err != nil {
 		return ctrl.Result{}, err
@@ -130,8 +116,37 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	claim := new(corev1.PersistentVolumeClaim)
 	claimKey := types.NamespacedName{Name: claimName, Namespace: worktree.Namespace}
 
-	err = r.Get(ctx, claimKey, claim)
+	// Read directly before creation: a cached absence must not replan a child
+	// already created from an earlier source observation.
+	err = reader.Get(ctx, claimKey, claim)
+	if err != nil && !errors.IsNotFound(err) {
+		return ctrl.Result{}, fmt.Errorf("get Worktree PersistentVolumeClaim: %w", err)
+	}
 	if errors.IsNotFound(err) {
+		// A recorded child is durable creation evidence. Its loss must not silently
+		// authorize a new clone from today's Repository under the same Worktree.
+		if worktree.Status.VolumeClaimName != "" {
+			if err := (repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}).Release(ctx, worktree.Namespace, repositoryaccess.Token("clone", worktree)); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimLost", "Previously created child PVC is missing; restore the child or recreate the Worktree explicitly", worktree.Status.VolumeClaimName, worktree.Status.SourceVolumeClaimName, worktreePath)
+		}
+		// Repository state is an input to creation only. An existing independent
+		// child must recover even if its Repository was replaced or removed.
+		repository := new(repositoriesv1alpha1.Repository)
+		repositoryKey := types.NamespacedName{
+			Name:      worktree.Spec.RepositoryRef.Name,
+			Namespace: worktree.Namespace,
+		}
+
+		err := r.Get(ctx, repositoryKey, repository)
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "RepositoryNotFound", "Referenced Repository does not exist", "", "", worktreePath)
+			}
+			return ctrl.Result{}, fmt.Errorf("get Repository: %w", err)
+		}
+
 		gate := repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}
 		admission, err := gate.Acquire(ctx, repository, repositoryaccess.Token("clone", worktree), repositoryaccess.Clone, true)
 		if err != nil {
@@ -140,7 +155,32 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if admission != repositoryaccess.Admitted {
 			return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionUnknown, "RepositoryNotReady", "Repository is busy or not ready for cloning", "", repository.Status.VolumeClaimName, worktreePath)
 		}
-		claim = worktreeVolumeClaim(worktree, claimName, repository.Status.VolumeClaimName, storageClassName, size, accessModes)
+		// Admission stabilizes rc-managed Repository mutations. Read the actual
+		// source after admission instead of using Repository intent or cache state.
+		source := new(corev1.PersistentVolumeClaim)
+		sourceKey := types.NamespacedName{Name: repository.Status.VolumeClaimName, Namespace: worktree.Namespace}
+		if err := reader.Get(ctx, sourceKey, source); err != nil {
+			if !errors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("get clone source PVC: %w", err)
+			}
+			source = nil
+		}
+		plan, planErr := worktreestorage.PlanClone(source, repository, worktree.Spec.Storage)
+		if planErr != nil {
+			// No child was created: rejected planning must not retain a reservation
+			// that would prevent Repository sync or expansion from making progress.
+			if err := gate.Release(ctx, worktree.Namespace, repositoryaccess.Token("clone", worktree)); err != nil {
+				return ctrl.Result{}, err
+			}
+			status := metav1.ConditionFalse
+			result := ctrl.Result{}
+			if planErr.Retryable() {
+				status = metav1.ConditionUnknown
+				result.RequeueAfter = worktreeRequeueDelay
+			}
+			return result, r.setWorktreeStatus(ctx, worktree, status, planErr.Reason, planErr.Message, "", repository.Status.VolumeClaimName, worktreePath)
+		}
+		claim = worktreeVolumeClaim(worktree, claimName, source.Name, plan)
 
 		err = controllerutil.SetControllerReference(worktree, claim, r.Scheme)
 		if err != nil {
@@ -154,27 +194,34 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 		log.Info("Created Worktree PersistentVolumeClaim", "name", claim.Name, "repository", repository.Name)
 
-		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "Provisioning", "Child volume is provisioning", claim.Name, repository.Status.VolumeClaimName, worktreePath)
+		// Creation and restart recovery publish status through the same path below.
+		// The successful PVC write, not a later status write, commits clone identity.
 	}
 
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("get Worktree PersistentVolumeClaim: %w", err)
-	}
 	if ownerErr := volumeclaim.CheckOwner(claim, worktree); ownerErr != nil {
-		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimConflict", ownerErr.Error(), worktree.Status.VolumeClaimName, repository.Status.VolumeClaimName, worktreePath)
+		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimConflict", ownerErr.Error(), worktree.Status.VolumeClaimName, worktree.Status.SourceVolumeClaimName, worktreePath)
 	}
-	if !worktreeClaimMatches(claim, repository.Status.VolumeClaimName, storageClassName, size, accessModes) {
-		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimSpecChanged", "Changing the Worktree child volume specification is not supported", claim.Name, repository.Status.VolumeClaimName, worktreePath)
+	// Existing child storage records its creation-time defaults. Do not compare
+	// it to a fresh plan: parent expansion and default changes cannot alter a clone.
+	// Worktree status is a repairable projection: creation may have committed
+	// before status, and an older controller may have recorded the wrong source.
+	// Recover only from this owned child's immutable source references.
+	sourceClaimName, sourceErr := worktreestorage.CloneSourceName(claim)
+	if sourceErr != nil {
+		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimSpecChanged", sourceErr.Error(), claim.Name, "", worktreePath)
+	}
+	if !worktreeClaimMatches(claim, worktree.Spec.Storage) {
+		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimSpecChanged", "Changing the Worktree child volume specification is not supported", claim.Name, sourceClaimName, worktreePath)
 	}
 	if claim.Status.Phase != corev1.ClaimBound {
-		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "Provisioning", "Child volume is provisioning", claim.Name, repository.Status.VolumeClaimName, worktreePath)
+		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "Provisioning", "Child volume is provisioning", claim.Name, sourceClaimName, worktreePath)
 	}
 	// A Bound CSI clone is an independent volume. Pending claims retain admission
 	// through source capture. See https://kubernetes.io/docs/concepts/storage/volume-pvc-datasource/
 	if err := (repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}).Release(ctx, worktree.Namespace, repositoryaccess.Token("clone", worktree)); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.setWorktreeVolumeReady(ctx, worktree, claim.Name, repository.Status.VolumeClaimName, worktreePath); err != nil {
+	if err := r.setWorktreeVolumeReady(ctx, worktree, claim.Name, sourceClaimName, worktreePath); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.labelWorktreePods(ctx, worktree, claim.Name); err != nil {
@@ -189,7 +236,7 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		legacyJob := new(batchv1.Job)
 		legacyKey := types.NamespacedName{Name: worktreeBootstrapJobName(worktree), Namespace: worktree.Namespace}
 		if err := r.Get(ctx, legacyKey, legacyJob); errors.IsNotFound(err) {
-			return ctrl.Result{}, r.reconcileWorkspaceBootstrap(ctx, worktree, claim.Name, repository.Status.VolumeClaimName, worktreePath)
+			return ctrl.Result{}, r.reconcileWorkspaceBootstrap(ctx, worktree, claim.Name, sourceClaimName, worktreePath)
 		} else if err != nil {
 			return ctrl.Result{}, fmt.Errorf("get legacy generated Worktree bootstrap Job: %w", err)
 		}
@@ -215,13 +262,13 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			return ctrl.Result{}, fmt.Errorf("create Worktree bootstrap Job: %w", err)
 		}
 
-		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "Initializing", "Worktree bootstrap Job is running", claim.Name, repository.Status.VolumeClaimName, worktreePath)
+		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "Initializing", "Worktree bootstrap Job is running", claim.Name, sourceClaimName, worktreePath)
 	}
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("get Worktree bootstrap Job: %w", err)
 	}
 	if !metav1.IsControlledBy(job, worktree) {
-		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "BootstrapJobConflict", "A bootstrap Job with the expected name is not owned by this Worktree", claim.Name, repository.Status.VolumeClaimName, worktreePath)
+		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "BootstrapJobConflict", "A bootstrap Job with the expected name is not owned by this Worktree", claim.Name, sourceClaimName, worktreePath)
 	}
 	if initializedPath := job.Annotations[worktreePathAnnotation]; initializedPath != "" {
 		worktreePath = initializedPath
@@ -232,13 +279,13 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			message = "Worktree bootstrap Job failed"
 		}
 
-		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "BootstrapFailed", message, claim.Name, repository.Status.VolumeClaimName, worktreePath)
+		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "BootstrapFailed", message, claim.Name, sourceClaimName, worktreePath)
 	}
 	if condition := jobCondition(job, batchv1.JobComplete); condition != nil && condition.Status == corev1.ConditionTrue {
-		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionTrue, "WorktreeReady", "Child volume and isolated Git checkout are ready", claim.Name, repository.Status.VolumeClaimName, worktreePath)
+		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionTrue, "WorktreeReady", "Child volume and isolated Git checkout are ready", claim.Name, sourceClaimName, worktreePath)
 	}
 
-	return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "Initializing", "Worktree bootstrap Job is running", claim.Name, repository.Status.VolumeClaimName, worktreePath)
+	return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "Initializing", "Worktree bootstrap Job is running", claim.Name, sourceClaimName, worktreePath)
 }
 
 func (r *WorktreeReconciler) reconcileDelete(ctx context.Context, worktree *repositoriesv1alpha1.Worktree) (ctrl.Result, error) {
@@ -420,33 +467,11 @@ func (r *WorktreeReconciler) reconcileWorkspaceBootstrap(ctx context.Context, wo
 	return r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "WaitingForWorkspace", "Child volume is waiting for a Workspace runtime to initialize its Git branch", claimName, sourceClaimName, path)
 }
 
-func effectiveWorktreeStorage(worktree *repositoriesv1alpha1.Worktree, repository *repositoriesv1alpha1.Repository) (string, resource.Quantity, []corev1.PersistentVolumeAccessMode) {
-	storageClassName := repository.Spec.Storage.StorageClassName
-	size := repository.Spec.Storage.Size.DeepCopy()
-	accessModes := []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}
-	if storage := worktree.Spec.Storage; storage != nil {
-		if storage.StorageClassName != "" {
-			storageClassName = storage.StorageClassName
-		}
-		if storage.Size != nil {
-			size = storage.Size.DeepCopy()
-		}
-		if len(storage.AccessModes) > 0 {
-			accessModes = append([]corev1.PersistentVolumeAccessMode(nil), storage.AccessModes...)
-		}
-	}
-
-	return storageClassName, size, accessModes
-}
-
 func worktreeVolumeClaim(
 	worktree *repositoriesv1alpha1.Worktree,
 	claimName, sourceClaimName string,
-	storageClassName string,
-	size resource.Quantity,
-	accessModes []corev1.PersistentVolumeAccessMode,
+	plan worktreestorage.Plan,
 ) *corev1.PersistentVolumeClaim {
-	filesystem := corev1.PersistentVolumeFilesystem
 	return &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      claimName,
@@ -457,34 +482,39 @@ func worktreeVolumeClaim(
 			},
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes:      append([]corev1.PersistentVolumeAccessMode(nil), accessModes...),
-			StorageClassName: &storageClassName,
-			VolumeMode:       &filesystem,
+			AccessModes:      slices.Clone(plan.AccessModes),
+			StorageClassName: &plan.StorageClassName,
+			VolumeMode:       &plan.VolumeMode,
 			DataSource: &corev1.TypedLocalObjectReference{
 				Kind: "PersistentVolumeClaim",
 				Name: sourceClaimName,
 			},
 			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{corev1.ResourceStorage: size},
+				Requests: corev1.ResourceList{corev1.ResourceStorage: plan.Size.DeepCopy()},
 			},
 		},
 	}
 }
 
-func worktreeClaimMatches(claim *corev1.PersistentVolumeClaim, sourceClaimName string, storageClassName string, size resource.Quantity, accessModes []corev1.PersistentVolumeAccessMode) bool {
-	if claim.Spec.StorageClassName == nil || *claim.Spec.StorageClassName != storageClassName {
+// worktreeClaimMatches validates immutable explicit storage intent. Clone source
+// validation moved to worktreestorage.CloneSourceName so recovery no longer
+// compares committed identity to mutable Repository or Worktree status.
+// Inherited defaults belong to the existing PVC, including legacy RWX defaults.
+func worktreeClaimMatches(claim *corev1.PersistentVolumeClaim, override *repositoriesv1alpha1.WorktreeStorageSpec) bool {
+	if claim.Spec.VolumeMode != nil && *claim.Spec.VolumeMode != corev1.PersistentVolumeFilesystem {
 		return false
 	}
-	if claim.Spec.DataSource == nil || claim.Spec.DataSource.Kind != "PersistentVolumeClaim" || claim.Spec.DataSource.Name != sourceClaimName {
+	if override == nil {
+		return true
+	}
+	if override.StorageClassName != "" && (claim.Spec.StorageClassName == nil || *claim.Spec.StorageClassName != override.StorageClassName) {
 		return false
 	}
-	if !reflect.DeepEqual(claim.Spec.AccessModes, accessModes) {
+	if len(override.AccessModes) > 0 && !slices.Equal(claim.Spec.AccessModes, override.AccessModes) {
 		return false
 	}
-
-	currentSize, ok := claim.Spec.Resources.Requests[corev1.ResourceStorage]
-
-	return ok && currentSize.Cmp(size) == 0
+	currentSize := claim.Spec.Resources.Requests[corev1.ResourceStorage]
+	return override.Size == nil || currentSize.Cmp(*override.Size) >= 0
 }
 
 func podUsesPersistentVolumeClaim(pod *corev1.Pod, claimName string) bool {
@@ -684,6 +714,12 @@ func (r *WorktreeReconciler) setWorktreeStatus(ctx context.Context, worktree *re
 			current.Status.VolumeClaimName = claimName
 		}
 		current.Status.WorktreePath = path
+		if reason == "VolumeClaimLost" {
+			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+				Type: repositoriesv1alpha1.WorktreeConditionVolumeReady, Status: metav1.ConditionFalse,
+				ObservedGeneration: current.Generation, Reason: reason, Message: message,
+			})
+		}
 		if claimName == "" || worktreebootstrap.Deferred(current) {
 			current.Status.JobName = ""
 		} else if current.Status.JobName == "" || status != metav1.ConditionTrue {
@@ -721,9 +757,12 @@ func (r *WorktreeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.RunnerImage == "" {
 		return fmt.Errorf("worktree runner image must not be empty")
 	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &repositoriesv1alpha1.Worktree{}, worktreeRepositoryIndex, worktreeRepositoryIndexValues); err != nil {
+		return fmt.Errorf("index Worktrees by Repository: %w", err)
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&repositoriesv1alpha1.Worktree{}).
-		Owns(&corev1.PersistentVolumeClaim{}).
+		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(r.worktreesForClaim)).
 		Owns(&batchv1.Job{}).
 		Watches(&coordinationv1.Lease{}, handler.EnqueueRequestsFromMapFunc(r.worktreesForLease)).
 		Watches(&workspacesv1alpha1.Workspace{}, handler.EnqueueRequestsFromMapFunc(r.worktreesForWorkspace)).
@@ -753,18 +792,7 @@ func (r *WorktreeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			return requests
 		})).
 		Watches(&repositoriesv1alpha1.Repository{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, object client.Object) []ctrl.Request {
-			worktrees := new(repositoriesv1alpha1.WorktreeList)
-			if err := r.List(ctx, worktrees, client.InNamespace(object.GetNamespace())); err != nil {
-				return nil
-			}
-			requests := make([]ctrl.Request, 0)
-			for index := range worktrees.Items {
-				worktree := &worktrees.Items[index]
-				if worktree.Spec.RepositoryRef.Name == object.GetName() {
-					requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(worktree)})
-				}
-			}
-			return requests
+			return r.worktreesForRepository(ctx, client.ObjectKeyFromObject(object))
 		})).
 		Named("repositories-worktree").
 		Complete(r)

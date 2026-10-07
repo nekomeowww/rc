@@ -15,6 +15,7 @@ import (
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
 	"github.com/nekomeowww/rc/internal/volumeclaim"
+	"github.com/nekomeowww/rc/internal/worktreestorage"
 )
 
 func TestWorktreeDeletionWaitsForPendingClaim(t *testing.T) {
@@ -45,7 +46,7 @@ func TestWorktreeDeletionWaitsForPendingClaim(t *testing.T) {
 			admission, err := gate.Acquire(t.Context(), repository, repositoryaccess.Token("clone", worktree), repositoryaccess.Clone, true)
 			require.NoError(t, err)
 			require.Equal(t, repositoryaccess.Admitted, admission)
-			claim := worktreeVolumeClaim(worktree, scenario.claimName, repository.Status.VolumeClaimName, repository.Spec.Storage.StorageClassName, repository.Spec.Storage.Size, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany})
+			claim := worktreeVolumeClaim(worktree, scenario.claimName, repository.Status.VolumeClaimName, worktreestorage.Plan{StorageClassName: repository.Spec.Storage.StorageClassName, Size: repository.Spec.Storage.Size, AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, VolumeMode: corev1.PersistentVolumeFilesystem})
 			require.NoError(t, controllerutil.SetControllerReference(worktree, claim, kube.Scheme()))
 			claim.Status.Phase = corev1.ClaimPending
 			require.NoError(t, kube.Create(t.Context(), claim))

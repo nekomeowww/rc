@@ -25,6 +25,7 @@ import (
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	repositoryservice "github.com/nekomeowww/rc/internal/repositories"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
+	"github.com/nekomeowww/rc/internal/worktreeownership"
 	clioutput "github.com/nekomeowww/rc/pkg/output"
 )
 
@@ -64,6 +65,7 @@ func Register(root *cobra.Command, kubeconfigFlags *kubeconfig.Flags) {
 	worktreeCommand.AddCommand(newListCommand(kubeconfigFlags))
 	worktreeCommand.AddCommand(newGetCommand(kubeconfigFlags))
 	worktreeCommand.AddCommand(newDeleteCommand(kubeconfigFlags))
+	worktreeCommand.AddCommand(newOwnershipCommand(kubeconfigFlags, false), newOwnershipCommand(kubeconfigFlags, true))
 	worktreeCommand.AddCommand(newExecCommand(kubeconfigFlags))
 	root.AddCommand(worktreeCommand)
 }
@@ -157,22 +159,7 @@ func runWorktreeDelete(ctx context.Context, kubeClient client.Client, namespace 
 }
 
 func worktreeWorkspaceBlockers(ctx context.Context, kubeClient client.Client, namespace string, name string) ([]string, error) {
-	workspaces := new(workspacesv1alpha1.WorkspaceList)
-	if err := kubeClient.List(ctx, workspaces, client.InNamespace(namespace)); err != nil {
-		return nil, fmt.Errorf("list Workspaces before deleting Worktree %q: %w", name, err)
-	}
-	blockers := make([]string, 0)
-	for index := range workspaces.Items {
-		workspace := &workspaces.Items[index]
-		for _, mount := range workspace.Spec.Mounts {
-			if mount.WorktreeRef != nil && mount.WorktreeRef.Name == name {
-				blockers = append(blockers, workspace.Name)
-				break
-			}
-		}
-	}
-	slices.Sort(blockers)
-	return blockers, nil
+	return worktreeownership.ReferenceBlockers(ctx, kubeClient, namespace, name)
 }
 
 func mountedWorktreeError(name string, blockers []string) error {
@@ -315,9 +302,18 @@ func worktreeDetailFields(worktree *repositoriesv1alpha1.Worktree) []clioutput.F
 		accessModes = clioutput.ValueOrDash(strings.Join(modes, ", "))
 	}
 
+	ownership := "independent (retained)"
+	if owner := worktreeownership.WorkspaceOwner(worktree); owner != nil {
+		ownership = fmt.Sprintf("Workspace %s (UID %s; cascades)", owner.Name, owner.UID)
+	} else if len(worktree.OwnerReferences) > 0 {
+		ownership = "externally owned (inspect ownerReferences)"
+	}
+
 	return []clioutput.Field{
 		{Name: "Name", Value: worktree.Name},
 		{Name: "Namespace", Value: worktree.Namespace},
+		{Name: "Ownership", Value: ownership},
+		{Name: "Generated for (hint only)", Value: clioutput.ValueOrDash(worktree.Labels[worktreeownership.GeneratedForLabel])},
 		{Name: "Created", Value: clioutput.Timestamp(worktree.CreationTimestamp)},
 		{Name: "Ready", Value: meta.IsStatusConditionTrue(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady)},
 		{Name: "Repository", Value: clioutput.ValueOrDash(worktree.Spec.RepositoryRef.Name)},

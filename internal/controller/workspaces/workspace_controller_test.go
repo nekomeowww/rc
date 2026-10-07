@@ -167,6 +167,8 @@ func TestWorkspaceRuntimeUsesDeferredWorktreeAndLifecycleActions(t *testing.T) {
 	requirements.NoError(err)
 	assertions.Equal([]string{lifecycleToolTestName, "cleanup"}, beforeStop[0].Command)
 
+	// Mount admission updates Worktree metadata; status writers must re-fetch its resourceVersion.
+	requirements.NoError(kubeClient.Get(ctx, client.ObjectKeyFromObject(worktree), worktree))
 	worktree.Status.Conditions = append(worktree.Status.Conditions, metav1.Condition{
 		Type: repositoriesv1alpha1.WorktreeConditionReady, Status: metav1.ConditionTrue, Reason: "Initialized",
 	})

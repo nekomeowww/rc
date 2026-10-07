@@ -17,10 +17,9 @@ limitations under the License.
 package output
 
 import (
-	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/yaml"
 )
 
-func marshalYAML(object runtime.Object) ([]byte, error) {
+func marshalYAML(object any) ([]byte, error) {
 	return yaml.Marshal(object)
 }

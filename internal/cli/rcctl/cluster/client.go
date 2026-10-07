@@ -19,6 +19,7 @@ package cluster
 import (
 	"fmt"
 
+	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -58,7 +59,7 @@ func New(config *rest.Config) (*Client, error) {
 func newScheme() (*runtime.Scheme, error) {
 	scheme := runtime.NewScheme()
 	for name, add := range map[string]func(*runtime.Scheme) error{
-		"coordination": coordinationv1.AddToScheme, "core": corev1.AddToScheme, "RBAC": rbacv1.AddToScheme,
+		"batch": batchv1.AddToScheme, "coordination": coordinationv1.AddToScheme, "core": corev1.AddToScheme, "RBAC": rbacv1.AddToScheme,
 		"configs": configsv1alpha1.AddToScheme, "repositories": repositoriesv1alpha1.AddToScheme,
 		"workspaces": workspacesv1alpha1.AddToScheme,
 	} {

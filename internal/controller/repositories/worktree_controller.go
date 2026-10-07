@@ -43,6 +43,7 @@ import (
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
 	"github.com/nekomeowww/rc/internal/runtimepolicy"
+	"github.com/nekomeowww/rc/internal/volumeclaim"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
 	"github.com/nekomeowww/rc/internal/worktreestorage"
@@ -105,13 +106,19 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	worktreePath := worktreePath(worktree)
-
+	claimName, err := volumeclaim.Resolve(ctx, reader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
+	if volumeclaim.IsConflict(err) {
+		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimConflict", err.Error(), worktree.Status.VolumeClaimName, worktree.Status.SourceVolumeClaimName, worktreePath)
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	claim := new(corev1.PersistentVolumeClaim)
-	claimKey := types.NamespacedName{Name: worktree.Name, Namespace: worktree.Namespace}
+	claimKey := types.NamespacedName{Name: claimName, Namespace: worktree.Namespace}
 
 	// Read directly before creation: a cached absence must not replan a child
 	// already created from an earlier source observation.
-	err := reader.Get(ctx, claimKey, claim)
+	err = reader.Get(ctx, claimKey, claim)
 	if err != nil && !errors.IsNotFound(err) {
 		return ctrl.Result{}, fmt.Errorf("get Worktree PersistentVolumeClaim: %w", err)
 	}
@@ -173,7 +180,7 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			}
 			return result, r.setWorktreeStatus(ctx, worktree, status, planErr.Reason, planErr.Message, "", repository.Status.VolumeClaimName, worktreePath)
 		}
-		claim = worktreeVolumeClaim(worktree, source.Name, plan)
+		claim = worktreeVolumeClaim(worktree, claimName, source.Name, plan)
 
 		err = controllerutil.SetControllerReference(worktree, claim, r.Scheme)
 		if err != nil {
@@ -191,8 +198,8 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		// The successful PVC write, not a later status write, commits clone identity.
 	}
 
-	if !metav1.IsControlledBy(claim, worktree) {
-		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimConflict", "A PersistentVolumeClaim with the Worktree name already exists and is not owned by this Worktree", "", "", worktreePath)
+	if ownerErr := volumeclaim.CheckOwner(claim, worktree); ownerErr != nil {
+		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimConflict", ownerErr.Error(), worktree.Status.VolumeClaimName, worktree.Status.SourceVolumeClaimName, worktreePath)
 	}
 	// Existing child storage records its creation-time defaults. Do not compare
 	// it to a fresh plan: parent expansion and default changes cannot alter a clone.
@@ -324,8 +331,15 @@ func (r *WorktreeReconciler) reconcileDelete(ctx context.Context, worktree *repo
 	}
 	// Finish an admitted clone before releasing its source reservation. Deleting
 	// a pending PVC can leave a CSI CreateVolume operation in flight.
+	// Use the same identity as provisioning, including recovery before status is
+	// persisted. Absence at the CR name does not prove its selected PVC is gone.
+	claimName, err := volumeclaim.Resolve(ctx, reader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	claim := new(corev1.PersistentVolumeClaim)
-	if err := reader.Get(ctx, client.ObjectKeyFromObject(worktree), claim); err == nil && metav1.IsControlledBy(claim, worktree) && claim.Status.Phase != corev1.ClaimBound {
+	claimKey := client.ObjectKey{Namespace: worktree.Namespace, Name: claimName}
+	if err := reader.Get(ctx, claimKey, claim); err == nil && metav1.IsControlledBy(claim, worktree) && claim.Status.Phase != corev1.ClaimBound {
 		return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, nil
 	} else if err != nil && !errors.IsNotFound(err) {
 		return ctrl.Result{}, err
@@ -455,12 +469,12 @@ func (r *WorktreeReconciler) reconcileWorkspaceBootstrap(ctx context.Context, wo
 
 func worktreeVolumeClaim(
 	worktree *repositoriesv1alpha1.Worktree,
-	sourceClaimName string,
+	claimName, sourceClaimName string,
 	plan worktreestorage.Plan,
 ) *corev1.PersistentVolumeClaim {
 	return &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      worktree.Name,
+			Name:      claimName,
 			Namespace: worktree.Namespace,
 			Labels: map[string]string{
 				worktreeManagedByLabel:  worktreeManagedByValue,
@@ -660,7 +674,9 @@ func (r *WorktreeReconciler) setWorktreeVolumeReady(ctx context.Context, worktre
 		before := current.DeepCopy()
 		current.Status.ObservedGeneration = current.Generation
 		current.Status.SourceVolumeClaimName = sourceClaimName
-		current.Status.VolumeClaimName = claimName
+		if claimName != "" {
+			current.Status.VolumeClaimName = claimName
+		}
 		current.Status.WorktreePath = path
 		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 			Type: repositoriesv1alpha1.WorktreeConditionVolumeReady, Status: metav1.ConditionTrue,
@@ -694,7 +710,9 @@ func (r *WorktreeReconciler) setWorktreeStatus(ctx context.Context, worktree *re
 		before := current.DeepCopy()
 		current.Status.ObservedGeneration = current.Generation
 		current.Status.SourceVolumeClaimName = sourceClaimName
-		current.Status.VolumeClaimName = claimName
+		if claimName != "" {
+			current.Status.VolumeClaimName = claimName
+		}
 		current.Status.WorktreePath = path
 		if reason == "VolumeClaimLost" {
 			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
@@ -764,7 +782,7 @@ func (r *WorktreeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				worktree := &worktrees.Items[index]
 				claimName := worktree.Status.VolumeClaimName
 				if claimName == "" {
-					claimName = worktree.Name
+					continue
 				}
 				if podUsesPersistentVolumeClaim(pod, claimName) {
 					requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(worktree)})

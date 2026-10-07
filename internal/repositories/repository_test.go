@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -28,6 +29,7 @@ func TestRepositoryClientCloneCreatesRepository(t *testing.T) {
 	t.Parallel()
 
 	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, repositoriesv1alpha1.AddToScheme(scheme))
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	repositoryClient := &RepositoryClient{Client: kubeClient}
@@ -57,6 +59,7 @@ func TestRepositoryClientCloneUsesCustomName(t *testing.T) {
 	t.Parallel()
 
 	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, repositoriesv1alpha1.AddToScheme(scheme))
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
@@ -90,6 +93,7 @@ func TestRepositoryClientCloneMapsSubmoduleOptions(t *testing.T) {
 			t.Parallel()
 
 			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
 			require.NoError(t, repositoriesv1alpha1.AddToScheme(scheme))
 			kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 			repositoryClient := &RepositoryClient{Client: kubeClient}
@@ -124,6 +128,7 @@ func TestRepositoryClientWaitReturnsWhenRepositoryIsReady(t *testing.T) {
 		},
 	}
 	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, repositoriesv1alpha1.AddToScheme(scheme))
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repository).Build()
 
@@ -147,6 +152,7 @@ func TestRepositoryClientWaitReturnsBootstrapFailure(t *testing.T) {
 		},
 	}
 	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, repositoriesv1alpha1.AddToScheme(scheme))
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repository).Build()
 

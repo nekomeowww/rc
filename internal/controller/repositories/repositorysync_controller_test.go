@@ -129,7 +129,7 @@ func TestExistingWorktreeRemainsReadyDuringSync(t *testing.T) {
 	c, repository, request := syncFixture(t)
 	worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: "existing", Namespace: repository.Namespace, UID: "worktree", Generation: 1}, Spec: repositoriesv1alpha1.WorktreeSpec{RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: repository.Name}}, Status: repositoriesv1alpha1.WorktreeStatus{ObservedGeneration: 1, VolumeClaimName: "existing", WorktreePath: "/repository", Conditions: []metav1.Condition{{Type: repositoriesv1alpha1.WorktreeConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1}}}}
 	require.NoError(t, c.Create(t.Context(), worktree))
-	claim := worktreeVolumeClaim(worktree, repository.Name, worktreestorage.Plan{StorageClassName: "csi", Size: resource.MustParse("1Gi"), AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, VolumeMode: corev1.PersistentVolumeFilesystem})
+	claim := worktreeVolumeClaim(worktree, worktree.Status.VolumeClaimName, repository.Name, worktreestorage.Plan{StorageClassName: "csi", Size: resource.MustParse("1Gi"), AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, VolumeMode: corev1.PersistentVolumeFilesystem})
 	require.NoError(t, controllerutil.SetControllerReference(worktree, claim, c.Scheme()))
 	claim.Status.Phase = corev1.ClaimBound
 	require.NoError(t, c.Create(t.Context(), claim))
@@ -221,4 +221,15 @@ func TestDeletingSyncCleansUpAfterRepositoryDeletion(t *testing.T) {
 	reconcileSync(t, c, request)
 	err := c.Get(t.Context(), client.ObjectKeyFromObject(request), new(repositoriesv1alpha1.RepositorySync))
 	require.True(t, apierrors.IsNotFound(err), "a missing parent must not strand the request finalizer")
+}
+
+func TestSyncMountsRecordedRepositoryClaim(t *testing.T) {
+	t.Parallel()
+	kube, repository, request := syncFixture(t)
+	repository.Status.VolumeClaimName = "recorded-parent-volume"
+	require.NoError(t, kube.Status().Update(t.Context(), repository))
+	reconcileSync(t, kube, request)
+	job := new(batchv1.Job)
+	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(request), job))
+	require.Equal(t, repository.Status.VolumeClaimName, job.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ClaimName)
 }

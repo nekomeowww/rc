@@ -50,6 +50,7 @@ import (
 	"github.com/nekomeowww/rc/internal/lifecycle"
 	"github.com/nekomeowww/rc/internal/rcplatform"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
+	"github.com/nekomeowww/rc/internal/volumeclaim"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
 )
@@ -88,6 +89,7 @@ type resolvedWorkspace struct {
 	revision             int64
 	storage              workspacesv1alpha1.PersistentStorageSpec
 	sourceClaimName      string
+	homeClaimName        string
 	volumeMounts         []corev1.VolumeMount
 	volumes              []corev1.Volume
 	hotMounts            []hotWorktreeMount
@@ -184,8 +186,16 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	if resolved.runtime.OS() != rcplatform.Darwin {
+		claimName, resolveErr := volumeclaim.Resolve(ctx, reader, workspace, volumeclaim.WorkspaceHome, 0, workspace.Status.HomeVolumeClaimName)
+		if volumeclaim.IsConflict(resolveErr) {
+			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "VolumeClaimConflict", resolveErr.Error())
+		}
+		if resolveErr != nil {
+			return ctrl.Result{}, resolveErr
+		}
+		resolved.homeClaimName = claimName
 		home := new(corev1.PersistentVolumeClaim)
-		err = r.Get(ctx, req.NamespacedName, home)
+		err = r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: claimName}, home)
 		if errors.IsNotFound(err) {
 			home = workspaceHomeVolumeClaim(workspace, resolved)
 			if err := controllerutil.SetControllerReference(workspace, home, r.Scheme); err != nil {
@@ -201,8 +211,8 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("get Workspace home PersistentVolumeClaim: %w", err)
 		}
-		if !metav1.IsControlledBy(home, workspace) {
-			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "VolumeClaimConflict", "Workspace home PersistentVolumeClaim is not owned by this Workspace")
+		if ownerErr := volumeclaim.CheckOwner(home, workspace); ownerErr != nil {
+			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "VolumeClaimConflict", ownerErr.Error())
 		}
 		if workspace.Status.RuntimeImage == "" && home.Annotations[workspaceImageAnnotation] != "" {
 			resolved.image = home.Annotations[workspaceImageAnnotation]
@@ -890,7 +900,7 @@ func workspaceHomeVolumeClaim(workspace *workspacesv1alpha1.Workspace, resolved 
 	volumeMode := resolved.storage.VolumeModeOrDefault()
 	claim := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      workspace.Name,
+			Name:      resolved.homeClaimName,
 			Namespace: workspace.Namespace,
 			Labels:    map[string]string{workspaceManagedByLabel: workspace.Name},
 			Annotations: map[string]string{
@@ -956,7 +966,7 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 				workspaceWriteClaimsAnnotation:   string(writeClaims),
 				workspaceRuntimePolicyAnnotation: workspaceRuntimePolicyVersion,
 			},
-		}, Image: resolved.image, HomeClaim: workspace.Name, HomeHostPath: resolved.homeHostPath,
+		}, Image: resolved.image, HomeClaim: resolved.homeClaimName, HomeHostPath: resolved.homeHostPath,
 		HotMountRoot:   hotMountRoot,
 		ServiceAccount: resolved.serviceAccount, AutomountToken: resolved.automountSAToken,
 		Resources: workspace.Spec.Resources, AdditionalVolumes: resolved.volumes, AdditionalMounts: resolved.volumeMounts,
@@ -1094,6 +1104,8 @@ func (r *WorkspaceReconciler) ensureWorkspaceAccess(ctx context.Context, namespa
 	role := &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{Name: defaultWorkspaceServiceAccount, Namespace: namespace},
 		Rules: []rbacv1.PolicyRule{
+			// Nested rcctl creation preflights PVC ownership without changing storage.
+			{APIGroups: []string{""}, Resources: []string{"persistentvolumeclaims"}, Verbs: []string{verbGet}},
 			{APIGroups: []string{"workspaces.rc.ayaka.io"}, Resources: []string{"workspaceenvironments", "workspaces", "workspaceexecs", "workspaceexecs/status"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
 			{APIGroups: []string{"repositories.rc.ayaka.io"}, Resources: []string{"repositories", "repositoryexecs", "repositorysyncs", "worktrees"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
 			{APIGroups: []string{"configs.rc.ayaka.io"}, Resources: []string{"credentials", "agentcredentials"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
@@ -1188,8 +1200,8 @@ func (r *WorkspaceReconciler) setWorkspaceStatus(ctx context.Context, key types.
 	current.Status.ObservedGeneration = current.Generation
 	if current.Spec.OS == rcplatform.Darwin {
 		current.Status.HomeVolumeClaimName = ""
-	} else {
-		current.Status.HomeVolumeClaimName = current.Name
+	} else if resolved != nil && resolved.homeClaimName != "" {
+		current.Status.HomeVolumeClaimName = resolved.homeClaimName
 	}
 	if resolved != nil {
 		if current.Status.RuntimeImage == "" {

@@ -57,7 +57,7 @@ var _ = Describe("Worktree PVC watch", func() {
 		Expect(k8sClient.Create(ctx, repository)).To(Succeed())
 		repository.Status = readyRepositoryStatus(repository.Name)
 		Expect(k8sClient.Status().Update(ctx, repository)).To(Succeed())
-		source := parentVolumeClaim(repository)
+		source := parentVolumeClaim(repository, repository.Status.VolumeClaimName)
 		Expect(controllerutil.SetControllerReference(repository, source, scheme)).To(Succeed())
 		Expect(k8sClient.Create(ctx, source)).To(Succeed())
 		source.Status = corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound, Capacity: source.Spec.Resources.Requests.DeepCopy()}

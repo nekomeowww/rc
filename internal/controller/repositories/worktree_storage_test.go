@@ -23,6 +23,7 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
+	"github.com/nekomeowww/rc/internal/volumeclaim"
 	"github.com/nekomeowww/rc/internal/worktreestorage"
 )
 
@@ -92,7 +93,8 @@ func TestWorktreeCloneRecoversSourceAfterStatusWriteFailure(t *testing.T) {
 			require.ErrorIs(t, err, stoppedBeforeStatus)
 			require.Equal(t, 1, statusWrites)
 			claim := new(corev1.PersistentVolumeClaim)
-			require.NoError(t, c.Get(ctx, key, claim), "PVC creation must have succeeded before the simulated restart")
+			claimKey := client.ObjectKey{Namespace: worktree.Namespace, Name: volumeclaim.Name(volumeclaim.Worktree, worktree.Name, 0)}
+			require.NoError(t, c.Get(ctx, claimKey, claim), "PVC creation must have succeeded before the simulated restart")
 			require.True(t, metav1.IsControlledBy(claim, worktree))
 			require.Equal(t, source.Name, claim.Spec.DataSource.Name)
 			require.NoError(t, c.Get(ctx, key, worktree))
@@ -120,7 +122,7 @@ func TestWorktreeCloneRecoversSourceAfterStatusWriteFailure(t *testing.T) {
 				assert.Equal(t, claim.Name, worktree.Status.VolumeClaimName)
 			}
 			persisted := new(corev1.PersistentVolumeClaim)
-			require.NoError(t, c.Get(ctx, key, persisted))
+			require.NoError(t, c.Get(ctx, claimKey, persisted))
 			assert.Equal(t, claim.Spec, persisted.Spec, "recovery must not rewrite or replace the independent child")
 			busy, err := (repositoryaccess.Gate{Client: c}).Busy(ctx, repository, "another-operation")
 			require.NoError(t, err)
@@ -186,7 +188,8 @@ func TestWorktreeCloneRecoveryUsesCommittedClaim(t *testing.T) {
 			// Legacy children keep their creation-time RWX default even on an RWO
 			// source. Only explicit Worktree storage constrains an existing child.
 			plan := worktreestorage.Plan{StorageClassName: cloneStorageTestClass, Size: resource.MustParse("60Gi"), AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, VolumeMode: corev1.PersistentVolumeFilesystem}
-			claim := worktreeVolumeClaim(worktree, source.Name, plan)
+			claimName := volumeclaim.Name(volumeclaim.Worktree, worktree.Name, 0)
+			claim := worktreeVolumeClaim(worktree, claimName, source.Name, plan)
 			require.NoError(t, controllerutil.SetControllerReference(worktree, claim, c.Scheme()))
 			claim.Status.Phase = corev1.ClaimBound
 			if tt.configure != nil {
@@ -226,7 +229,7 @@ func TestWorktreeCloneRecoveryUsesCommittedClaim(t *testing.T) {
 				assert.Len(t, jobs.Items, 1)
 			}
 			persisted := new(corev1.PersistentVolumeClaim)
-			require.NoError(t, c.Get(ctx, key, persisted))
+			require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(claim), persisted))
 			assert.Equal(t, claim.Spec, persisted.Spec, "recovery must not rewrite the child")
 		})
 	}

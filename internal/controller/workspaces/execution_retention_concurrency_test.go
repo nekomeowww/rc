@@ -214,7 +214,7 @@ func TestRetentionCountIgnoresPreviousTargetIdentity(t *testing.T) {
 	current.Status.CompletedAt = &now
 	require.NoError(t, kube.Status().Update(ctx, current))
 	controller := true
-	current.OwnerReferences = []metav1.OwnerReference{{APIVersion: workspacesv1alpha1.GroupVersion.String(), Kind: "Workspace", Name: ws.Name, UID: ws.UID, Controller: &controller}}
+	current.OwnerReferences = []metav1.OwnerReference{{APIVersion: workspacesv1alpha1.GroupVersion.String(), Kind: string(workspacesv1alpha1.WorkspaceExecTargetWorkspace), Name: ws.Name, UID: ws.UID, Controller: &controller}}
 	require.NoError(t, kube.Update(ctx, current))
 	previous := current.DeepCopy()
 	previous.Name, previous.UID, previous.ResourceVersion = "previous", "previous-uid", ""
@@ -233,9 +233,9 @@ func TestRetentionBatchIgnoresDeletingPreviousTargetIdentity(t *testing.T) {
 	ctx := t.Context()
 	kube, ws, current := retentionFixture(t)
 	controller := true
-	current.OwnerReferences = []metav1.OwnerReference{{APIVersion: workspacesv1alpha1.GroupVersion.String(), Kind: "Workspace", Name: ws.Name, UID: ws.UID, Controller: &controller}}
+	current.OwnerReferences = []metav1.OwnerReference{{APIVersion: workspacesv1alpha1.GroupVersion.String(), Kind: string(workspacesv1alpha1.WorkspaceExecTargetWorkspace), Name: ws.Name, UID: ws.UID, Controller: &controller}}
 	require.NoError(t, kube.Update(ctx, current))
-	for i := 0; i < executionCleanupBatch; i++ {
+	for i := range executionCleanupBatch {
 		previous := current.DeepCopy()
 		previous.Name = fmt.Sprintf("previous-%02d", i)
 		previous.UID, previous.ResourceVersion = "", ""

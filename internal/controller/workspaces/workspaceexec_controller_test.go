@@ -43,6 +43,7 @@ const (
 	testNamespace            = "development"
 	testWorkspaceName        = "coding"
 	testStorageClass         = "clone-capable"
+	testRuntimeRunningPhase  = "Running"
 	testTrueValue            = "true"
 	testAPINamespace         = "default"
 	testRuntimeImage         = "workspace:test"
@@ -128,7 +129,7 @@ func TestWorkspaceExecReconcileStartsCommandAtReadyWorkspace(t *testing.T) {
 		WithObjects(workspace, pod, process, processEnvironment).
 		Build()
 	runtimeClient := &recordingProcessRuntime{startState: processruntime.State{
-		ID: process.Name, UID: string(process.UID), Phase: runtimeRunningPhase, PID: 42,
+		ID: process.Name, UID: string(process.UID), Phase: testRuntimeRunningPhase, PID: 42,
 	}}
 	reconciler := &WorkspaceExecReconciler{Client: kubeClient, Scheme: scheme, Runtime: runtimeClient}
 	key := types.NamespacedName{Name: process.Name, Namespace: process.Namespace}

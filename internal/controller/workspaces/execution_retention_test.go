@@ -65,14 +65,14 @@ func TestExecutionRetentionTemplateBounds(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 	recent := metav1.NewTime(now.Add(-time.Hour))
-	records := make([]workspacesv1alpha1.WorkspaceExec, 3001)
+	records := make([]workspacesv1alpha1.WorkspaceExec, 15001)
 	for i := range records {
-		records[i] = workspacesv1alpha1.WorkspaceExec{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("exec-%04d", i)}, Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, CompletedAt: &recent}}
+		records[i] = workspacesv1alpha1.WorkspaceExec{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("exec-%05d", i)}, Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, CompletedAt: &recent}}
 	}
 	policy := &workspacesv1alpha1.ExecutionRetentionPolicy{}
-	require.Equal(t, []int{3000}, planExecutionRetention(records, policy, now).Remove)
+	require.Equal(t, []int{15000}, planExecutionRetention(records, policy, now).Remove)
 	records[0].Spec.Retain = true
-	require.Empty(t, planExecutionRetention(records, policy, now).Remove, "pins do not consume the 3000-record budget")
+	require.Empty(t, planExecutionRetention(records, policy, now).Remove, "pins do not consume the 15000-record budget")
 	boundary := metav1.NewTime(now.Add(-90 * 24 * time.Hour))
 	records[1].Status.CompletedAt = &boundary
 	require.Equal(t, []int{1}, planExecutionRetention(records, policy, now).Remove, "90-day TTL applies at the exact completion boundary")

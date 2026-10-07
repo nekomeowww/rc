@@ -72,7 +72,7 @@ spec:
                   target's lifetime. Omission preserves existing history on upgrade.
                 properties:
                   maxEntries:
-                    default: 3000
+                    default: 15000
                     description: maxEntries keeps at most this many unpinned terminal
                       records per target.
                     format: int32

@@ -327,10 +327,10 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 	if err != nil {
 		return err
 	}
-	if options.detach && !processTerminal(ready.Status.Phase) {
+	if options.detach && !ready.Status.Phase.Terminal() {
 		return nil
 	}
-	if processTerminal(ready.Status.Phase) {
+	if ready.Status.Phase.Terminal() {
 		if err := processClient.Logs(cmd.Context(), ready, cmd.OutOrStdout()); err != nil {
 			return err
 		}
@@ -344,7 +344,7 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 		}
 	}
 	finished := ready
-	if !processTerminal(ready.Status.Phase) {
+	if !ready.Status.Phase.Terminal() {
 		finished, err = processClient.WaitUntilTerminal(cmd.Context(), process)
 		if err != nil {
 			return err
@@ -604,7 +604,7 @@ func newRemoveCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if !processTerminal(process.Status.Phase) {
+			if !process.Status.Phase.Terminal() {
 				return fmt.Errorf("process %s is still %s; stop it first", process.Name, process.Status.Phase)
 			}
 			return processClient.Kube.Delete(cmd.Context(), process)
@@ -829,16 +829,6 @@ func processClient(kubeconfigFlags *kubeconfig.Flags) (*workspaceservice.Process
 	}
 
 	return &workspaceservice.ProcessClient{Kube: clusterClient.Kube, Runtime: clusterClient.Processes, Config: clusterClient.Config}, namespace, nil
-}
-
-func processTerminal(phase workspacesv1alpha1.WorkspaceExecPhase) bool {
-	switch phase {
-	case workspacesv1alpha1.WorkspaceExecPhaseSucceeded, workspacesv1alpha1.WorkspaceExecPhaseFailed,
-		workspacesv1alpha1.WorkspaceExecPhaseStopped, workspacesv1alpha1.WorkspaceExecPhaseLost:
-		return true
-	default:
-		return false
-	}
 }
 
 func boolPointer(value bool) *bool {

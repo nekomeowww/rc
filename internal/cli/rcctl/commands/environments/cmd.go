@@ -221,7 +221,7 @@ func runEnvironmentProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags
 	if err != nil {
 		return err
 	}
-	if terminal(ready.Status.Phase) {
+	if ready.Status.Phase.Terminal() {
 		if err := processClient.Logs(cmd.Context(), ready, cmd.OutOrStdout()); err != nil {
 			return err
 		}
@@ -231,7 +231,7 @@ func runEnvironmentProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags
 		}
 	}
 	finished := ready
-	if !terminal(ready.Status.Phase) {
+	if !ready.Status.Phase.Terminal() {
 		finished, err = processClient.WaitUntilTerminal(cmd.Context(), process)
 		if err != nil {
 			return err
@@ -296,7 +296,7 @@ func newStopCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			}
 			for index := range processes.Items {
 				process := &processes.Items[index]
-				if process.Spec.TargetRef.Kind == workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment && process.Spec.TargetRef.Name == args[0] && !terminal(process.Status.Phase) {
+				if process.Spec.TargetRef.Kind == workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment && process.Spec.TargetRef.Name == args[0] && !process.Status.Phase.Terminal() {
 					return fmt.Errorf("workspace environment %q has active WorkspaceExec %q", args[0], process.Name)
 				}
 			}
@@ -345,14 +345,4 @@ func waitEnvironmentReady(ctx context.Context, kubeClient client.Client, environ
 		condition := meta.FindStatusCondition(current.Status.Conditions, workspacesv1alpha1.WorkspaceEnvironmentConditionReady)
 		return condition != nil && condition.Status == metav1.ConditionTrue, nil
 	})
-}
-
-func terminal(phase workspacesv1alpha1.WorkspaceExecPhase) bool {
-	switch phase {
-	case workspacesv1alpha1.WorkspaceExecPhaseSucceeded, workspacesv1alpha1.WorkspaceExecPhaseFailed,
-		workspacesv1alpha1.WorkspaceExecPhaseStopped, workspacesv1alpha1.WorkspaceExecPhaseLost:
-		return true
-	default:
-		return false
-	}
 }

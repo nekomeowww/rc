@@ -19,6 +19,7 @@ import (
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	workspaceservice "github.com/nekomeowww/rc/internal/workspaces"
+	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
 const (
@@ -116,7 +117,7 @@ func TestWorkspaceDeletionRetainsLegacyAndReusedNameResources(t *testing.T) {
 	require.NoError(t, repositoriesv1alpha1.AddToScheme(scheme))
 	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
 	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: ownershipTestNamespace, UID: "new-uid"}}
-	legacy := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: "legacy", Namespace: ownershipTestNamespace, Labels: map[string]string{workspaceservice.CreatedForWorkspaceLabel: workspace.Name}}}
+	legacy := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: "legacy", Namespace: ownershipTestNamespace, Labels: map[string]string{worktreeownership.GeneratedForLabel: workspace.Name}}}
 	oldOwner := workspace.DeepCopy()
 	oldOwner.UID = "old-uid"
 	reused := generatedWorkspaceWorktree(oldOwner, &repositoriesv1alpha1.Repository{ObjectMeta: metav1.ObjectMeta{Name: ownershipTestRepository, Namespace: ownershipTestNamespace}}, ownershipTestRepository, nil)

@@ -643,7 +643,7 @@ func validateWorkspaceMountSource(ctx context.Context, kubeClient client.Client,
 	// Deferred checkouts become Ready only after their owner's writable mount
 	// starts the initializer. Accept current volume readiness for that transition.
 	canInitialize := worktreebootstrap.Deferred(worktree) &&
-		worktree.Labels["workspaces.rc.ayaka.io/generated-for"] == workspace.Name && !mount.ReadOnly &&
+		worktree.Labels[worktreeownership.GeneratedForLabel] == workspace.Name && !mount.ReadOnly &&
 		volumeReady != nil && volumeReady.Status == metav1.ConditionTrue && volumeReady.ObservedGeneration >= worktree.Generation
 	if worktree.Status.ObservedGeneration < worktree.Generation || (!worktreeReady && !canInitialize) || worktree.Status.VolumeClaimName == "" {
 		return fmt.Errorf("worktree %q is not Ready", worktree.Name)
@@ -1142,7 +1142,7 @@ func stopForTopologyChange(ctx context.Context, clusterClient *cluster.Client, w
 	processClient := &workspaceservice.ProcessClient{Kube: clusterClient.Kube, Runtime: clusterClient.Processes, Config: clusterClient.Config}
 	for index := range processes.Items {
 		process := &processes.Items[index]
-		if process.Spec.TargetRef.Kind != workspacesv1alpha1.WorkspaceExecTargetWorkspace || process.Spec.TargetRef.Name != workspace.Name || terminal(process.Status.Phase) {
+		if process.Spec.TargetRef.Kind != workspacesv1alpha1.WorkspaceExecTargetWorkspace || process.Spec.TargetRef.Name != workspace.Name || process.Status.Phase.Terminal() {
 			continue
 		}
 		if !force {
@@ -1238,16 +1238,6 @@ func topologyChangeFailure(cmd *cobra.Command, stopped []string, cause error) er
 		return errors.Join(cause, err)
 	}
 	return cause
-}
-
-func terminal(phase workspacesv1alpha1.WorkspaceExecPhase) bool {
-	switch phase {
-	case workspacesv1alpha1.WorkspaceExecPhaseSucceeded, workspacesv1alpha1.WorkspaceExecPhaseFailed,
-		workspacesv1alpha1.WorkspaceExecPhaseStopped, workspacesv1alpha1.WorkspaceExecPhaseLost:
-		return true
-	default:
-		return false
-	}
 }
 
 func boundedName(name string) string {

@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -66,8 +65,7 @@ func changeWorktreeOwnership(ctx context.Context, kube client.Client, namespace,
 	if workspace.UID == "" {
 		return fmt.Errorf("workspace %q has no UID", workspaceName)
 	}
-	ready := meta.FindStatusCondition(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady)
-	if ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration < worktree.Generation || worktree.Status.ObservedGeneration < worktree.Generation {
+	if !worktreeownership.ReadyAtCurrentGeneration(worktree) {
 		return fmt.Errorf("worktree %q must be Ready before changing ownership; finish its checkout first", name)
 	}
 	before := worktree.DeepCopy()

@@ -40,11 +40,6 @@ import (
 	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
-// CreatedForWorkspaceLabel is a provenance hint, never deletion authority.
-// It aliases worktreeownership.GeneratedForLabel, which new code should use;
-// it remains only until internal/cli migrates.
-const CreatedForWorkspaceLabel = worktreeownership.GeneratedForLabel
-
 type MountRequest struct {
 	Name      string
 	MountName string

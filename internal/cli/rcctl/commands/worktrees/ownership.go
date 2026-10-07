@@ -30,11 +30,7 @@ func newOwnershipCommand(flags *kubeconfig.Flags, adopt bool) *cobra.Command {
 		if workspace == "" {
 			return fmt.Errorf("--workspace is required")
 		}
-		config, namespace, err := flags.Resolve()
-		if err != nil {
-			return err
-		}
-		clusterClient, err := cluster.New(config)
+		clusterClient, namespace, err := cluster.Connect(flags)
 		if err != nil {
 			return err
 		}

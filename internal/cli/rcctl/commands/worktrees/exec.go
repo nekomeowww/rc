@@ -21,11 +21,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/kubernetes"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	"github.com/nekomeowww/rc/internal/cli/rcctl/cluster"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	repositoryservice "github.com/nekomeowww/rc/internal/repositories"
 )
@@ -35,23 +32,11 @@ func newExecCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use: "exec WORKTREE -- COMMAND [ARG...]", Short: "Execute an exact command in an isolated Worktree Job", Args: exactCommandArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			config, namespace, err := kubeconfigFlags.Resolve()
+			clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 			if err != nil {
 				return err
 			}
-			scheme := runtime.NewScheme()
-			if err := repositoriesv1alpha1.AddToScheme(scheme); err != nil {
-				return fmt.Errorf("register Repository API types: %w", err)
-			}
-			kubeClient, err := client.New(config, client.Options{Scheme: scheme})
-			if err != nil {
-				return fmt.Errorf("create Kubernetes client: %w", err)
-			}
-			clientset, err := kubernetes.NewForConfig(config)
-			if err != nil {
-				return fmt.Errorf("create Kubernetes clientset: %w", err)
-			}
-			execClient := &repositoryservice.WorktreeExecClient{Client: kubeClient, Kubernetes: clientset}
+			execClient := &repositoryservice.WorktreeExecClient{Client: clusterClient.Kube, Kubernetes: clusterClient.Kubernetes}
 			exec, err := execClient.Start(cmd.Context(), repositoryservice.WorktreeExecRequest{Namespace: namespace, Worktree: args[0], Command: args[1:]})
 			if err != nil {
 				return err

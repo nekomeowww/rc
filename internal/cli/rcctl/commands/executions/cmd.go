@@ -372,8 +372,8 @@ func (options runOptions) targetRequest(flags *pflag.FlagSet) (workspaceservice.
 		Create: options.createWorkspace, Workspace: options.workspace, Name: options.name,
 		RetentionPolicy:      retention,
 		Environment:          options.environment,
-		IdleTimeout:          &metav1.Duration{Duration: options.lifecycle.IdleTimeout},
-		DeleteAfterSuspended: &metav1.Duration{Duration: options.lifecycle.DeleteAfterSuspended},
+		IdleTimeout:          command.Duration(options.lifecycle.IdleTimeout),
+		DeleteAfterSuspended: command.Duration(options.lifecycle.DeleteAfterSuspended),
 	}, nil
 }
 
@@ -384,14 +384,17 @@ func runLifecycleNotice(workspace *workspacesv1alpha1.Workspace) string {
 	if workspace.Spec.IsTemporary() {
 		return message + "; Workspace and owned storage will be deleted 5m after all processes exit (--retain to keep)"
 	}
-	if workspace.Spec.IdleTimeout != nil {
-		message += "; idleTimeout=" + workspace.Spec.IdleTimeout.Duration.String()
-	}
-	if workspace.Spec.DeleteAfterSuspended != nil {
-		message += "; deleteAfterSuspended=" + workspace.Spec.DeleteAfterSuspended.Duration.String()
-	}
 
-	return message
+	return message + durationNotice("idleTimeout", workspace.Spec.IdleTimeout) +
+		durationNotice("deleteAfterSuspended", workspace.Spec.DeleteAfterSuspended)
+}
+
+// durationNotice renders an optional lifecycle clock as a notice suffix.
+func durationNotice(name string, value *metav1.Duration) string {
+	if value == nil {
+		return ""
+	}
+	return "; " + name + "=" + value.Duration.String()
 }
 
 func routeNPMRegistryEnvironment(temporary bool, request *workspaceservice.RunRequest, processEnvironment map[string]string, registry []corev1.EnvVar) {
@@ -617,11 +620,7 @@ func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err := options.output.Validate(true); err != nil {
 				return err
 			}
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			clusterClient, err := cluster.New(config)
+			clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 			if err != nil {
 				return err
 			}
@@ -824,16 +823,12 @@ func exitCodeOrDash(exitCode *int32) string {
 }
 
 func processClient(kubeconfigFlags *kubeconfig.Flags) (*workspaceservice.ProcessClient, string, error) {
-	config, namespace, err := kubeconfigFlags.Resolve()
-	if err != nil {
-		return nil, "", err
-	}
-	clusterClient, err := cluster.New(config)
+	clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 	if err != nil {
 		return nil, "", err
 	}
 
-	return &workspaceservice.ProcessClient{Kube: clusterClient.Kube, Runtime: clusterClient.Processes, Config: config}, namespace, nil
+	return &workspaceservice.ProcessClient{Kube: clusterClient.Kube, Runtime: clusterClient.Processes, Config: clusterClient.Config}, namespace, nil
 }
 
 func processTerminal(phase workspacesv1alpha1.WorkspaceExecPhase) bool {

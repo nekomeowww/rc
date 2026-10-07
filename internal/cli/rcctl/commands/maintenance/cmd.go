@@ -31,10 +31,12 @@ type scanOptions struct {
 }
 
 type pruneOptions struct {
-	scan     scanOptions
-	dryRun   bool
-	yes      bool
-	fromPlan string
+	allNamespaces bool
+	historyFor    time.Duration
+	output        clioutput.Options
+	dryRun        bool
+	yes           bool
+	fromPlan      string
 }
 
 // Register attaches read-only doctor and previewable, confirmed history pruning.
@@ -49,7 +51,7 @@ func newDoctorCommand(flags *kubeconfig.Flags) *cobra.Command {
 		if err := options.output.Validate(true); err != nil {
 			return err
 		}
-		_, report, err := options.read(cmd, flags)
+		report, err := options.read(cmd, flags)
 		if err != nil {
 			return err
 		}
@@ -68,31 +70,36 @@ func (options *scanOptions) addFlags(cmd *cobra.Command) {
 	options.output.AddFlags(cmd, true)
 }
 
-// read resolves the requested scope and obtains fresh evidence for doctor or
-// prune. Connection setup remains in the CLI; interpretation lives in audit.
-func (options *scanOptions) read(cmd *cobra.Command, flags *kubeconfig.Flags) (*cluster.Client, audit.Report, error) {
+// read resolves the requested scope and obtains fresh evidence for doctor.
+// Connection setup remains in the CLI; interpretation lives in audit.
+func (options *scanOptions) read(cmd *cobra.Command, flags *kubeconfig.Flags) (audit.Report, error) {
 	quantity, err := resource.ParseQuantity(options.largePVC)
 	if err != nil || quantity.Sign() <= 0 {
-		return nil, audit.Report{}, fmt.Errorf("--large-pvc must be a positive Kubernetes capacity quantity")
+		return audit.Report{}, fmt.Errorf("--large-pvc must be a positive Kubernetes capacity quantity")
 	}
 	options.policy.LargePVCBytes = quantity.Value()
-	config, namespace, err := flags.Resolve()
+	connection, namespace, err := connect(flags, options.allNamespaces)
 	if err != nil {
-		return nil, audit.Report{}, err
+		return audit.Report{}, err
 	}
-	if options.allNamespaces {
+	return audit.Scan(cmd.Context(), connection.Kube, namespace, options.policy, time.Now())
+}
+
+// connect builds the cluster client and resolves the scan namespace; an empty
+// namespace selects all namespaces.
+func connect(flags *kubeconfig.Flags, allNamespaces bool) (*cluster.Client, string, error) {
+	connection, namespace, err := cluster.Connect(flags)
+	if err != nil {
+		return nil, "", err
+	}
+	if allNamespaces {
 		namespace = ""
 	}
-	connection, err := cluster.New(config)
-	if err != nil {
-		return nil, audit.Report{}, err
-	}
-	report, err := audit.Scan(cmd.Context(), connection.Kube, namespace, options.policy, time.Now())
-	return connection, report, err
+	return connection, namespace, nil
 }
 
 func newPruneCommand(flags *kubeconfig.Flags, evaluate audit.HistoryEvaluator) *cobra.Command {
-	options := &pruneOptions{scan: scanOptions{policy: audit.DefaultPolicy()}}
+	options := &pruneOptions{historyFor: audit.DefaultPolicy().HistoryFor}
 	cmd := &cobra.Command{
 		Use: "prune", Short: "Preview or prune old terminal execution history",
 		Long:    "Scan and show a cleanup plan, then request confirmation before deleting eligible terminal execution history. Use --dry-run for a read-only preview, --from-plan to reuse a saved JSON plan, or --yes to skip confirmation. Use doctor for Workspace, Worktree, Repository and PVC diagnostics. Every prune revalidates references and UID/resourceVersion; saved plans expire after one hour.",
@@ -100,9 +107,9 @@ func newPruneCommand(flags *kubeconfig.Flags, evaluate audit.HistoryEvaluator) *
 		Args:    cobra.NoArgs,
 		RunE:    func(cmd *cobra.Command, _ []string) error { return runPrune(cmd, flags, options, evaluate) },
 	}
-	cmd.Flags().BoolVarP(&options.scan.allNamespaces, "all-namespaces", "A", false, "Read all namespaces; missing permissions remain unknown")
-	cmd.Flags().DurationVar(&options.scan.policy.HistoryFor, "history-for", options.scan.policy.HistoryFor, "Additional minimum history age; never overrides retain or target policy")
-	options.scan.output.AddFlags(cmd, true)
+	cmd.Flags().BoolVarP(&options.allNamespaces, "all-namespaces", "A", false, "Read all namespaces; missing permissions remain unknown")
+	cmd.Flags().DurationVar(&options.historyFor, "history-for", options.historyFor, "Additional minimum history age; never overrides retain or target policy")
+	options.output.AddFlags(cmd, true)
 	cmd.Flags().BoolVar(&options.dryRun, "dry-run", false, "Print the cleanup plan without modifying the cluster")
 	cmd.Flags().StringVar(&options.fromPlan, fromPlanFlag, "", "Use a reviewed JSON plan; revalidate its scope, expiry and evidence")
 	cmd.Flags().BoolVar(&options.yes, "yes", false, "Skip confirmation for eligible terminal-history deletions; --dry-run remains read-only")
@@ -112,7 +119,7 @@ func newPruneCommand(flags *kubeconfig.Flags, evaluate audit.HistoryEvaluator) *
 // runPrune prepares a concrete preview before confirmation. Prune performs its
 // per-record revalidation after confirmation, including time spent waiting for input.
 func runPrune(cmd *cobra.Command, flags *kubeconfig.Flags, options *pruneOptions, evaluate audit.HistoryEvaluator) error {
-	if err := options.scan.output.Validate(true); err != nil {
+	if err := options.output.Validate(true); err != nil {
 		return err
 	}
 	connection, review, err := preparePrune(cmd, flags, options, evaluate)
@@ -126,13 +133,13 @@ func runPrune(cmd *cobra.Command, flags *kubeconfig.Flags, options *pruneOptions
 		}
 	}
 	if options.dryRun {
-		return options.scan.output.PrintValue(cmd.OutOrStdout(), plan, planTable(plan))
+		return options.output.PrintValue(cmd.OutOrStdout(), plan, planTable(plan))
 	}
 	if err := confirmPrune(cmd, plan, options.yes); err != nil {
 		return err
 	}
 	result, pruneErr := audit.Prune(cmd.Context(), connection.Kube, review, time.Now())
-	if err := options.scan.output.PrintValue(cmd.OutOrStdout(), result, resultTable(result)); err != nil {
+	if err := options.output.PrintValue(cmd.OutOrStdout(), result, resultTable(result)); err != nil {
 		return err
 	}
 	return pruneErr
@@ -154,23 +161,16 @@ func preparePrune(cmd *cobra.Command, flags *kubeconfig.Flags, options *pruneOpt
 		}
 		saved = &plan
 	}
-	config, namespace, err := flags.Resolve()
+	connection, namespace, err := connect(flags, options.allNamespaces)
 	if err != nil {
 		return nil, empty, err
 	}
-	if options.scan.allNamespaces {
-		namespace = ""
-	}
-	policy := audit.HistoryPolicy{HistoryFor: options.scan.policy.HistoryFor}
+	policy := audit.HistoryPolicy{HistoryFor: options.historyFor}
 	if saved != nil {
-		if (cmd.Flags().Changed("namespace") || options.scan.allNamespaces) && namespace != saved.Namespace {
+		if (cmd.Flags().Changed("namespace") || options.allNamespaces) && namespace != saved.Namespace {
 			return nil, empty, fmt.Errorf("requested namespace differs from the reviewed plan scope")
 		}
 		namespace, policy = saved.Namespace, saved.Policy
-	}
-	connection, err := cluster.New(config)
-	if err != nil {
-		return nil, empty, err
 	}
 	review, err := audit.Review(cmd.Context(), connection.Kube, namespace, policy, saved, evaluate, time.Now())
 	return connection, review, err

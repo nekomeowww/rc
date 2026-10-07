@@ -10,18 +10,15 @@ import (
 
 	"github.com/spf13/cobra"
 	coordinationv1 "k8s.io/api/coordination/v1"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
-	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
-	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/cli/rcctl/cluster"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/command"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	repositoryservice "github.com/nekomeowww/rc/internal/repositories"
@@ -55,10 +52,6 @@ type worktreeListRow struct {
 	path       string
 }
 
-type listOptions struct {
-	output clioutput.Options
-}
-
 // Register attaches Worktree commands to the root command.
 func Register(root *cobra.Command, kubeconfigFlags *kubeconfig.Flags) {
 	worktreeCommand := NewCommand()
@@ -75,25 +68,11 @@ func newDeleteCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use: "delete NAME", Aliases: []string{"remove", "rm"}, Short: "Delete an unmounted Worktree and its owned bootstrap resources", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			config, namespace, err := kubeconfigFlags.Resolve()
+			clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 			if err != nil {
 				return err
 			}
-			scheme := runtime.NewScheme()
-			if err := repositoriesv1alpha1.AddToScheme(scheme); err != nil {
-				return fmt.Errorf("register Repository API types: %w", err)
-			}
-			if err := workspacesv1alpha1.AddToScheme(scheme); err != nil {
-				return fmt.Errorf("register Workspace API types: %w", err)
-			}
-			if err := coordinationv1.AddToScheme(scheme); err != nil {
-				return fmt.Errorf("register coordination API types: %w", err)
-			}
-			kubeClient, err := client.New(config, client.Options{Scheme: scheme})
-			if err != nil {
-				return fmt.Errorf("create Kubernetes client: %w", err)
-			}
-			if err := runWorktreeDelete(cmd.Context(), kubeClient, namespace, args[0]); err != nil {
+			if err := runWorktreeDelete(cmd.Context(), clusterClient.Kube, namespace, args[0]); err != nil {
 				return err
 			}
 			_, err = fmt.Fprintf(cmd.ErrOrStderr(), "worktree.repositories.rc.ayaka.io/%s deletion requested\n", args[0])
@@ -118,7 +97,7 @@ func runWorktreeDelete(ctx context.Context, kubeClient client.Client, namespace 
 		}
 	}
 
-	blockers, err := worktreeWorkspaceBlockers(ctx, kubeClient, namespace, name)
+	blockers, err := worktreeownership.ReferenceBlockers(ctx, kubeClient, namespace, name)
 	if err != nil {
 		return err
 	}
@@ -144,7 +123,7 @@ func runWorktreeDelete(ctx context.Context, kubeClient client.Client, namespace 
 		createdDeletionLease = true
 	}
 
-	blockers, err = worktreeWorkspaceBlockers(ctx, kubeClient, namespace, name)
+	blockers, err = worktreeownership.ReferenceBlockers(ctx, kubeClient, namespace, name)
 	if err != nil {
 		return releaseDeletionLease(ctx, kubeClient, deletionLease, createdDeletionLease, err)
 	}
@@ -157,10 +136,6 @@ func runWorktreeDelete(ctx context.Context, kubeClient client.Client, namespace 
 	}
 
 	return nil
-}
-
-func worktreeWorkspaceBlockers(ctx context.Context, kubeClient client.Client, namespace string, name string) ([]string, error) {
-	return worktreeownership.ReferenceBlockers(ctx, kubeClient, namespace, name)
 }
 
 func mountedWorktreeError(name string, blockers []string) error {
@@ -181,64 +156,11 @@ func releaseDeletionLease(ctx context.Context, kubeClient client.Client, lease *
 }
 
 func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
-	options := new(listOptions)
-	cmd := &cobra.Command{
-		Use: "list", Aliases: []string{"ls"}, Short: "List Worktrees in the current namespace", Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := options.output.Validate(true); err != nil {
-				return err
-			}
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			scheme := runtime.NewScheme()
-			if err := repositoriesv1alpha1.AddToScheme(scheme); err != nil {
-				return fmt.Errorf("register Repository API types: %w", err)
-			}
-			kubeClient, err := client.New(config, client.Options{Scheme: scheme})
-			if err != nil {
-				return fmt.Errorf("create Kubernetes client: %w", err)
-			}
-
-			return runWorktreeList(cmd.Context(), cmd.OutOrStdout(), kubeClient, namespace, options.output)
-		},
-	}
-	options.output.AddFlags(cmd, true)
-
-	return cmd
+	return command.NewListCommand(kubeconfigFlags, "List Worktrees in the current namespace", runWorktreeList)
 }
 
 func newGetCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
-	options := new(clioutput.Options)
-	cmd := &cobra.Command{
-		Use: "get NAME", Short: "Show a Worktree", Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := options.Validate(false); err != nil {
-				return err
-			}
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			scheme := runtime.NewScheme()
-			if err := repositoriesv1alpha1.AddToScheme(scheme); err != nil {
-				return fmt.Errorf("register Repository API types: %w", err)
-			}
-			kubeClient, err := client.New(config, client.Options{Scheme: scheme})
-			if err != nil {
-				return fmt.Errorf("create Kubernetes client: %w", err)
-			}
-			worktree := new(repositoriesv1alpha1.Worktree)
-			if err := kubeClient.Get(cmd.Context(), client.ObjectKey{Namespace: namespace, Name: args[0]}, worktree); err != nil {
-				return fmt.Errorf("get Worktree %q: %w", args[0], err)
-			}
-			return options.PrintDetails(cmd.OutOrStdout(), worktree, kubeClient.Scheme(), worktreeDetailFields(worktree))
-		},
-	}
-	options.AddFlags(cmd, false)
-
-	return cmd
+	return command.NewGetCommand(kubeconfigFlags, "Worktree", func() *repositoriesv1alpha1.Worktree { return new(repositoriesv1alpha1.Worktree) }, worktreeDetailFields)
 }
 
 func runWorktreeList(ctx context.Context, writer io.Writer, kubeClient client.Client, namespace string, options clioutput.Options) error {
@@ -391,27 +313,11 @@ func runAdd(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, options addOp
 		}
 	}
 
-	config, namespace, err := kubeconfigFlags.Resolve()
+	clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 	if err != nil {
 		return err
 	}
-
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		return fmt.Errorf("register core API types: %w", err)
-	}
-	if err := repositoriesv1alpha1.AddToScheme(scheme); err != nil {
-		return fmt.Errorf("register Repository API types: %w", err)
-	}
-
-	kubeClient, err := client.New(config, client.Options{Scheme: scheme})
-	if err != nil {
-		return fmt.Errorf("create Kubernetes client: %w", err)
-	}
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return fmt.Errorf("create Kubernetes clientset: %w", err)
-	}
+	kubeClient := clusterClient.Kube
 
 	size, err := parseSize(options.size)
 	if err != nil {
@@ -423,7 +329,7 @@ func runAdd(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, options addOp
 		return err
 	}
 
-	worktreeClient := &repositoryservice.WorktreeClient{Client: kubeClient, Kubernetes: clientset}
+	worktreeClient := &repositoryservice.WorktreeClient{Client: kubeClient, Kubernetes: clusterClient.Kubernetes}
 	worktree, err := worktreeClient.Start(cmd.Context(), repositoryservice.WorktreeAddRequest{
 		Namespace:    namespace,
 		Repository:   options.repository,

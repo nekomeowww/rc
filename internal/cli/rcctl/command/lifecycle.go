@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/spf13/pflag"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // LifecycleOptions holds the opt-in Workspace clocks used by run and workspace create.
@@ -41,4 +42,9 @@ func (options *LifecycleOptions) Validate() error {
 		return fmt.Errorf("lifecycle durations must not be negative")
 	}
 	return nil
+}
+
+// Duration wraps value as a Kubernetes API duration.
+func Duration(value time.Duration) *metav1.Duration {
+	return &metav1.Duration{Duration: value}
 }

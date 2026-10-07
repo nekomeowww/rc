@@ -11,18 +11,14 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	"github.com/nekomeowww/rc/internal/cli/rcctl/cluster"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/command"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	clioutput "github.com/nekomeowww/rc/pkg/output"
 )
-
-type listOptions struct {
-	output clioutput.Options
-}
 
 type repositoryListRow struct {
 	name    string
@@ -44,64 +40,11 @@ func NewCommand() *cobra.Command {
 }
 
 func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
-	options := new(listOptions)
-	cmd := &cobra.Command{
-		Use: "list", Aliases: []string{"ls"}, Short: "List Repositories in the current namespace", Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := options.output.Validate(true); err != nil {
-				return err
-			}
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			scheme := runtime.NewScheme()
-			if err := repositoriesv1alpha1.AddToScheme(scheme); err != nil {
-				return fmt.Errorf("register Repository API types: %w", err)
-			}
-			kubeClient, err := client.New(config, client.Options{Scheme: scheme})
-			if err != nil {
-				return fmt.Errorf("create Kubernetes client: %w", err)
-			}
-
-			return runRepositoryList(cmd.Context(), cmd.OutOrStdout(), kubeClient, namespace, options.output)
-		},
-	}
-	options.output.AddFlags(cmd, true)
-
-	return cmd
+	return command.NewListCommand(kubeconfigFlags, "List Repositories in the current namespace", runRepositoryList)
 }
 
 func newGetCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
-	options := new(clioutput.Options)
-	cmd := &cobra.Command{
-		Use: "get NAME", Short: "Show a Repository", Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := options.Validate(false); err != nil {
-				return err
-			}
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			scheme := runtime.NewScheme()
-			if err := repositoriesv1alpha1.AddToScheme(scheme); err != nil {
-				return fmt.Errorf("register Repository API types: %w", err)
-			}
-			kubeClient, err := client.New(config, client.Options{Scheme: scheme})
-			if err != nil {
-				return fmt.Errorf("create Kubernetes client: %w", err)
-			}
-			repository := new(repositoriesv1alpha1.Repository)
-			if err := kubeClient.Get(cmd.Context(), client.ObjectKey{Namespace: namespace, Name: args[0]}, repository); err != nil {
-				return fmt.Errorf("get Repository %q: %w", args[0], err)
-			}
-			return options.PrintDetails(cmd.OutOrStdout(), repository, kubeClient.Scheme(), repositoryDetailFields(repository))
-		},
-	}
-	options.AddFlags(cmd, false)
-
-	return cmd
+	return command.NewGetCommand(kubeconfigFlags, "Repository", func() *repositoriesv1alpha1.Repository { return new(repositoriesv1alpha1.Repository) }, repositoryDetailFields)
 }
 
 func newDeleteCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
@@ -111,20 +54,12 @@ func newDeleteCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 		Short:   "Delete a Repository and its owned storage and Jobs",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			config, namespace, err := kubeconfigFlags.Resolve()
+			clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 			if err != nil {
 				return err
 			}
-			scheme := runtime.NewScheme()
-			if err := repositoriesv1alpha1.AddToScheme(scheme); err != nil {
-				return fmt.Errorf("register Repository API types: %w", err)
-			}
-			kubeClient, err := client.New(config, client.Options{Scheme: scheme})
-			if err != nil {
-				return fmt.Errorf("create Kubernetes client: %w", err)
-			}
 
-			return runRepositoryDelete(cmd.Context(), kubeClient, namespace, args[0])
+			return runRepositoryDelete(cmd.Context(), clusterClient.Kube, namespace, args[0])
 		},
 	}
 }

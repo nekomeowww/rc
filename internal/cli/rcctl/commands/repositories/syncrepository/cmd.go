@@ -3,12 +3,10 @@ package syncrepository
 import (
 	"fmt"
 
-	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	"github.com/nekomeowww/rc/internal/cli/rcctl/cluster"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	repositoryservice "github.com/nekomeowww/rc/internal/repositories"
 	"github.com/spf13/cobra"
-	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // NewCommand creates the explicit parent-mirror synchronization command.
@@ -20,19 +18,11 @@ func NewCommand(flags *kubeconfig.Flags) *cobra.Command {
 		Long:  "Fetch the configured remote and reset the shared parent checkout, removing untracked files. Uses the Repository credential and ref. Existing Worktrees keep their contents.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			config, namespace, err := flags.Resolve()
+			clusterClient, namespace, err := cluster.Connect(flags)
 			if err != nil {
 				return err
 			}
-			scheme := runtime.NewScheme()
-			if err := repositoriesv1alpha1.AddToScheme(scheme); err != nil {
-				return err
-			}
-			kubeClient, err := client.New(config, client.Options{Scheme: scheme})
-			if err != nil {
-				return err
-			}
-			service := repositoryservice.SyncClient{Client: kubeClient}
+			service := repositoryservice.SyncClient{Client: clusterClient.Kube}
 			request, err := service.Start(cmd.Context(), namespace, args[0])
 			if err != nil {
 				return err

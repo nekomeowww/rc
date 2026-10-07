@@ -4,13 +4,12 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	"github.com/nekomeowww/rc/internal/cli/rcctl/cluster"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	repositoryservice "github.com/nekomeowww/rc/internal/repositories"
 )
@@ -72,23 +71,11 @@ func run(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, options cloneOpt
 		return err
 	}
 
-	config, namespace, err := kubeconfigFlags.Resolve()
+	clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 	if err != nil {
 		return err
 	}
-
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		return fmt.Errorf("register core API types: %w", err)
-	}
-	if err := repositoriesv1alpha1.AddToScheme(scheme); err != nil {
-		return fmt.Errorf("register Repository API types: %w", err)
-	}
-
-	kubeClient, err := client.New(config, client.Options{Scheme: scheme})
-	if err != nil {
-		return fmt.Errorf("create Kubernetes client: %w", err)
-	}
+	kubeClient := clusterClient.Kube
 
 	repositoryClient := &repositoryservice.RepositoryClient{Client: kubeClient}
 	repository, err := repositoryClient.Clone(cmd.Context(), repositoryservice.CloneRequest{

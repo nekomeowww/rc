@@ -84,10 +84,8 @@ func TestGeneratedWorktreeLifecycle(t *testing.T) {
 				require.NoError(t, kube.Get(ctx, client.ObjectKeyFromObject(worktree), worktree))
 			}
 			owned := metav1.IsControlledBy(worktree, workspace)
-			t.Logf("source=%s owner=%v label=%q", source, owned, worktree.Labels[workspaceservice.CreatedForWorkspaceLabel])
-			// ROOT CAUSE: run set an owner, mount only set a label, and delete
-			// interpreted that label only with a CLI flag. All generated resources
-			// must instead carry the same UID-based GC contract at creation.
+			// Generated Worktrees from run and mount carry the same UID-based GC
+			// contract at creation; labels never drive deletion.
 			assert.Equal(t, source == ownershipRunRepository || source == ownershipMountRepository, owned)
 			if owned {
 				assert.Contains(t, worktree.Finalizers, "repositories.rc.ayaka.io/worktree-delete-protection")
@@ -99,18 +97,14 @@ func TestGeneratedWorktreeLifecycle(t *testing.T) {
 			require.NoError(t, deleteWorkspace(cmd, kube, workspace, false, func(context.Context, *workspacesv1alpha1.Workspace) ([]string, error) { return nil, nil }))
 			remaining := new(repositoriesv1alpha1.Worktree)
 			err := kube.Get(ctx, client.ObjectKeyFromObject(worktree), remaining)
+			require.NoError(t, err, "the CLI delegates owned deletion to GC instead of issuing label-based DELETEs")
 			if source == ownershipMountExisting || source == ownershipRunWorktree {
-				require.NoError(t, err)
 				assert.Empty(t, remaining.OwnerReferences)
 			}
-			assert.NoError(t, err, "the CLI delegates owned deletion to GC instead of issuing label-based DELETEs")
 			if owned {
 				assert.Contains(t, output.String(), "cascade delete worktree/"+worktree.Name)
 			} else {
 				assert.Contains(t, output.String(), "retain worktree/"+worktree.Name)
-			}
-			if err == nil && !owned && remaining.Labels[workspaceservice.CreatedForWorkspaceLabel] != "" {
-				t.Logf("REPRODUCED orphan generated-for=%q after Workspace deletion", remaining.Labels[workspaceservice.CreatedForWorkspaceLabel])
 			}
 		})
 	}

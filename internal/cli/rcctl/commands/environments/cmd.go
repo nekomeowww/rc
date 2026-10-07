@@ -78,11 +78,7 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			clusterClient, err := cluster.New(config)
+			clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 			if err != nil {
 				return err
 			}
@@ -184,11 +180,7 @@ func addProcessFlags(cmd *cobra.Command, options *processOptions) {
 }
 
 func runEnvironmentProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, name string, processCommand []string, tty bool, options processOptions) error {
-	config, namespace, err := kubeconfigFlags.Resolve()
-	if err != nil {
-		return err
-	}
-	clusterClient, err := cluster.New(config)
+	clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 	if err != nil {
 		return err
 	}
@@ -252,11 +244,7 @@ func newCommitCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	return &cobra.Command{
 		Use: "commit NAME", Short: "Promote Environment draft to current", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			clusterClient, err := cluster.New(config)
+			clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 			if err != nil {
 				return err
 			}
@@ -298,11 +286,7 @@ func newStopCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	return &cobra.Command{
 		Use: "stop NAME", Short: "Stop an idle Environment editor without deleting draft", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			clusterClient, err := cluster.New(config)
+			clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 			if err != nil {
 				return err
 			}
@@ -336,11 +320,7 @@ func newDeleteCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	return &cobra.Command{
 		Use: "delete NAME", Short: "Delete a WorkspaceEnvironment and its current and draft volumes", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			clusterClient, err := cluster.New(config)
+			clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 			if err != nil {
 				return err
 			}
@@ -351,26 +331,9 @@ func newDeleteCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 }
 
 func newDefaultCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
-	return &cobra.Command{
-		Use: "default NAME", Short: "Set the XDG default Environment for the current context and namespace", Args: cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			_, namespace, contextName, err := kubeconfigFlags.ResolveWithIdentity()
-			if err != nil {
-				return err
-			}
-			path, err := workspaceservice.DefaultConfigPath()
-			if err != nil {
-				return err
-			}
-			store := workspaceservice.DefaultStore{Path: path}
-			defaults, err := store.Get(contextName, namespace)
-			if err != nil {
-				return err
-			}
-			defaults.Environment = args[0]
-			return store.Set(contextName, namespace, defaults)
-		},
-	}
+	return command.NewDefaultCommand(kubeconfigFlags, "Set the XDG default Environment for the current context and namespace", func(defaults *workspaceservice.Defaults, name string) {
+		defaults.Environment = name
+	})
 }
 
 func waitEnvironmentReady(ctx context.Context, kubeClient client.Client, environment *workspacesv1alpha1.WorkspaceEnvironment) error {

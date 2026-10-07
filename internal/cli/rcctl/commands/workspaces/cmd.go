@@ -134,11 +134,7 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			clusterClient, err := cluster.New(config)
+			clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 			if err != nil {
 				return err
 			}
@@ -147,8 +143,8 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 				Spec: workspacesv1alpha1.WorkspaceSpec{
 					DesiredState:         workspacesv1alpha1.WorkspaceDesiredStateRunning,
 					RetentionPolicy:      workspacesv1alpha1.WorkspaceRetentionPolicyRetain,
-					IdleTimeout:          &metav1.Duration{Duration: options.lifecycle.IdleTimeout},
-					DeleteAfterSuspended: &metav1.Duration{Duration: options.lifecycle.DeleteAfterSuspended},
+					IdleTimeout:          command.Duration(options.lifecycle.IdleTimeout),
+					DeleteAfterSuspended: command.Duration(options.lifecycle.DeleteAfterSuspended),
 					OS:                   osName, NodeSelector: options.placement.NodeSelector, Tolerations: tolerations,
 					Image: options.image, DefaultWorkingDirectory: options.defaultCwd,
 					ServiceAccountName: options.serviceAccount,
@@ -686,11 +682,7 @@ func newUnmountCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use: "unmount WORKSPACE MOUNT", Short: "Remove a code mount from a Workspace", Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			clusterClient, err := cluster.New(config)
+			clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 			if err != nil {
 				return err
 			}
@@ -755,11 +747,7 @@ func newStateCommand(kubeconfigFlags *kubeconfig.Flags, running bool) *cobra.Com
 	cmd := &cobra.Command{
 		Use: verb + " NAME", Short: short, Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			clusterClient, err := cluster.New(config)
+			clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 			if err != nil {
 				return err
 			}
@@ -796,15 +784,11 @@ func newStateCommand(kubeconfigFlags *kubeconfig.Flags, running bool) *cobra.Com
 
 func newDeleteCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	var force bool
-	var cascade bool
+	var deprecatedCascade bool // Only whether the flag was set matters.
 	cmd := &cobra.Command{
 		Use: "delete NAME", Short: "Delete a Workspace and its owned runtime state", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			clusterClient, err := cluster.New(config)
+			clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 			if err != nil {
 				return err
 			}
@@ -812,14 +796,14 @@ func newDeleteCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err := clusterClient.Kube.Get(cmd.Context(), client.ObjectKey{Name: args[0], Namespace: namespace}, workspace); err != nil {
 				return err
 			}
-			return deleteWorkspace(cmd, clusterClient.Kube, workspace, cascade || cmd.Flags().Changed("cascade-created-worktrees"),
+			return deleteWorkspace(cmd, clusterClient.Kube, workspace, cmd.Flags().Changed("cascade-created-worktrees"),
 				func(ctx context.Context, current *workspacesv1alpha1.Workspace) ([]string, error) {
 					return stopForTopologyChange(ctx, clusterClient, current, force)
 				})
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "Stop active processes before deletion")
-	cmd.Flags().BoolVar(&cascade, "cascade-created-worktrees", false, "Deprecated: owned Worktrees always cascade; label-only legacy Worktrees are retained")
+	cmd.Flags().BoolVar(&deprecatedCascade, "cascade-created-worktrees", false, "Deprecated: owned Worktrees always cascade; label-only legacy Worktrees are retained")
 
 	return cmd
 }
@@ -910,11 +894,7 @@ func newPortForwardCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	return &cobra.Command{
 		Use: "port-forward NAME LOCAL[:REMOTE]", Short: "Forward a local port to the Workspace Pod", Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			clusterClient, err := cluster.New(config)
+			clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 			if err != nil {
 				return err
 			}
@@ -925,11 +905,11 @@ func newPortForwardCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if workspace.Status.RuntimePodName == "" {
 				return fmt.Errorf("workspace %q has no running Pod", workspace.Name)
 			}
-			roundTripper, upgrader, err := spdy.RoundTripperFor(config)
+			roundTripper, upgrader, err := spdy.RoundTripperFor(clusterClient.Config)
 			if err != nil {
 				return err
 			}
-			serverURL, err := url.Parse(config.Host)
+			serverURL, err := url.Parse(clusterClient.Config.Host)
 			if err != nil {
 				return err
 			}
@@ -952,26 +932,9 @@ func newPortForwardCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 }
 
 func newDefaultCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
-	return &cobra.Command{
-		Use: "default NAME", Short: "Set the XDG default Workspace for the current context and namespace", Args: cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			_, namespace, contextName, err := kubeconfigFlags.ResolveWithIdentity()
-			if err != nil {
-				return err
-			}
-			path, err := workspaceservice.DefaultConfigPath()
-			if err != nil {
-				return err
-			}
-			store := workspaceservice.DefaultStore{Path: path}
-			defaults, err := store.Get(contextName, namespace)
-			if err != nil {
-				return err
-			}
-			defaults.Workspace = args[0]
-			return store.Set(contextName, namespace, defaults)
-		},
-	}
+	return command.NewDefaultCommand(kubeconfigFlags, "Set the XDG default Workspace for the current context and namespace", func(defaults *workspaceservice.Defaults, name string) {
+		defaults.Workspace = name
+	})
 }
 
 func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
@@ -982,11 +945,7 @@ func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err := options.output.Validate(true); err != nil {
 				return err
 			}
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			clusterClient, err := cluster.New(config)
+			clusterClient, namespace, err := cluster.Connect(kubeconfigFlags)
 			if err != nil {
 				return err
 			}
@@ -1006,31 +965,7 @@ func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 }
 
 func newGetCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
-	options := new(clioutput.Options)
-	cmd := &cobra.Command{
-		Use: "get NAME", Short: "Show a Workspace", Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := options.Validate(false); err != nil {
-				return err
-			}
-			config, namespace, err := kubeconfigFlags.Resolve()
-			if err != nil {
-				return err
-			}
-			clusterClient, err := cluster.New(config)
-			if err != nil {
-				return err
-			}
-			workspace := new(workspacesv1alpha1.Workspace)
-			if err := clusterClient.Kube.Get(cmd.Context(), client.ObjectKey{Namespace: namespace, Name: args[0]}, workspace); err != nil {
-				return fmt.Errorf("get Workspace %q: %w", args[0], err)
-			}
-			return options.PrintDetails(cmd.OutOrStdout(), workspace, clusterClient.Kube.Scheme(), workspaceDetailFields(workspace))
-		},
-	}
-	options.AddFlags(cmd, false)
-
-	return cmd
+	return command.NewGetCommand(kubeconfigFlags, "Workspace", func() *workspacesv1alpha1.Workspace { return new(workspacesv1alpha1.Workspace) }, workspaceDetailFields)
 }
 
 func workspaceListItems(workspaces []workspacesv1alpha1.Workspace) []workspacesv1alpha1.Workspace {
@@ -1070,11 +1005,12 @@ func workspaceListTable(workspaces []workspacesv1alpha1.Workspace, now time.Time
 	}
 }
 
-func suspendedAtDisplay(workspace *workspacesv1alpha1.Workspace) string {
-	if workspace.Status.SuspendedAt == nil {
-		return "-"
+// durationOrDisabled renders an optional lifecycle clock; nil disables it.
+func durationOrDisabled(value *metav1.Duration) string {
+	if value == nil {
+		return "disabled"
 	}
-	return clioutput.Timestamp(*workspace.Status.SuspendedAt)
+	return value.Duration.String()
 }
 
 func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.Field {
@@ -1085,14 +1021,6 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 	storage := "-"
 	if workspace.Spec.Storage != nil {
 		storage = workspaceStorageSummary(*workspace.Spec.Storage)
-	}
-	idleTimeout := "disabled"
-	if workspace.Spec.IdleTimeout != nil {
-		idleTimeout = workspace.Spec.IdleTimeout.Duration.String()
-	}
-	deleteAfterSuspended := "disabled"
-	if workspace.Spec.DeleteAfterSuspended != nil {
-		deleteAfterSuspended = workspace.Spec.DeleteAfterSuspended.Duration.String()
 	}
 	automountToken := "default"
 	if workspace.Spec.AutomountServiceAccountToken != nil {
@@ -1125,9 +1053,9 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 		{Name: "Service account", Value: clioutput.ValueOrDash(workspace.Spec.ServiceAccountName)},
 		{Name: "Automount service account token", Value: automountToken},
 		{Name: "Runtime class", Value: runtimeClass},
-		{Name: "Idle timeout", Value: idleTimeout},
-		{Name: "Delete after suspended", Value: deleteAfterSuspended},
-		{Name: "Suspended at", Value: suspendedAtDisplay(workspace)},
+		{Name: "Idle timeout", Value: durationOrDisabled(workspace.Spec.IdleTimeout)},
+		{Name: "Delete after suspended", Value: durationOrDisabled(workspace.Spec.DeleteAfterSuspended)},
+		{Name: "Suspended at", Value: clioutput.OptionalTimestamp(workspace.Status.SuspendedAt)},
 		{Name: "Mounts", Value: workspaceMountSummary(workspace.Spec.Mounts)},
 		{Name: "Agent credentials", Value: workspaceReferenceNames(workspace.Spec.AgentCredentialRefs)},
 		{Name: "Credentials", Value: workspaceReferenceNames(workspace.Spec.CredentialRefs)},

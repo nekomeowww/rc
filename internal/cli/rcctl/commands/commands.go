@@ -6,6 +6,7 @@ import (
 	"github.com/nekomeowww/rc/internal/cli/rcctl/commands/credentials"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/commands/environments"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/commands/executions"
+	"github.com/nekomeowww/rc/internal/cli/rcctl/commands/maintenance"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/commands/repositories"
 	workspacecommands "github.com/nekomeowww/rc/internal/cli/rcctl/commands/workspaces"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/commands/worktrees"
@@ -14,6 +15,7 @@ import (
 
 // Register attaches every top-level rcctl command.
 func Register(root *cobra.Command, kubeconfigFlags *kubeconfig.Flags) {
+	maintenance.Register(root, kubeconfigFlags)
 	credentials.Register(root, kubeconfigFlags)
 	repositories.Register(root, kubeconfigFlags)
 	worktrees.Register(root, kubeconfigFlags)

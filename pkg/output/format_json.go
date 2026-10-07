@@ -18,10 +18,8 @@ package output
 
 import (
 	"encoding/json"
-
-	"k8s.io/apimachinery/pkg/runtime"
 )
 
-func marshalJSON(object runtime.Object) ([]byte, error) {
+func marshalJSON(object any) ([]byte, error) {
 	return json.MarshalIndent(object, "", "  ")
 }

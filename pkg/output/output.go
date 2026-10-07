@@ -101,6 +101,22 @@ func (options Options) writeObject(writer io.Writer, object runtime.Object, sche
 		return err
 	}
 
+	return options.writeValue(writer, object)
+}
+
+// PrintValue renders a non-Kubernetes result using the same structured formats
+// and table layout as resource commands. The table must derive from value.
+func (options Options) PrintValue(writer io.Writer, value any, table Table) error {
+	if err := options.Validate(true); err != nil {
+		return err
+	}
+	if options.isStructured() {
+		return options.writeValue(writer, value)
+	}
+	return writeTable(writer, table, options.Format == FormatWide)
+}
+
+func (options Options) writeValue(writer io.Writer, object any) error {
 	var (
 		data []byte
 		err  error

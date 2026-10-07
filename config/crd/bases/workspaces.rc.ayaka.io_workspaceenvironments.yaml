@@ -66,6 +66,36 @@ spec:
                   editorIdleTimeout controls how long an idle editor Pod remains running.
                   Zero disables automatic suspension.
                 type: string
+              executionRetention:
+                description: |-
+                  executionRetention bounds terminal execution history independently of this
+                  target's lifetime. Omission preserves existing history on upgrade.
+                properties:
+                  maxEntries:
+                    default: 3000
+                    description: maxEntries keeps at most this many unpinned terminal
+                      records per target.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  transcriptTTL:
+                    default: 336h
+                    description: |-
+                      transcriptTTL removes transcripts before their execution records when due.
+                      Record deletion always removes its transcript, even when this TTL is longer.
+                    type: string
+                    x-kubernetes-validations:
+                    - message: transcript TTL must be positive
+                      rule: duration(self) > duration('0s')
+                  ttlAfterFinished:
+                    default: 2160h
+                    description: ttlAfterFinished is measured from completedAt, never
+                      creation or start time.
+                    type: string
+                    x-kubernetes-validations:
+                    - message: TTL must be positive
+                      rule: duration(self) > duration('0s')
+                type: object
               image:
                 description: image is the runner image string copied into each new
                   Workspace.
@@ -262,6 +292,12 @@ spec:
               editorPodName:
                 description: editorPodName is the active Environment editor Pod, when
                   one exists.
+                type: string
+              lastExecutionCompletedAt:
+                description: |-
+                  lastExecutionCompletedAt preserves the idle clock after execution history
+                  is collected. It only moves forward.
+                format: date-time
                 type: string
               observedGeneration:
                 description: observedGeneration is the latest generation reflected

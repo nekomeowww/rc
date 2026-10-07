@@ -591,7 +591,7 @@ func newStopCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 
 func newRemoveCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	return &cobra.Command{
-		Use: "rm ID", Short: "Delete a completed execution record", Args: cobra.ExactArgs(1),
+		Use: "rm ID", Short: "Request deletion of a completed execution and its transcript", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			processClient, namespace, err := processClient(kubeconfigFlags)
 			if err != nil {
@@ -626,7 +626,7 @@ func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 				return err
 			}
 			list := new(workspacesv1alpha1.WorkspaceExecList)
-			listOptions := []client.ListOption{}
+			listOptions := []client.ListOption{processListSelectors(*options)}
 			if !options.allNamespaces {
 				listOptions = append(listOptions, client.InNamespace(namespace))
 			}
@@ -848,4 +848,24 @@ func processTerminal(phase workspacesv1alpha1.WorkspaceExecPhase) bool {
 
 func boolPointer(value bool) *bool {
 	return &value
+}
+
+// processListSelectors pushes supported filters to the API server so default
+// ps transfers running processes instead of the entire retained history.
+func processListSelectors(options listOptions) client.MatchingFields {
+	fields := client.MatchingFields{}
+	if options.workspace != "" {
+		fields["spec.targetRef.name"] = options.workspace
+	}
+	phase := options.phase
+	if !options.all && phase == "" {
+		phase = string(workspacesv1alpha1.WorkspaceExecPhaseRunning)
+	}
+	for _, known := range []workspacesv1alpha1.WorkspaceExecPhase{"Pending", "Starting", "Running", "Succeeded", "Failed", "Stopped", "Lost"} {
+		if strings.EqualFold(phase, string(known)) {
+			fields["status.phase"] = string(known)
+			break
+		}
+	}
+	return fields
 }

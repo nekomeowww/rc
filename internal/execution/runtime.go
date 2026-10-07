@@ -83,7 +83,21 @@ type State struct {
 
 // Runtime controls processes at the Pod exec system boundary.
 type Runtime interface {
+	TranscriptPruner
 	Start(context.Context, Target, StartRequest) (State, error)
 	Inspect(context.Context, Target, string) (State, error)
 	Stop(context.Context, Target, string) (State, error)
+}
+
+// TranscriptPruner releases terminal transcript data without forgetting the
+// persistent at-most-once identity. Implementations must verify the UID.
+type TranscriptPruner interface {
+	PruneTranscript(context.Context, Target, string, string) error
+}
+
+// TranscriptIdentity authorizes removal of one transcript without forgetting
+// its at-most-once execution tombstone.
+type TranscriptIdentity struct {
+	ID  string `json:"id"`
+	UID string `json:"uid"`
 }

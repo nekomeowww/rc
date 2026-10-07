@@ -74,6 +74,11 @@ func TestUnixServerKeepsProcessAfterClientDisconnect(t *testing.T) {
 	var transcript bytes.Buffer
 	requirements.NoError(client.Logs(context.Background(), request.ID, &transcript), "read logs through new client")
 	assertions.Equal("done", transcript.String(), "new client sees detached output")
+	requirements.NoError(client.PruneTranscript(context.Background(), request.ID, request.UID), "prune through the versioned protocol")
+	requirements.NoError(client.PruneTranscript(context.Background(), request.ID, request.UID), "retry acknowledged cleanup")
+	requirements.ErrorIs(client.Logs(context.Background(), request.ID, &transcript), processruntime.ErrNotFound)
+	_, err = client.Start(context.Background(), request)
+	requirements.ErrorIs(err, processruntime.ErrNotFound, "cleanup must not permit a protocol replay to start again")
 
 	cancel()
 	select {

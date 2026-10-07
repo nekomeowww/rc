@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,6 +32,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/workspaceadmission"
 )
 
@@ -45,6 +47,7 @@ type WorkspaceRetentionReconciler struct {
 	client.Client
 	// APIReader bypasses the informer cache for destructive lifecycle decisions.
 	APIReader client.Reader
+	Runtime   processruntime.Runtime
 	// Now allows deterministic deadline and restart tests; defaults to time.Now.
 	Now func() time.Time
 }
@@ -76,9 +79,6 @@ func (r *WorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctrl.R
 			returnedErr = errors.Join(returnedErr, gate.Reopen(ctx, workspace))
 		}
 	}()
-	if !workspace.Spec.IsTemporary() && workspace.Spec.IdleTimeout == nil && workspace.Spec.DeleteAfterSuspended == nil && workspace.Status.SuspendedAt == nil {
-		return ctrl.Result{}, nil
-	}
 	active, hasProcesses, lastCompletion, err := workspaceProcessState(ctx, reader, workspace)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -91,20 +91,25 @@ func (r *WorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, err
 	}
 	if active {
-		return ctrl.Result{}, nil
+		return r.reconcileExecutions(ctx, workspace)
 	}
 	if workspace.Spec.IsTemporary() {
-		return r.reconcileTemporary(ctx, workspace, hasProcesses, lastCompletion, now)
+		lifecycleResult, lifecycleErr := r.reconcileTemporary(ctx, workspace, hasProcesses, lastCompletion, now)
+		executionResult, executionErr := r.reconcileExecutions(ctx, workspace)
+		return earlierResult(lifecycleResult, executionResult), errors.Join(lifecycleErr, executionErr)
 	}
 	if workspace.Spec.DesiredState == workspacesv1alpha1.WorkspaceDesiredStateSuspended {
-		return r.reconcileSuspended(ctx, workspace, now)
+		lifecycleResult, lifecycleErr := r.reconcileSuspended(ctx, workspace, now)
+		executionResult, executionErr := r.reconcileExecutions(ctx, workspace)
+		return earlierResult(lifecycleResult, executionResult), errors.Join(lifecycleErr, executionErr)
 	}
 	if workspace.Spec.IdleTimeout == nil || workspace.Spec.IdleTimeout.Duration <= 0 {
-		return ctrl.Result{}, nil
+		return r.reconcileExecutions(ctx, workspace)
 	}
 	deadline := workspace.Status.LastActivityTime.Add(workspace.Spec.IdleTimeout.Duration)
 	if remaining := deadline.Sub(now); remaining > 0 {
-		return ctrl.Result{RequeueAfter: remaining}, nil
+		executionResult, executionErr := r.reconcileExecutions(ctx, workspace)
+		return earlierResult(ctrl.Result{RequeueAfter: remaining}, executionResult), executionErr
 	}
 	// Updating the version we read prevents a concurrent resume or policy edit
 	// from being overwritten. The runtime controller rechecks active executions
@@ -189,6 +194,26 @@ func (r *WorkspaceRetentionReconciler) reconcileSuspended(ctx context.Context, w
 	return ctrl.Result{}, r.deleteExpired(ctx, workspace)
 }
 
+func (r *WorkspaceRetentionReconciler) reconcileExecutions(ctx context.Context, workspace *workspacesv1alpha1.Workspace) (ctrl.Result, error) {
+	policy := workspace.Spec.ExecutionRetention
+	if workspace.Spec.IsTemporary() {
+		policy = nil
+	} else if policy == nil {
+		return ctrl.Result{}, nil
+	}
+	return (&executionRetentionService{Client: r.Client, APIReader: r.APIReader, Runtime: r.Runtime}).reconcileTarget(ctx, workspace, policy)
+}
+
+func earlierResult(a, b ctrl.Result) ctrl.Result {
+	result := ctrl.Result{}
+	if a.RequeueAfter > 0 && (b.RequeueAfter == 0 || a.RequeueAfter < b.RequeueAfter) {
+		result.RequeueAfter = a.RequeueAfter
+	} else {
+		result.RequeueAfter = b.RequeueAfter
+	}
+	return result
+}
+
 func (r *WorkspaceRetentionReconciler) deleteExpired(ctx context.Context, workspace *workspacesv1alpha1.Workspace) error {
 	reader := r.APIReader
 	if reader == nil {
@@ -221,10 +246,13 @@ func (r *WorkspaceRetentionReconciler) deleteExpired(ctx context.Context, worksp
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *WorkspaceRetentionReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	r.APIReader = mgr.GetAPIReader()
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&workspacesv1alpha1.Workspace{}).
-		Watches(&workspacesv1alpha1.WorkspaceExec{}, handler.EnqueueRequestsFromMapFunc(workspaceForProcess)).
+		Watches(&workspacesv1alpha1.WorkspaceExec{}, handler.EnqueueRequestsFromMapFunc(retentionTargetForProcess(workspacesv1alpha1.WorkspaceExecTargetWorkspace))).
+		Owns(&corev1.Pod{}).
 		Named("workspaces-workspace-retention").
 		Complete(r)
 }

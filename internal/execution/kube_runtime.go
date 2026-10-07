@@ -122,3 +122,9 @@ func (runtime *KubeRuntime) stateCommand(ctx context.Context, target Target, com
 
 	return state, nil
 }
+
+// PruneTranscript requests UID-checked, idempotent terminal transcript cleanup.
+func (runtime *KubeRuntime) PruneTranscript(ctx context.Context, target Target, id, uid string) error {
+	_, err := runtime.stateCommand(ctx, target, bridgeCommand(target, "prune", id, "--uid", uid), nil)
+	return err
+}

@@ -134,6 +134,7 @@ func (r *WorkspaceExecReconciler) ensureEnvironmentEditor(ctx context.Context, e
 		editor, err = platform.EnvironmentEditorPod(rcplatform.EditorPodIntent{
 			Metadata: metav1.ObjectMeta{Name: editorName, Namespace: environment.Namespace, Labels: map[string]string{environmentManagedByLabel: environment.Name}},
 			Image:    environment.Spec.Image, HomeClaim: draft.Name, ServiceAccount: defaultWorkspaceServiceAccount,
+			TranscriptScope: "environment/" + string(environment.UID) + "/" + draft.Name,
 		})
 		if err != nil {
 			return nil, "", "", fmt.Errorf("build WorkspaceEnvironment editor Pod: %w", err)
@@ -173,6 +174,7 @@ func environmentEditorPod(environment *workspacesv1alpha1.WorkspaceEnvironment, 
 	return platform.EnvironmentEditorPod(rcplatform.EditorPodIntent{
 		Metadata: metav1.ObjectMeta{Name: environment.Name + "-editor", Namespace: environment.Namespace, Labels: map[string]string{environmentManagedByLabel: environment.Name}},
 		Image:    environment.Spec.Image, HomeClaim: draftClaimName, ServiceAccount: defaultWorkspaceServiceAccount,
+		TranscriptScope: "environment/" + string(environment.UID) + "/" + draftClaimName,
 	})
 }
 

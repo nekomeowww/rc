@@ -38,7 +38,8 @@ func lifecycleClient(t *testing.T, objects ...client.Object) client.Client {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
-	return fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&workspacesv1alpha1.Workspace{}, &workspacesv1alpha1.WorkspaceExec{}).WithObjects(objects...).Build()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	return fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&workspacesv1alpha1.Workspace{}, &workspacesv1alpha1.WorkspaceExec{}).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).WithObjects(objects...).Build()
 }
 
 func lifecycleExec(workspace *workspacesv1alpha1.Workspace, phase workspacesv1alpha1.WorkspaceExecPhase) *workspacesv1alpha1.WorkspaceExec {
@@ -223,8 +224,9 @@ func TestLifecycleRechecksExecutionsAtDeletionBoundary(t *testing.T) {
 	workspace.Spec.RetentionPolicy = workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit
 	scheme := runtime.NewScheme()
 	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
 	lists := 0
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace).WithObjects(workspace).WithInterceptorFuncs(interceptor.Funcs{
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).WithObjects(workspace).WithInterceptorFuncs(interceptor.Funcs{
 		List: func(ctx context.Context, kubeClient client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 			lists++
 			if lists == 2 {
@@ -235,7 +237,7 @@ func TestLifecycleRechecksExecutionsAtDeletionBoundary(t *testing.T) {
 	}).Build()
 	persisted, _ := reconcileLifecycle(t, kubeClient, now)
 	assert.True(t, persisted.DeletionTimestamp.IsZero(), "execution arrived while activity status was being persisted")
-	assert.Equal(t, 2, lists)
+	assert.Equal(t, 3, lists, "lifecycle boundary plus transcript obligation scan")
 }
 
 func TestLifecycleDeletePreconditionProtectsConcurrentPolicyEdit(t *testing.T) {
@@ -245,7 +247,8 @@ func TestLifecycleDeletePreconditionProtectsConcurrentPolicyEdit(t *testing.T) {
 	workspace.Spec.RetentionPolicy = workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit
 	scheme := runtime.NewScheme()
 	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace).WithObjects(workspace).WithInterceptorFuncs(interceptor.Funcs{
+	require.NoError(t, corev1.AddToScheme(scheme))
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).WithObjects(workspace).WithInterceptorFuncs(interceptor.Funcs{
 		Delete: func(ctx context.Context, kubeClient client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
 			current := new(workspacesv1alpha1.Workspace)
 			require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(object), current))
@@ -268,7 +271,7 @@ func TestTemporaryTerminalWithoutCompletionTimeWaits(t *testing.T) {
 	workspace.Spec.RetentionPolicy = workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit
 	persisted, delay := reconcileLifecycle(t, lifecycleClient(t, workspace, lifecycleExec(workspace, workspacesv1alpha1.WorkspaceExecPhaseSucceeded)), now)
 	assert.True(t, persisted.DeletionTimestamp.IsZero())
-	assert.Equal(t, temporaryWorkspaceCleanupDelay, delay)
+	assert.Equal(t, executionRetentionInterval, delay)
 }
 
 // ROOT CAUSE: a child CREATE does not change the Workspace resourceVersion.
@@ -288,7 +291,7 @@ func TestAutomaticDeletionFencesDirectAPICreationAtDelete(t *testing.T) {
 	require.NoError(t, corev1.AddToScheme(scheme))
 	runtimeClient := &recordingProcessRuntime{startState: processruntime.State{Phase: string(workspacesv1alpha1.WorkspaceExecPhaseRunning)}}
 	intercepted := false
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, &workspacesv1alpha1.WorkspaceExec{}).WithObjects(workspace, pod).WithInterceptorFuncs(interceptor.Funcs{
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, &workspacesv1alpha1.WorkspaceExec{}).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).WithObjects(workspace, pod).WithInterceptorFuncs(interceptor.Funcs{
 		Delete: func(ctx context.Context, kubeClient client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
 			intercepted = true
 			process := lifecycleExec(workspace, "")
@@ -327,7 +330,7 @@ func TestAutomaticDeletionLosesToExecutionAdmissionBeforeClosure(t *testing.T) {
 	require.NoError(t, corev1.AddToScheme(scheme))
 	runtimeClient := &recordingProcessRuntime{startState: processruntime.State{Phase: string(workspacesv1alpha1.WorkspaceExecPhaseRunning)}}
 	intercepted := false
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, &workspacesv1alpha1.WorkspaceExec{}).WithObjects(workspace, pod).WithInterceptorFuncs(interceptor.Funcs{
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, &workspacesv1alpha1.WorkspaceExec{}).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).WithObjects(workspace, pod).WithInterceptorFuncs(interceptor.Funcs{
 		SubResourcePatch: func(ctx context.Context, kubeClient client.Client, subResource string, object client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			candidate, ok := object.(*workspacesv1alpha1.Workspace)
 			if ok && candidate.Status.ExecutionAdmissionClosed && !intercepted {
@@ -393,7 +396,8 @@ func TestRetentionRecoversFenceAfterRestartOrDeleteError(t *testing.T) {
 		workspace.Spec.RetentionPolicy = workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit
 		scheme := runtime.NewScheme()
 		require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
-		kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace).WithObjects(workspace).WithInterceptorFuncs(interceptor.Funcs{
+		require.NoError(t, corev1.AddToScheme(scheme))
+		kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).WithObjects(workspace).WithInterceptorFuncs(interceptor.Funcs{
 			Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
 				return fmt.Errorf("injected delete failure")
 			},

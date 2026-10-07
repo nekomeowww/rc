@@ -98,3 +98,11 @@ func TestKubeRuntimeUsesWindowsTargetFromAnyHost(t *testing.T) {
 	assert.Equal(t, "rc-kube.exe", executor.command[0])
 	assert.Equal(t, `\\.\pipe\rc-kube`, executor.command[5])
 }
+
+func TestKubeRuntimePrunesByImmutableUID(t *testing.T) {
+	t.Parallel()
+	executor := &recordingPodExecutor{}
+	runtime := NewKubeRuntime(executor)
+	require.NoError(t, runtime.PruneTranscript(t.Context(), Target{}, testProcessID, "uid"))
+	require.Equal(t, []string{runtimeBridgeCommand, runtimeProcessGroup, "prune", testProcessID, "--uid", "uid", runtimeSocketFlag, DefaultSocketPath}, executor.command)
+}

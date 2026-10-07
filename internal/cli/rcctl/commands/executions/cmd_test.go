@@ -27,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
@@ -289,6 +290,13 @@ func TestExecutionCommandsRejectRemovedCredentialAlias(t *testing.T) {
 		assert.Contains(t, err.Error(), "unknown flag")
 		require.NotNil(t, cmd.Flag("credential"))
 	}
+}
+
+func TestProcessListSelectorsBoundDefaultPSHistoryTransfer(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, client.MatchingFields{"status.phase": "Running"}, processListSelectors(listOptions{}))
+	require.Empty(t, processListSelectors(listOptions{all: true}))
+	require.Equal(t, client.MatchingFields{"spec.targetRef.name": "coding", "status.phase": "Failed"}, processListSelectors(listOptions{workspace: "coding", phase: "failed"}))
 }
 
 func TestRunRejectsConflictingRetentionBeforeConnecting(t *testing.T) {

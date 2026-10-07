@@ -1005,8 +1005,9 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 				workspaceRuntimePolicyAnnotation: workspaceRuntimePolicyVersion,
 			},
 		}, Image: resolved.image, HomeClaim: resolved.homeClaimName, HomeHostPath: resolved.homeHostPath,
-		HotMountRoot:   hotMountRoot,
-		ServiceAccount: resolved.serviceAccount, AutomountToken: resolved.automountSAToken,
+		HotMountRoot:    hotMountRoot,
+		TranscriptScope: "workspace/" + string(workspace.UID),
+		ServiceAccount:  resolved.serviceAccount, AutomountToken: resolved.automountSAToken,
 		Resources: workspace.Spec.Resources, AdditionalVolumes: resolved.volumes, AdditionalMounts: resolved.volumeMounts,
 		Initializers: initializers, BeforeStop: resolved.beforeStop,
 	})
@@ -1091,9 +1092,9 @@ func workspaceProcessState(ctx context.Context, kubeClient client.Reader, worksp
 	if err := kubeClient.List(ctx, processes, client.InNamespace(workspace.Namespace)); err != nil {
 		return false, false, nil, fmt.Errorf("list Workspace processes: %w", err)
 	}
-	hasProcesses := false
+	hasProcesses := workspace.Status.LastExecutionCompletedAt != nil
 	active := false
-	var lastCompletion *metav1.Time
+	lastCompletion := workspace.Status.LastExecutionCompletedAt.DeepCopy()
 	for index := range processes.Items {
 		process := &processes.Items[index]
 		if process.Spec.TargetRef.Kind != workspacesv1alpha1.WorkspaceExecTargetWorkspace || process.Spec.TargetRef.Name != workspace.Name {

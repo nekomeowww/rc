@@ -106,6 +106,11 @@ type WorkspaceLifecycle struct {
 
 // WorkspaceSpec defines a development machine with an explicit lifetime.
 type WorkspaceSpec struct {
+	// executionRetention bounds terminal execution history independently of this
+	// target's lifetime. Omission preserves existing history on upgrade.
+	// +optional
+	ExecutionRetention *ExecutionRetentionPolicy `json:"executionRetention,omitempty"`
+
 	// os selects the runtime operating system. It must match the image and
 	// any source Environment; changing it would invalidate persistent home state.
 	// Darwin runtimes currently target macOS-vz-kubelet virtual-machine Pods.
@@ -239,6 +244,11 @@ func (spec WorkspaceSpec) IsTemporary() bool {
 
 // WorkspaceStatus defines the observed state of Workspace.
 type WorkspaceStatus struct {
+	// lastExecutionCompletedAt preserves the idle clock after execution history
+	// is collected. It only moves forward.
+	// +optional
+	LastExecutionCompletedAt *metav1.Time `json:"lastExecutionCompletedAt,omitempty"`
+
 	// observedGeneration is the latest generation reflected by status.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`

@@ -137,7 +137,7 @@ func TestWorkspaceExecTerminalPodBecomesLost(t *testing.T) {
 			require.Empty(t, processRuntime.startedRequest.ID)
 			require.Nil(t, process.Status.ExitCode, "runtime exit is not a known child exit")
 			// An RPC that completed after the loss observation cannot resurrect it.
-			require.NoError(t, reconciler.applyRuntimeState(ctx, request.NamespacedName, &resolvedProcessTarget{}, processruntime.State{Phase: "Running"}))
+			require.NoError(t, reconciler.applyRuntimeState(ctx, request.NamespacedName, &resolvedProcessTarget{}, processruntime.State{Phase: testRuntimeRunningPhase}))
 			require.NoError(t, kubeClient.Get(ctx, request.NamespacedName, process))
 			require.Equal(t, workspacesv1alpha1.WorkspaceExecPhaseLost, process.Status.Phase)
 		})

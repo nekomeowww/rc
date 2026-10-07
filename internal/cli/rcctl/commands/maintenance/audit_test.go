@@ -3,40 +3,26 @@ package maintenance
 import (
 	"bytes"
 	"encoding/json"
-
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
-	"time"
 
-	workspaces "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
-	"github.com/nekomeowww/rc/internal/executionretention"
-	"github.com/nekomeowww/rc/internal/kubeconfig"
 	"github.com/spf13/cobra"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	"github.com/nekomeowww/rc/internal/audit"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/nekomeowww/rc/internal/audit"
+	"github.com/nekomeowww/rc/internal/kubeconfig"
 )
 
-const dryRunArg = "--dry-run"
-const fromPlanArg = "--from-plan"
-
-const yesArg = "--yes"
-const planPlaceholder = "PLAN"
+const pruneCommand = "prune"
 
 type auditFixtureOptions struct {
-	input              string
-	missingEvaluator   bool
-	allowHistoryDelete bool
-	edit               func(map[string]json.RawMessage)
+	edit func(map[string]json.RawMessage)
 }
 
 // auditFixture runs the real command tree against a read-only Kubernetes HTTP
@@ -60,9 +46,6 @@ func configuredAuditFixture(t *testing.T, options auditFixtureOptions) func(...s
 		mutex.Lock()
 		defer mutex.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		if serveFixtureObject(t, w, r, responses, options.allowHistoryDelete) {
-			return
-		}
 		if r.Method != http.MethodGet {
 			t.Errorf("read-only audit attempted %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -97,25 +80,8 @@ current-context: fixture
 		cmd := &cobra.Command{Use: "rcctl", SilenceErrors: true, SilenceUsage: true}
 		flags := kubeconfig.NewFlags()
 		flags.AddFlags(cmd.PersistentFlags())
-		// Explicitly injected test approval keeps fixture policy independent from
-		// the production canonical evaluator.
-		var evaluate audit.HistoryEvaluator = func(records []workspaces.WorkspaceExec, _ client.Object, _ time.Time) (executionretention.Plan, error) {
-			plan := executionretention.Plan{}
-			for i := range records {
-				if records[i].Spec.Retain {
-					plan.Keep = append(plan.Keep, i)
-				} else {
-					plan.Remove = append(plan.Remove, i)
-				}
-			}
-			return plan, nil
-		}
-		if options.missingEvaluator {
-			evaluate = nil
-		}
-		cmd.AddCommand(newDoctorCommand(flags), newPruneCommand(flags, evaluate))
+		cmd.AddCommand(newDoctorCommand(flags), newPruneCommand(flags))
 		out := new(bytes.Buffer)
-		cmd.SetIn(strings.NewReader(options.input))
 		cmd.SetOut(out)
 		cmd.SetErr(new(bytes.Buffer))
 		cmd.SetArgs(append([]string{"--kubeconfig", config}, args...))
@@ -124,58 +90,7 @@ current-context: fixture
 	}
 }
 
-// serveFixtureObject supports fresh record/target reads. Only the designated
-// history object can be deleted; the read-only cases reject every write.
-func serveFixtureObject(t *testing.T, w http.ResponseWriter, r *http.Request, responses map[string]json.RawMessage, allowDelete bool) bool {
-	t.Helper()
-	index := strings.LastIndex(r.URL.Path, "/")
-	body, ok := responses[r.URL.Path[:index]]
-	if !ok {
-		return false
-	}
-	var list struct {
-		APIVersion string            `json:"apiVersion"`
-		Kind       string            `json:"kind"`
-		Items      []json.RawMessage `json:"items"`
-	}
-	if json.Unmarshal(body, &list) != nil || !strings.HasSuffix(list.Kind, "List") {
-		return false
-	}
-	for i, item := range list.Items {
-		var object struct {
-			Metadata metav1.ObjectMeta `json:"metadata"`
-		}
-		require.NoError(t, json.Unmarshal(item, &object))
-		if object.Metadata.Name != r.URL.Path[index+1:] {
-			continue
-		}
-		if r.Method == http.MethodGet {
-			_, err := w.Write(item)
-			assert.NoError(t, err)
-			return true
-		}
-		if !allowDelete || r.Method != http.MethodDelete || object.Metadata.Name != "old-exec" {
-			return false
-		}
-		var opts metav1.DeleteOptions
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&opts))
-		require.NotNil(t, opts.Preconditions)
-		assert.Equal(t, object.Metadata.UID, *opts.Preconditions.UID)
-		assert.Equal(t, object.Metadata.ResourceVersion, *opts.Preconditions.ResourceVersion)
-		assert.Equal(t, metav1.DeletePropagationOrphan, *opts.PropagationPolicy)
-		list.Items = append(list.Items[:i], list.Items[i+1:]...)
-		encoded, err := json.Marshal(list)
-		require.NoError(t, err)
-		responses[r.URL.Path[:index]] = encoded
-		assert.NoError(t, json.NewEncoder(w).Encode(metav1.Status{Status: "Success"}))
-		return true
-	}
-	w.WriteHeader(http.StatusNotFound)
-	assert.NoError(t, json.NewEncoder(w).Encode(metav1.Status{Status: "Failure", Reason: metav1.StatusReasonNotFound, Code: http.StatusNotFound}))
-	return true
-}
-
-func TestDoctorReportsEvidenceAndPlanContainsOnlyHistory(t *testing.T) {
+func TestDoctorReportsEvidence(t *testing.T) {
 	run := auditFixture(t)
 	out, err := run(doctorCommand, "-o", "json")
 	require.NoError(t, err)
@@ -191,89 +106,73 @@ func TestDoctorReportsEvidenceAndPlanContainsOnlyHistory(t *testing.T) {
 	for _, finding := range report.Findings {
 		assert.Contains(t, out, finding.Code)
 	}
-	out, err = run("prune", dryRunArg, "-o", "json")
-	require.NoError(t, err)
-	var plan audit.CleanupPlan
-	require.NoError(t, json.Unmarshal([]byte(out), &plan))
-	require.Len(t, plan.Candidates, 1)
-	assert.Equal(t, "old-exec", plan.Candidates[0].Name)
-	assert.Less(t, len(out), 900, "plan does not serialize diagnostic inventory or impact")
 }
 
-func TestPruneSavedPlanAndPreviewModes(t *testing.T) {
+// TestPruneReportsBacklogReadOnly relies on the fixture server failing every
+// non-GET request: prune must never delete history itself.
+func TestPruneReportsBacklogReadOnly(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
-		args      []string
-		expired   bool
-		wantError string
+		retention string
+		want      string
+		pending   int
 	}{
-		{"fresh-dry-run", []string{dryRunArg, yesArg}, false, ""},
-		{"saved-dry-run", []string{fromPlanArg, planPlaceholder, dryRunArg, yesArg}, false, ""},
-		{"declined", nil, false, "cancelled"},
-		{"expired-execution", []string{fromPlanArg, planPlaceholder, yesArg}, true, "expired"},
-		{"expired-preview", []string{fromPlanArg, planPlaceholder, dryRunArg}, true, "expired"},
-		{"policy-override", []string{fromPlanArg, planPlaceholder, "--history-for", "1h"}, false, "cannot override"},
-		{"scope-mismatch", []string{fromPlanArg, planPlaceholder, "--namespace", "other"}, false, "scope"},
+		{"unset", "", audit.RetentionUnset, 0},
+		{"configured", `{"ttlAfterFinished":"24h"}`, audit.RetentionConfigured, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			run := auditFixture(t)
-			out, err := run("prune", dryRunArg, "-o", "json")
-			require.NoError(t, err)
-			var plan audit.CleanupPlan
-			require.NoError(t, json.Unmarshal([]byte(out), &plan))
-			if tc.expired {
-				plan.ExpiresAt = metav1.NewTime(time.Now().Add(-time.Hour))
-			}
-			data, err := json.Marshal(plan)
-			require.NoError(t, err)
-			path := filepath.Join(t.TempDir(), "plan.json")
-			require.NoError(t, os.WriteFile(path, data, 0600))
-			args := append([]string{"prune", "-o", "json"}, tc.args...)
-			for i, arg := range args {
-				if arg == planPlaceholder {
-					args[i] = path
+			run := configuredAuditFixture(t, auditFixtureOptions{edit: func(responses map[string]json.RawMessage) {
+				if tc.retention != "" {
+					setWorkspaceRetention(t, responses, tc.retention)
 				}
-			}
-			preview, err := run(args...)
-			if tc.wantError != "" {
-				require.ErrorContains(t, err, tc.wantError)
-				return
-			}
+			}})
+			out, err := run(pruneCommand, "-o", "json")
 			require.NoError(t, err)
-			assert.JSONEq(t, out, preview)
+			var report audit.HistoryReport
+			require.NoError(t, json.Unmarshal([]byte(out), &report))
+			assert.True(t, report.Complete)
+			require.Len(t, report.Targets, 1)
+			target := report.Targets[0]
+			assert.Equal(t, "Workspace", target.Target.Kind)
+			assert.Equal(t, "dev", target.Target.Name)
+			assert.Equal(t, tc.want, target.Retention)
+			assert.Equal(t, tc.pending, target.PendingCleanup)
+			assert.Equal(t, 1-tc.pending, target.Retained)
+			for _, format := range [][]string{{}, {"-o", "wide"}} {
+				out, err = run(append([]string{pruneCommand}, format...)...)
+				require.NoError(t, err)
+				assert.Contains(t, out, "Workspace/audit/dev")
+				assert.Contains(t, out, tc.want)
+			}
+			out, err = run(pruneCommand, "-o", "yaml")
+			require.NoError(t, err)
+			assert.Contains(t, out, fmt.Sprintf("pendingCleanup: %d", tc.pending))
 		})
 	}
 }
 
-func TestPruneSavedPlanConfirmationAndRetry(t *testing.T) {
-	run := configuredAuditFixture(t, auditFixtureOptions{input: "yes\n", allowHistoryDelete: true})
-	out, err := run("prune", dryRunArg, "-o", "json")
-	require.NoError(t, err)
-	path := filepath.Join(t.TempDir(), "plan.json")
-	require.NoError(t, os.WriteFile(path, []byte(out), 0600))
-	out, err = run("prune", fromPlanArg, path, "-o", "json")
-	require.NoError(t, err)
-	var result audit.PruneResult
-	require.NoError(t, json.Unmarshal([]byte(out), &result))
-	require.Len(t, result.Requested, 1)
-	require.Len(t, result.Absent, 1)
-	out, err = run("prune", fromPlanArg, path, yesArg, "-o", "json")
-	require.NoError(t, err)
-	require.NoError(t, json.Unmarshal([]byte(out), &result))
-	assert.Empty(t, result.Requested)
-	assert.Len(t, result.Absent, 1)
+func TestPruneRejectsRemovedDeletionFlags(t *testing.T) {
+	run := auditFixture(t)
+	for _, flag := range []string{"--yes", "--dry-run", "--history-for=1h", "--from-plan=plan.json"} {
+		_, err := run(pruneCommand, flag)
+		require.ErrorContains(t, err, "unknown flag", flag)
+	}
 }
 
-func TestPruneUnavailableEvaluatorCannotAuthorizeDeletion(t *testing.T) {
-	run := configuredAuditFixture(t, auditFixtureOptions{missingEvaluator: true})
-	out, err := run("prune", dryRunArg, "-o", "json")
+func setWorkspaceRetention(t *testing.T, responses map[string]json.RawMessage, retention string) {
+	t.Helper()
+	path := "/apis/workspaces.rc.ayaka.io/v1alpha1/namespaces/audit/workspaces"
+	var list map[string]any
+	require.NoError(t, json.Unmarshal(responses[path], &list))
+	var policy any
+	require.NoError(t, json.Unmarshal([]byte(retention), &policy))
+	workspace := list["items"].([]any)[0].(map[string]any)
+	workspace["spec"].(map[string]any)["executionRetention"] = policy
+	data, err := json.Marshal(list)
 	require.NoError(t, err)
-	var plan audit.CleanupPlan
-	require.NoError(t, json.Unmarshal([]byte(out), &plan))
-	assert.Empty(t, plan.Candidates)
-	_, err = run("prune", yesArg)
-	require.ErrorContains(t, err, "canonical history evaluator unavailable")
+	responses[path] = data
 }
+
 func TestDoctorRendersMissingRuntimeAndStorage(t *testing.T) {
 	run := configuredAuditFixture(t, auditFixtureOptions{edit: func(responses map[string]json.RawMessage) {
 		for _, path := range []string{"/api/v1/namespaces/audit/pods", "/api/v1/namespaces/audit/persistentvolumeclaims"} {

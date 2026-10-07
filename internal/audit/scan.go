@@ -23,20 +23,21 @@ import (
 )
 
 const (
-	repoAPI                = "repositories.rc.ayaka.io/v1alpha1"
-	workspaceAPI           = "workspaces.rc.ayaka.io/v1alpha1"
-	pvcKind                = "PersistentVolumeClaim"
-	worktreeKind           = "Worktree"
-	workspaceKind          = "Workspace"
-	workspaceExecKind      = "WorkspaceExec"
-	workspaceExecFinalizer = "workspaces.rc.ayaka.io/workspace-exec"
-	leaseKind              = "Lease"
-	podKind                = "Pod"
-	jobKind                = "Job"
-	ownerRelation          = "owner"
-	pvcRelation            = "storage"
-	runtimeRelation        = "runtime"
-	mountRelation          = "mount"
+	repoAPI                  = "repositories.rc.ayaka.io/v1alpha1"
+	workspaceAPI             = "workspaces.rc.ayaka.io/v1alpha1"
+	pvcKind                  = "PersistentVolumeClaim"
+	worktreeKind             = "Worktree"
+	workspaceKind            = "Workspace"
+	workspaceEnvironmentKind = "WorkspaceEnvironment"
+	workspaceExecKind        = "WorkspaceExec"
+	workspaceExecFinalizer   = "workspaces.rc.ayaka.io/workspace-exec"
+	leaseKind                = "Lease"
+	podKind                  = "Pod"
+	jobKind                  = "Job"
+	ownerRelation            = "owner"
+	pvcRelation              = "storage"
+	runtimeRelation          = "runtime"
+	mountRelation            = "mount"
 )
 
 // Scan reads all evidence in a namespace (or all namespaces when empty).
@@ -53,8 +54,7 @@ func Scan(ctx context.Context, reader client.Reader, namespace string, policy Po
 	return Report{Inventory: inventory, Summary: summarize(inventory), Findings: diagnose(inventory, policy)}, nil
 }
 
-// scanInventory is shared by doctor and the one pre-confirmation review. Prune
-// does not construct diagnostic findings or a second in-memory reference graph.
+// scanInventory performs doctor's single pass over every evidence kind.
 func scanInventory(ctx context.Context, reader client.Reader, namespace string, now time.Time) (Inventory, error) {
 	inventory := Inventory{Namespace: namespace, ObservedAt: metav1.NewTime(now.UTC().Truncate(time.Second)), Complete: true, Resources: []Resource{}, Coverage: []Observation{}}
 	for _, list := range evidenceLists() {
@@ -84,7 +84,7 @@ func scanInventory(ctx context.Context, reader client.Reader, namespace string, 
 }
 
 func validatePolicy(policy Policy) error {
-	if policy.UnusedFor <= 0 || policy.HistoryFor <= 0 || policy.UnhealthyFor <= 0 || policy.LargePVCBytes <= 0 {
+	if policy.UnusedFor <= 0 || policy.UnhealthyFor <= 0 || policy.LargePVCBytes <= 0 {
 		return fmt.Errorf("audit ages and requested-capacity threshold must be positive")
 	}
 	return nil
@@ -118,7 +118,7 @@ func evidenceLists() []client.ObjectList {
 }
 
 func project(object client.Object, api, kind string) Resource {
-	r := Resource{object: object, ObjectRef: ObjectRef{APIVersion: api, Kind: kind, Namespace: object.GetNamespace(), Name: object.GetName(), UID: object.GetUID(), ResourceVersion: object.GetResourceVersion()}, CreatedAt: object.GetCreationTimestamp(), DeletingAt: object.GetDeletionTimestamp(), Finalizers: slices.Clone(object.GetFinalizers()), Owners: slices.Clone(object.GetOwnerReferences()), Generation: object.GetGeneration()}
+	r := Resource{ObjectRef: ObjectRef{APIVersion: api, Kind: kind, Namespace: object.GetNamespace(), Name: object.GetName(), UID: object.GetUID(), ResourceVersion: object.GetResourceVersion()}, CreatedAt: object.GetCreationTimestamp(), DeletingAt: object.GetDeletionTimestamp(), Finalizers: slices.Clone(object.GetFinalizers()), Owners: slices.Clone(object.GetOwnerReferences()), Generation: object.GetGeneration()}
 	for _, owner := range r.Owners {
 		r.References = append(r.References, Reference{Relation: ownerRelation, Target: ObjectRef{APIVersion: owner.APIVersion, Kind: owner.Kind, Namespace: r.Namespace, Name: owner.Name, UID: owner.UID}})
 	}

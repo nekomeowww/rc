@@ -1,22 +1,19 @@
 // Package audit correlates rc lifecycle intent with live Kubernetes evidence.
-// Scan and Review are read-only; Prune only removes reviewed terminal records.
+// Every entry point is read-only: Scan backs rcctl doctor and ExecutionHistory
+// backs rcctl prune. Deleting terminal execution history is the controller's job.
 package audit
 
 import (
 	"time"
 
-	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
-	"github.com/nekomeowww/rc/internal/executionretention"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Policy defines conservative age and capacity thresholds. Durations are encoded
-// as nanoseconds in plan JSON, as with time.Duration; CLI flags accept 30m or 168h.
+// Policy defines conservative diagnostic age and capacity thresholds. CLI
+// flags accept durations such as 30m or 168h.
 type Policy struct {
 	UnusedFor     time.Duration `json:"unusedFor"`
-	HistoryFor    time.Duration `json:"historyFor"`
 	UnhealthyFor  time.Duration `json:"unhealthyFor"`
 	LargePVCBytes int64         `json:"largePVCBytes"`
 }
@@ -24,7 +21,7 @@ type Policy struct {
 // DefaultPolicy retains recent activity for seven days and diagnoses unhealthy
 // resources after thirty minutes. Storage thresholds refer to requests only.
 func DefaultPolicy() Policy {
-	return Policy{UnusedFor: 7 * 24 * time.Hour, HistoryFor: 7 * 24 * time.Hour, UnhealthyFor: 30 * time.Minute, LargePVCBytes: 100 * 1024 * 1024 * 1024}
+	return Policy{UnusedFor: 7 * 24 * time.Hour, UnhealthyFor: 30 * time.Minute, LargePVCBytes: 100 * 1024 * 1024 * 1024}
 }
 
 // ObjectRef identifies a resource incarnation; resourceVersion is an opaque
@@ -48,8 +45,6 @@ type Reference struct {
 // Resource is a credential-free projection of lifecycle evidence, not a raw CR.
 // References are outgoing; Owners retain the original Kubernetes owner contract.
 type Resource struct {
-	// object preserves typed policy inputs for the canonical evaluator in memory only.
-	object             client.Object
 	ObjectRef          `json:",inline"`
 	CreatedAt          metav1.Time             `json:"createdAt"`
 	DeletingAt         *metav1.Time            `json:"deletingAt,omitempty"`
@@ -100,58 +95,11 @@ type Finding struct {
 	Related  []ObjectRef `json:"related,omitempty"`
 }
 
-// Report is shared by doctor tables and JSON; it is never embedded in a plan.
+// Report is shared by doctor tables and JSON.
 type Report struct {
 	Inventory Inventory `json:"inventory"`
 	Summary   Summary   `json:"summary"`
 	Findings  []Finding `json:"findings"`
-}
-
-// HistoryPolicy adds a minimum age to canonical retention eligibility. It can
-// only delay deletion; it never overrides retain intent or the target's policy.
-type HistoryPolicy struct {
-	HistoryFor time.Duration `json:"historyFor"`
-}
-
-// CleanupPlan stores only the reviewed executable history identities. It is an
-// expiring selection, not a signed capability or a serialized inventory.
-type CleanupPlan struct {
-	Version    string        `json:"version"`
-	Namespace  string        `json:"namespace"`
-	Policy     HistoryPolicy `json:"policy"`
-	CreatedAt  metav1.Time   `json:"createdAt"`
-	ExpiresAt  metav1.Time   `json:"expiresAt"`
-	Candidates []ObjectRef   `json:"candidates"`
-}
-
-// HistoryEvaluator applies the canonical target-scoped retention policy to a
-// complete WorkspaceExec snapshot. Count limits cannot be evaluated one record
-// at a time. Inputs are typed, uncached objects; target is nil only after
-// confirmed absence. Missing targets and unsupported kinds fail closed.
-type HistoryEvaluator func(records []workspacesv1alpha1.WorkspaceExec, target client.Object, now time.Time) (executionretention.Plan, error)
-
-// ReviewedPlan can only be obtained through Review's fresh scan. Its private
-// selection cannot be widened by editing a returned JSON plan after confirmation.
-type ReviewedPlan struct {
-	plan     CleanupPlan
-	evaluate HistoryEvaluator
-	// Unknowns explain why a preview cannot authorize deletion.
-	Unknowns []string
-}
-
-// Plan returns a detached copy for previewing or saving the reviewed selection.
-func (review ReviewedPlan) Plan() CleanupPlan {
-	plan := review.plan
-	plan.Candidates = append([]ObjectRef{}, plan.Candidates...)
-	return plan
-}
-
-// PruneResult distinguishes accepted requests from observed absence. It is
-// returned even on partial failure; an accepted DELETE is not proof of cleanup.
-type PruneResult struct {
-	Requested []ObjectRef `json:"requested"`
-	Absent    []ObjectRef `json:"absent"`
-	Pending   []ObjectRef `json:"pending"`
 }
 
 // Summary counts visible resources and PVC requests once per object, including

@@ -158,13 +158,13 @@ The top-level command groups follow the rc resource model:
 | `rcctl repo` | Clone, inspect, execute commands in, and delete Repository mirrors |
 | `rcctl worktree` | Create, inspect, execute in, and delete independent Git checkouts |
 | `rcctl doctor` | Audit references, storage requests, runtime failures and deletion blockers |
-| `rcctl prune --dry-run` / `prune` | Review cleanup evidence and conditionally delete old terminal records |
+| `rcctl prune` | Report terminal execution history awaiting controller cleanup (read-only) |
 | `rcctl env` | Prepare and commit reusable Workspace home environments |
 | `rcctl workspace` | Create persistent development machines and manage their mounts |
 | `rcctl run` / `rcctl exec` | Run commands in a new / existing Workspace |
 | `rcctl ps` / `attach` / `logs` / `stop` / `inspect` / `rm` | List and manage processes |
 
-For read-only diagnostics and reviewed cleanup, see [Doctor and safe pruning](docs/doctor-prune.md).
+For read-only diagnostics and the execution history report, see [Doctor and the execution history report](docs/doctor-prune.md).
 
 In most cases, it takes only a few steps to get started with rcctl:
 

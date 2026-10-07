@@ -75,28 +75,34 @@ func reportTable(report audit.Report) clioutput.Table {
 	return table
 }
 
-func planTable(plan audit.CleanupPlan) clioutput.Table {
-	table := clioutput.Table{Columns: []clioutput.Column{{Name: resourceColumn}, {Name: "UID"}, {Name: "VERSION"}}}
-	table.Rows = append(table.Rows, []any{"Plan expires " + plan.ExpiresAt.String(), "history only", plan.Version})
-	for _, ref := range plan.Candidates {
-		table.Rows = append(table.Rows, []any{objectName(ref), string(ref.UID), ref.ResourceVersion})
+func historyTable(report audit.HistoryReport) clioutput.Table {
+	table := clioutput.Table{Columns: []clioutput.Column{{Name: "TARGET"}, {Name: "RETENTION"}, {Name: "RETAINED"}, {Name: "PENDING-CLEANUP"}, {Name: "DELETING"}, {Name: "POLICY", Wide: true}}}
+	for _, observation := range report.Coverage {
+		if !observation.Complete {
+			table.Rows = append(table.Rows, []any{observation.Kind, audit.RetentionUnknown, "-", "-", "-", observation.Error})
+		}
+	}
+	for _, target := range report.Targets {
+		table.Rows = append(table.Rows, []any{objectName(target.Target), target.Retention, target.Retained, target.PendingCleanup, target.Deleting, retentionPolicy(target)})
+	}
+	if len(table.Rows) == 0 {
+		table.Rows = append(table.Rows, []any{"-", "no execution targets", 0, 0, 0, "-"})
 	}
 	return table
 }
 
-func resultTable(result audit.PruneResult) clioutput.Table {
-	table := clioutput.Table{Columns: []clioutput.Column{{Name: resourceColumn}, {Name: "RESULT"}}}
-	for _, ref := range result.Requested {
-		table.Rows = append(table.Rows, []any{objectName(ref), "deletion requested"})
+// retentionPolicy shows the target's spec values; omitted fields use the
+// executionretention defaults that the controller applies.
+func retentionPolicy(target audit.HistoryTarget) string {
+	if target.Policy == nil {
+		return "-"
 	}
-	for _, ref := range result.Absent {
-		table.Rows = append(table.Rows, []any{objectName(ref), "observed absent"})
+	ttl, entries := "default", "default"
+	if target.Policy.TTLAfterFinished != nil {
+		ttl = target.Policy.TTLAfterFinished.Duration.String()
 	}
-	for _, ref := range result.Pending {
-		table.Rows = append(table.Rows, []any{objectName(ref), "deletion pending; run doctor to inspect convergence"})
+	if target.Policy.MaxEntries > 0 {
+		entries = fmt.Sprint(target.Policy.MaxEntries)
 	}
-	if len(table.Rows) == 0 {
-		table.Rows = append(table.Rows, []any{"-", "no deletion requested"})
-	}
-	return table
+	return "ttlAfterFinished=" + ttl + " maxEntries=" + entries
 }

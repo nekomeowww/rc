@@ -9,6 +9,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -39,7 +40,7 @@ func executionPodNames(object client.Object) []string {
 // reconcileExecutionHistory uses a target-scoped snapshot only to plan work.
 // Every mutation re-reads the execution and policy directly from the API. One
 // item's conflict is deferred to the next pass rather than starving its peers.
-func (r *executionRetentionService) reconcileExecutionHistory(ctx context.Context, namespace string, target workspacesv1alpha1.WorkspaceExecTargetReference, policy *workspacesv1alpha1.ExecutionRetentionPolicy) (ctrl.Result, error) {
+func (r *executionRetentionService) reconcileExecutionHistory(ctx context.Context, namespace string, target workspacesv1alpha1.WorkspaceExecTargetReference, targetUID types.UID, policy *workspacesv1alpha1.ExecutionRetentionPolicy) (ctrl.Result, error) {
 	if policy == nil {
 		return ctrl.Result{}, nil
 	}
@@ -50,7 +51,8 @@ func (r *executionRetentionService) reconcileExecutionHistory(ctx context.Contex
 	pending := 0
 	for i := range executions {
 		p := &executions[i]
-		if !p.DeletionTimestamp.IsZero() {
+		owner := metav1.GetControllerOf(p)
+		if !p.DeletionTimestamp.IsZero() && (owner == nil || targetUID == "" || owner.UID == targetUID) {
 			pending++
 		}
 	}

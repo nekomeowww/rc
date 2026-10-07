@@ -79,7 +79,7 @@ var _ = Describe("Worktree PVC watch", func() {
 		// Provisioning has no timer requeue; only the single PVC watch can wake
 		// the child here. No manual Reconcile call participates in this test.
 		child := new(corev1.PersistentVolumeClaim)
-		Expect(k8sClient.Get(ctx, key, child)).To(Succeed())
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: worktree.Namespace, Name: worktree.Status.VolumeClaimName}, child)).To(Succeed())
 		child.Status.Phase = corev1.ClaimBound
 		Expect(k8sClient.Status().Update(ctx, child)).To(Succeed())
 		Eventually(func(g Gomega) {

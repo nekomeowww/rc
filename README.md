@@ -287,11 +287,20 @@ The shortest isolated path is to explicitly request a temporary Workspace and a 
 rcctl -n development run -it --rm --repo rc --image ghcr.io/nekomeowww/rc/runner:latest --storage-class csi-hostpath-sc --agent-credential codex --cwd /workspace/rc -- codex
 ```
 
-`run` always creates a new Workspace. It retains that Workspace by default;
-`--rm` requests cleanup after all its processes terminate, with a five-minute
-grace period for reading results and logs. Generated Worktrees from `--repo`
-are owned by the new Workspace. Existing Worktrees selected with `--worktree`
-are never deleted by this cleanup. Use `--name` to choose the new Workspace name.
+`run` always creates a new Workspace. **Unnamed runs are temporary by default**:
+the Workspace and owned storage are deleted five minutes after all processes
+terminate. Add `--retain` to preserve a run for later `exec` or log inspection.
+Named runs retain by default; `--rm` explicitly makes a named run temporary.
+Use `--retain` to keep an unnamed run. `--rm=false` remains a compatible explicit retained form.
+
+Generated Worktrees from `--repo` are owned by the new Workspace. Existing
+Worktrees selected with `--worktree` are never deleted by this cleanup.
+`workspace create` remains retained by default. Long-lived Workspaces can opt
+into `--idle-timeout=1h --delete-after-suspended=168h`: the first stage
+stops compute; the second deletes owned storage after a full suspended grace
+period. Both stages default to disabled for CLI and direct API creation.
+See [Workspace lifetime decisions and migration](docs/adr/0007-workspace-lifetimes.md)
+for the behavior matrix, timer rules, and script migration.
 
 For a named development machine, create the Workspace first and mount the Worktree explicitly:
 

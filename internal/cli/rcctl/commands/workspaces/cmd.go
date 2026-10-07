@@ -73,7 +73,7 @@ type createOptions struct {
 	defaultCwd       string
 	serviceAccount   string
 	noServiceAccount bool
-	idleTimeout      time.Duration
+	lifecycle        command.LifecycleOptions
 	wait             bool
 	gpu              command.GPUOptions
 	npmRegistry      string
@@ -117,6 +117,9 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use: "create NAME", Short: "Create a persistent Workspace", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := options.lifecycle.Validate(); err != nil {
+				return err
+			}
 			osName, tolerations, err := options.placement.Resolve()
 			if err != nil {
 				return err
@@ -142,8 +145,11 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			workspace := &workspacesv1alpha1.Workspace{
 				ObjectMeta: metav1.ObjectMeta{Name: args[0], Namespace: namespace},
 				Spec: workspacesv1alpha1.WorkspaceSpec{
-					DesiredState: workspacesv1alpha1.WorkspaceDesiredStateRunning,
-					OS:           osName, NodeSelector: options.placement.NodeSelector, Tolerations: tolerations,
+					DesiredState:         workspacesv1alpha1.WorkspaceDesiredStateRunning,
+					RetentionPolicy:      workspacesv1alpha1.WorkspaceRetentionPolicyRetain,
+					IdleTimeout:          &metav1.Duration{Duration: options.lifecycle.IdleTimeout},
+					DeleteAfterSuspended: &metav1.Duration{Duration: options.lifecycle.DeleteAfterSuspended},
+					OS:                   osName, NodeSelector: options.placement.NodeSelector, Tolerations: tolerations,
 					Image: options.image, DefaultWorkingDirectory: options.defaultCwd,
 					ServiceAccountName: options.serviceAccount,
 					Resources:          resources,
@@ -188,9 +194,6 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			} else if osName == darwinOSName {
 				workspace.Spec.AutomountServiceAccountToken = boolPointer(false)
 			}
-			if options.idleTimeout > 0 {
-				workspace.Spec.IdleTimeout = &metav1.Duration{Duration: options.idleTimeout}
-			}
 			if osName != darwinOSName {
 				if err := volumeclaim.Preflight(cmd.Context(), clusterClient.Kube, workspace, volumeclaim.WorkspaceHome, 0); err != nil {
 					return err
@@ -220,7 +223,7 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	cmd.Flags().StringVar(&options.defaultCwd, "cwd", "", "Default process working directory")
 	cmd.Flags().StringVar(&options.serviceAccount, "service-account", "", "Same-namespace ServiceAccount")
 	cmd.Flags().BoolVar(&options.noServiceAccount, "no-service-account", false, "Disable ServiceAccount token mounting")
-	cmd.Flags().DurationVar(&options.idleTimeout, "idle-timeout", 0, "Suspend an idle named Workspace; zero disables")
+	options.lifecycle.AddFlags(cmd.Flags())
 	cmd.Flags().StringVar(&options.npmRegistry, "npm-registry", "", "npm registry URL added to Workspace environment defaults")
 	cmd.Flags().BoolVar(&options.wait, "wait", true, "Wait for the Workspace runtime")
 	options.gpu.AddFlags(cmd.Flags())
@@ -1067,6 +1070,13 @@ func workspaceListTable(workspaces []workspacesv1alpha1.Workspace, now time.Time
 	}
 }
 
+func suspendedAtDisplay(workspace *workspacesv1alpha1.Workspace) string {
+	if workspace.Status.SuspendedAt == nil {
+		return "-"
+	}
+	return clioutput.Timestamp(*workspace.Status.SuspendedAt)
+}
+
 func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.Field {
 	environment := "-"
 	if workspace.Spec.EnvironmentRef != nil {
@@ -1076,9 +1086,13 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 	if workspace.Spec.Storage != nil {
 		storage = workspaceStorageSummary(*workspace.Spec.Storage)
 	}
-	idleTimeout := "-"
+	idleTimeout := "disabled"
 	if workspace.Spec.IdleTimeout != nil {
 		idleTimeout = workspace.Spec.IdleTimeout.Duration.String()
+	}
+	deleteAfterSuspended := "disabled"
+	if workspace.Spec.DeleteAfterSuspended != nil {
+		deleteAfterSuspended = workspace.Spec.DeleteAfterSuspended.Duration.String()
 	}
 	automountToken := "default"
 	if workspace.Spec.AutomountServiceAccountToken != nil {
@@ -1112,6 +1126,8 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 		{Name: "Automount service account token", Value: automountToken},
 		{Name: "Runtime class", Value: runtimeClass},
 		{Name: "Idle timeout", Value: idleTimeout},
+		{Name: "Delete after suspended", Value: deleteAfterSuspended},
+		{Name: "Suspended at", Value: suspendedAtDisplay(workspace)},
 		{Name: "Mounts", Value: workspaceMountSummary(workspace.Spec.Mounts)},
 		{Name: "Agent credentials", Value: workspaceReferenceNames(workspace.Spec.AgentCredentialRefs)},
 		{Name: "Credentials", Value: workspaceReferenceNames(workspace.Spec.CredentialRefs)},

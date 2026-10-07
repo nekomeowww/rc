@@ -18,16 +18,20 @@ package workspaces
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/workspaceadmission"
 )
 
 const (
@@ -35,50 +39,189 @@ const (
 	temporaryWorkspaceStartTimeout = 15 * time.Minute
 )
 
-// WorkspaceRetentionReconciler deletes Workspaces whose retention policy has
-// expired independently of runtime topology health.
+// WorkspaceRetentionReconciler applies idle suspension and deletes Workspaces
+// whose retention policy has expired independently of runtime topology health.
 type WorkspaceRetentionReconciler struct {
 	client.Client
+	// APIReader bypasses the informer cache for destructive lifecycle decisions.
+	APIReader client.Reader
+	// Now allows deterministic deadline and restart tests; defaults to time.Now.
+	Now func() time.Time
 }
 
-// +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces,verbs=get;list;watch;delete
+// +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces,verbs=get;list;watch;update;patch;delete
+// +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaceexecs,verbs=get;list;watch
 
-func (r *WorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+// Reconcile advances command cleanup or the idle -> suspended -> deleted policy.
+// It reads process state independently of runtime dependencies, and persists
+// clocks in status so controller restarts do not reset the recovery window.
+func (r *WorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, returnedErr error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
 	workspace := new(workspacesv1alpha1.Workspace)
-	if err := r.Get(ctx, req.NamespacedName, workspace); err != nil {
+	if err := reader.Get(ctx, req.NamespacedName, workspace); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	if !workspace.DeletionTimestamp.IsZero() || !workspace.Spec.IsTemporary() {
+	if !workspace.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil
 	}
-	active, hasProcesses, lastCompletion, err := workspaceProcessState(ctx, r.Client, workspace)
+	// A crash leaves the fence closed. Re-evaluate policy on restart, and
+	// reopen on cancellation/failure. Once DELETE succeeds, Reopen is a no-op.
+	defer func() {
+		if workspace.Status.ExecutionAdmissionClosed {
+			gate := workspaceadmission.Gate{Client: r.Client, Reader: reader}
+			returnedErr = errors.Join(returnedErr, gate.Reopen(ctx, workspace))
+		}
+	}()
+	if !workspace.Spec.IsTemporary() && workspace.Spec.IdleTimeout == nil && workspace.Spec.DeleteAfterSuspended == nil && workspace.Status.SuspendedAt == nil {
+		return ctrl.Result{}, nil
+	}
+	active, hasProcesses, lastCompletion, err := workspaceProcessState(ctx, reader, workspace)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if !hasProcesses {
-		cleanupAt := workspace.CreationTimestamp.Add(temporaryWorkspaceStartTimeout)
-		if remaining := time.Until(cleanupAt); remaining > 0 {
-			return ctrl.Result{RequeueAfter: remaining}, nil
-		}
-	} else if active {
+	now := time.Now()
+	if r.Now != nil {
+		now = r.Now()
+	}
+	if err := r.recordActivity(ctx, workspace, lastCompletion, active, now); err != nil {
+		return ctrl.Result{}, err
+	}
+	if active {
 		return ctrl.Result{}, nil
-	} else if lastCompletion != nil {
-		cleanupAt := lastCompletion.Add(temporaryWorkspaceCleanupDelay)
-		if remaining := time.Until(cleanupAt); remaining > 0 {
-			return ctrl.Result{RequeueAfter: remaining}, nil
+	}
+	if workspace.Spec.IsTemporary() {
+		return r.reconcileTemporary(ctx, workspace, hasProcesses, lastCompletion, now)
+	}
+	if workspace.Spec.DesiredState == workspacesv1alpha1.WorkspaceDesiredStateSuspended {
+		return r.reconcileSuspended(ctx, workspace, now)
+	}
+	if workspace.Spec.IdleTimeout == nil || workspace.Spec.IdleTimeout.Duration <= 0 {
+		return ctrl.Result{}, nil
+	}
+	deadline := workspace.Status.LastActivityTime.Add(workspace.Spec.IdleTimeout.Duration)
+	if remaining := deadline.Sub(now); remaining > 0 {
+		return ctrl.Result{RequeueAfter: remaining}, nil
+	}
+	// Updating the version we read prevents a concurrent resume or policy edit
+	// from being overwritten. The runtime controller rechecks active executions
+	// before stopping compute.
+	workspace.Spec.DesiredState = workspacesv1alpha1.WorkspaceDesiredStateSuspended
+	if err := r.Update(ctx, workspace); err != nil {
+		return ctrl.Result{}, fmt.Errorf("suspend idle Workspace: %w", err)
+	}
+	logf.FromContext(ctx).Info("Requested idle Workspace suspension", "name", workspace.Name)
+	return ctrl.Result{}, nil
+}
+
+// recordActivity advances the durable clock, including when execution history
+// is later deleted. Attach is deliberately not activity: an active execution
+// already protects the Workspace, even when detached or without a terminal.
+func (r *WorkspaceRetentionReconciler) recordActivity(ctx context.Context, workspace *workspacesv1alpha1.Workspace, completion *metav1.Time, active bool, now time.Time) error {
+	before := workspace.DeepCopy()
+	activity := workspace.CreationTimestamp.Time
+	if previous := workspace.Status.LastActivityTime; previous != nil && previous.After(activity) {
+		activity = previous.Time
+	}
+	ready := meta.FindStatusCondition(workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady)
+	if ready != nil && ready.Status == metav1.ConditionTrue && ready.LastTransitionTime.After(activity) {
+		activity = ready.LastTransitionTime.Time
+	}
+	if completion != nil && completion.After(activity) {
+		activity = completion.Time
+	}
+	if workspace.Status.SuspendedAt != nil && (workspace.Spec.DesiredState != workspacesv1alpha1.WorkspaceDesiredStateSuspended || active) {
+		workspace.Status.SuspendedAt = nil
+		activity = now
+	}
+	if activity.IsZero() {
+		activity = now
+	}
+	stamp := metav1.NewTime(activity)
+	if workspace.Status.LastActivityTime.Equal(&stamp) && before.Status.SuspendedAt.Equal(workspace.Status.SuspendedAt) {
+		return nil
+	}
+	workspace.Status.LastActivityTime = &stamp
+	return r.Status().Patch(ctx, workspace, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
+}
+
+func (r *WorkspaceRetentionReconciler) reconcileTemporary(ctx context.Context, workspace *workspacesv1alpha1.Workspace, hasProcesses bool, completion *metav1.Time, now time.Time) (ctrl.Result, error) {
+	deadline := workspace.CreationTimestamp.Add(temporaryWorkspaceStartTimeout)
+	if hasProcesses {
+		// Fail closed until terminal status includes an authoritative completion
+		// time; creation/Ready timestamps cannot measure the terminal grace period.
+		if completion == nil {
+			return ctrl.Result{RequeueAfter: temporaryWorkspaceCleanupDelay}, nil
+		}
+		deadline = completion.Add(temporaryWorkspaceCleanupDelay)
+	}
+	if remaining := deadline.Sub(now); remaining > 0 {
+		return ctrl.Result{RequeueAfter: remaining}, nil
+	}
+	return ctrl.Result{}, r.deleteExpired(ctx, workspace)
+}
+
+func (r *WorkspaceRetentionReconciler) reconcileSuspended(ctx context.Context, workspace *workspacesv1alpha1.Workspace, now time.Time) (ctrl.Result, error) {
+	if workspace.Spec.DeleteAfterSuspended == nil || workspace.Spec.DeleteAfterSuspended.Duration <= 0 {
+		return ctrl.Result{}, nil
+	}
+	ready := meta.FindStatusCondition(workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != reasonSuspended || ready.ObservedGeneration != workspace.Generation {
+		return ctrl.Result{}, nil
+	}
+	if workspace.Status.SuspendedAt == nil {
+		// Legacy Suspended objects have no trustworthy timestamp: Ready=False may
+		// have started at Stopping or a failure. Grant the complete recovery window.
+		before := workspace.DeepCopy()
+		stamp := metav1.NewTime(now)
+		workspace.Status.SuspendedAt = &stamp
+		if err := r.Status().Patch(ctx, workspace, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+			return ctrl.Result{}, err
 		}
 	}
-	if err := r.Delete(ctx, workspace); err != nil && !apierrors.IsNotFound(err) {
-		return ctrl.Result{}, fmt.Errorf("delete completed temporary Workspace: %w", err)
+	deadline := workspace.Status.SuspendedAt.Add(workspace.Spec.DeleteAfterSuspended.Duration)
+	if remaining := deadline.Sub(now); remaining > 0 {
+		return ctrl.Result{RequeueAfter: remaining}, nil
 	}
-	logf.FromContext(ctx).Info("Requested temporary Workspace deletion", "name", workspace.Name)
+	return ctrl.Result{}, r.deleteExpired(ctx, workspace)
+}
 
-	return ctrl.Result{}, nil
+func (r *WorkspaceRetentionReconciler) deleteExpired(ctx context.Context, workspace *workspacesv1alpha1.Workspace) error {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	gate := workspaceadmission.Gate{Client: r.Client, Reader: reader}
+	if err := gate.Close(ctx, workspace); err != nil {
+		return err
+	}
+	// Close before scanning: no execution can now cross controller admission.
+	// A process may have appeared while recording activity. Refresh the list at
+	// the deletion boundary and fail closed on errors or any nonterminal phase.
+	active, _, _, stateErr := workspaceProcessState(ctx, reader, workspace)
+	if stateErr != nil {
+		return stateErr
+	}
+	if active {
+		return nil
+	}
+	// Keep the closed gate's version: reopening or a concurrent spec edit
+	// invalidates the closed snapshot, and admitted executions block the scan. UID also
+	// prevents deleting a replacement object with the same name.
+	err := r.Delete(ctx, workspace, client.Preconditions{UID: &workspace.UID, ResourceVersion: &workspace.ResourceVersion})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete expired Workspace: %w", err)
+	}
+	logf.FromContext(ctx).Info("Requested expired Workspace deletion", "name", workspace.Name)
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *WorkspaceRetentionReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.APIReader = mgr.GetAPIReader()
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&workspacesv1alpha1.Workspace{}).
 		Watches(&workspacesv1alpha1.WorkspaceExec{}, handler.EnqueueRequestsFromMapFunc(workspaceForProcess)).

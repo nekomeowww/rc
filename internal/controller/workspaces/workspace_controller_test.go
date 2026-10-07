@@ -418,12 +418,17 @@ func TestWorkspaceSuspendsAfterIdleTimeout(t *testing.T) {
 		Status:     workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, CompletedAt: &now},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, process, home).WithObjects(workspace, home, process).Build()
+	// Lifecycle decisions run independently; the runtime reconciler applies
+	// the resulting desired state and confirms the compute has stopped.
+	_, retentionErr := (&WorkspaceRetentionReconciler{Client: kubeClient}).Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
+	requirements.NoError(retentionErr)
 	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme}
 	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: workspace.Name, Namespace: workspace.Namespace}})
 	requirements.NoError(err, "reconcile idle Workspace")
 	persisted := new(workspacesv1alpha1.Workspace)
 	requirements.NoError(kubeClient.Get(context.Background(), client.ObjectKeyFromObject(workspace), persisted), "get idle Workspace")
 	requirements.Equal(workspacesv1alpha1.WorkspaceDesiredStateSuspended, persisted.Spec.DesiredState, "release runtime compute after the idle timeout")
+	requirements.NotNil(persisted.Status.SuspendedAt, "persist confirmed suspension separately from Ready=False")
 }
 
 func TestWorkspaceNeverMutatesUnownedRuntimePod(t *testing.T) {
@@ -515,4 +520,41 @@ func TestWorkspaceDeletionLeavesUnownedSameNamePod(t *testing.T) {
 	requirements.NoError(kubeClient.Get(ctx, key, new(corev1.Pod)), "retain unowned same-name Pod")
 	err = kubeClient.Get(ctx, key, new(workspacesv1alpha1.Workspace))
 	requirements.Error(err, "delete Workspace after cleaning only its owned resources")
+}
+
+// ROOT CAUSE: hasProcesses excluded never-used Workspaces from idle suspension.
+func TestWorkspaceSuspendsWithoutExecutions(t *testing.T) {
+	t.Parallel()
+	requirements := require.New(t)
+	scheme := runtime.NewScheme()
+	requirements.NoError(corev1.AddToScheme(scheme), "register core API types")
+	requirements.NoError(coordinationv1.AddToScheme(scheme), "register coordination API types")
+	requirements.NoError(rbacv1.AddToScheme(scheme), "register RBAC API types")
+	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme), "register Repository API types")
+	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
+	now := metav1.NewTime(time.Now().Add(-time.Second))
+	workspace := &workspacesv1alpha1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "idle", Namespace: testNamespace, UID: types.UID("workspace-uid")},
+		Spec: workspacesv1alpha1.WorkspaceSpec{
+			DesiredState: workspacesv1alpha1.WorkspaceDesiredStateRunning, Image: testRuntimeImage,
+			Storage:     &workspacesv1alpha1.PersistentStorageSpec{StorageClassName: testStorageClass, Size: resource.MustParse("20Gi")},
+			IdleTimeout: &metav1.Duration{Duration: time.Nanosecond},
+		},
+		Status: workspacesv1alpha1.WorkspaceStatus{RuntimeImage: testRuntimeImage, Conditions: []metav1.Condition{{
+			Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionTrue, Reason: testWorkspaceReadyReason, LastTransitionTime: now,
+		}}},
+	}
+	home := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: workspace.Name, Namespace: workspace.Namespace, OwnerReferences: []metav1.OwnerReference{{UID: workspace.UID, Controller: boolPointer(true)}}}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, home).WithObjects(workspace, home).Build()
+	// Lifecycle decisions run independently; the runtime reconciler applies
+	// the resulting desired state and confirms the compute has stopped.
+	_, retentionErr := (&WorkspaceRetentionReconciler{Client: kubeClient}).Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
+	requirements.NoError(retentionErr)
+	reconciler := &WorkspaceReconciler{Client: kubeClient, Scheme: scheme}
+	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: workspace.Name, Namespace: workspace.Namespace}})
+	requirements.NoError(err, "reconcile idle Workspace")
+	persisted := new(workspacesv1alpha1.Workspace)
+	requirements.NoError(kubeClient.Get(context.Background(), client.ObjectKeyFromObject(workspace), persisted), "get idle Workspace")
+	requirements.Equal(workspacesv1alpha1.WorkspaceDesiredStateSuspended, persisted.Spec.DesiredState, "release runtime compute after the idle timeout")
+	requirements.NotNil(persisted.Status.SuspendedAt, "persist confirmed suspension separately from Ready=False")
 }

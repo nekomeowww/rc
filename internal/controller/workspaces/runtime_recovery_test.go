@@ -292,10 +292,11 @@ func TestAbsentRuntimeKeepsLeaseUntilOrphanMountIsGone(t *testing.T) {
 }
 
 func TestTerminalRuntimeRecoveryPrecedesUnavailableDependencies(t *testing.T) {
+	const missingMount = "missing"
 	fixture := newRuntimeRecoveryFixture(t)
 	fixture.pod.Status.Phase = corev1.PodSucceeded
 	require.NoError(t, fixture.client.Status().Update(fixture.ctx, fixture.pod))
-	fixture.workspace.Spec.Mounts = []workspacesv1alpha1.WorkspaceMount{{Name: "missing", Path: "missing", WorktreeRef: &workspacesv1alpha1.LocalReference{Name: "missing-worktree"}}}
+	fixture.workspace.Spec.Mounts = []workspacesv1alpha1.WorkspaceMount{{Name: missingMount, Path: missingMount, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: "missing-worktree"}}}
 	require.NoError(t, fixture.client.Update(fixture.ctx, fixture.workspace))
 	fixture.reconcile(t)
 	require.Equal(t, "RuntimeCompleted", meta.FindStatusCondition(fixture.workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady).Reason)
@@ -452,7 +453,7 @@ func TestWorkspaceExecDoesNotStartWhenClaimedRuntimeTerminates(t *testing.T) {
 		},
 	})
 	processRuntime := &recordingProcessRuntime{}
-	reconciler := &WorkspaceExecReconciler{Client: claimClient, APIReader: fixture.client, Runtime: processRuntime}
+	reconciler := &WorkspaceExecReconciler{Client: claimClient, APIReader: fixture.client, Scheme: fixture.reconciler.Scheme, Runtime: processRuntime}
 	_, err := reconciler.Reconcile(fixture.ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(process)})
 	require.NoError(t, err)
 	require.NoError(t, fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(process), process))

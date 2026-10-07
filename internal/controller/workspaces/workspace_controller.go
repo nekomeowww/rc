@@ -74,6 +74,7 @@ const (
 	persistentVolumeClaimKind        = "PersistentVolumeClaim"
 	reasonTargetNotReady             = "TargetNotReady"
 	reasonStarting                   = "Starting"
+	reasonSuspended                  = "Suspended"
 	agentTypeCodex                   = "codex"
 	defaultCredentialName            = "default"
 	verbCreate                       = "create"
@@ -265,29 +266,13 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return result, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reason, message)
 	}
 
-	active, hasProcesses, lastCompletion, err := workspaceProcessState(ctx, r.Client, workspace)
+	active, _, _, err := workspaceProcessState(ctx, reader, workspace)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	desiredState := workspace.Spec.DesiredState
 	if desiredState == "" {
 		desiredState = workspacesv1alpha1.WorkspaceDesiredStateRunning
-	}
-	readyCondition := meta.FindStatusCondition(workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady)
-	if workspace.Spec.IdleTimeout != nil && workspace.Spec.IdleTimeout.Duration > 0 && hasProcesses && !active && desiredState == workspacesv1alpha1.WorkspaceDesiredStateRunning && readyCondition != nil && readyCondition.Status == metav1.ConditionTrue {
-		lastActivity := readyCondition.LastTransitionTime.Time
-		if lastCompletion != nil && lastCompletion.After(lastActivity) {
-			lastActivity = lastCompletion.Time
-		}
-		deadline := lastActivity.Add(workspace.Spec.IdleTimeout.Duration)
-		if time.Now().Before(deadline) {
-			return ctrl.Result{RequeueAfter: time.Until(deadline)}, nil
-		}
-		workspace.Spec.DesiredState = workspacesv1alpha1.WorkspaceDesiredStateSuspended
-		if err := r.Update(ctx, workspace); err != nil {
-			return ctrl.Result{}, fmt.Errorf("suspend idle Workspace: %w", err)
-		}
-		return ctrl.Result{Requeue: true}, nil
 	}
 	if desiredState == workspacesv1alpha1.WorkspaceDesiredStateSuspended {
 		return r.suspendWorkspace(ctx, workspace, resolved, active)
@@ -1101,7 +1086,7 @@ func runtimePlatformCondition(err error) (string, string) {
 	}
 }
 
-func workspaceProcessState(ctx context.Context, kubeClient client.Client, workspace *workspacesv1alpha1.Workspace) (bool, bool, *metav1.Time, error) {
+func workspaceProcessState(ctx context.Context, kubeClient client.Reader, workspace *workspacesv1alpha1.Workspace) (bool, bool, *metav1.Time, error) {
 	processes := new(workspacesv1alpha1.WorkspaceExecList)
 	if err := kubeClient.List(ctx, processes, client.InNamespace(workspace.Namespace)); err != nil {
 		return false, false, nil, fmt.Errorf("list Workspace processes: %w", err)
@@ -1250,6 +1235,25 @@ func (r *WorkspaceReconciler) setWorkspaceStatus(ctx context.Context, key types.
 	if err := r.Get(ctx, key, current); err != nil {
 		return fmt.Errorf("re-fetch Workspace before status update: %w", err)
 	}
+	// Ready=False transition times are shared by Stopping and Suspended. Track
+	// confirmed suspension separately; reset on resume or a new spec generation.
+	previousReady := meta.FindStatusCondition(current.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady)
+	if readyStatus == metav1.ConditionTrue && (previousReady == nil || previousReady.Status != metav1.ConditionTrue) {
+		stamp := metav1.Now()
+		current.Status.LastActivityTime = &stamp
+	}
+	if reason == reasonSuspended {
+		if current.Status.SuspendedAt == nil || previousReady == nil || previousReady.Reason != reasonSuspended || current.Status.ObservedGeneration != current.Generation {
+			stamp := metav1.Now()
+			current.Status.SuspendedAt = &stamp
+		}
+	} else if current.Spec.DesiredState != workspacesv1alpha1.WorkspaceDesiredStateSuspended {
+		if current.Status.SuspendedAt != nil {
+			stamp := metav1.Now()
+			current.Status.LastActivityTime = &stamp
+		}
+		current.Status.SuspendedAt = nil
+	}
 	current.Status.ObservedGeneration = current.Generation
 	if current.Spec.OS == rcplatform.Darwin {
 		current.Status.HomeVolumeClaimName = ""
@@ -1265,7 +1269,7 @@ func (r *WorkspaceReconciler) setWorkspaceStatus(ctx context.Context, key types.
 		}
 		if readyStatus == metav1.ConditionTrue || reason == reasonStarting {
 			current.Status.RuntimePodName = current.Name
-		} else if reason == "Suspended" {
+		} else if reason == reasonSuspended {
 			current.Status.RuntimePodName = ""
 		}
 		outdatedStatus := metav1.ConditionFalse

@@ -341,9 +341,18 @@ without mounting the PVC. The Workspace reports `HotMountFailed` until the user
 unmounts and remounts the Worktree. If cleanup fails, the controller keeps the
 write Lease and reports `HotMountCleanup`. An operator must clear a busy mount.
 
-Named Workspaces remain running unless stopped or configured with an idle
-timeout. Automatically created Workspaces suspend after their processes finish,
-but their resources and volumes remain until explicit cleanup.
+Retained Workspaces remain running unless stopped or configured with
+`spec.idleTimeout`.
+Zero-execution Workspaces can become idle too. The independent retention
+controller starts at creation and advances activity on Ready, resume, and the
+latest execution completion. Pending and running executions prevent suspension.
+
+`spec.deleteAfterSuspended` optionally deletes owned storage
+after confirmed suspension. It defaults to disabled. The persisted
+`status.suspendedAt` starts after compute has stopped, not when a stop was
+requested; restarting the controller does not extend the deadline. Legacy
+Suspended objects without this timestamp receive a complete grace period.
+See [lifetime decisions](../adr/0007-workspace-lifetimes.md).
 
 ### Runtime lifecycle actions
 
@@ -648,7 +657,7 @@ mount. A missing Workspace or mismatched requirement is an error.
 
 A new Workspace uses command options and caller environment pass-through.
 Creation flags (`--name`, `--image`, `--storage-class`, `--size`,
-`--service-account`, `--rm`) are exposed only by `run`. It never copies a default
+`--service-account`, `--rm`, `--retain`) are exposed only by `run`. It never copies a default
 Workspace's live home, mounts, credentials, or resource settings. A known agent
 may select the sole compatible AgentCredential in the namespace; several
 candidates require explicit `--agent-credential` flags.
@@ -658,8 +667,11 @@ Ready. `run --repo NAME` creates and mounts a generated Worktree from the
 Repository; `--worktree NAME` mounts an existing Worktree. Generated Worktrees
 are owned by the new Workspace, including retained Workspaces.
 
-`run` retains the Workspace by default. `run --rm` sets
-`DeleteAfterProcessesExit`. Once the WorkspaceExec exists, the retention
+Unnamed `run` defaults to `DeleteAfterProcessesExit`; `run --rm` makes that
+intent explicit for either named or unnamed targets. `run --retain` sets
+`Retain`. Named runs retain by default, with no deprecation warning. Explicit `--rm=false` also preserves the previous retained behavior.
+The CLI prints the effective policy on stderr before starting execution. Once
+the WorkspaceExec exists, the retention
 controller handles cleanup even if the client disconnects. It waits five
 minutes after all processes become terminal so clients can read results and
 logs, or fifteen minutes after creation if no WorkspaceExec was created.
@@ -695,7 +707,7 @@ rcctl workspace stop <name> [--force]
 rcctl workspace delete <name> [--force]
 rcctl workspace port-forward <name> <local-port>[:<remote-port>]
 
-rcctl run [options] [--rm] [--name <name>] [-it] [-d] -- <command> [args...]
+rcctl run [options] [--rm | --retain] [--name <name>] [-it] [-d] -- <command> [args...]
 rcctl exec [options] [-it] [-d] <workspace> -- <command> [args...]
 rcctl attach <id>
 rcctl ps [-a] [--workspace <name>] [--all-namespaces] [-o table|wide|json|yaml]
@@ -794,9 +806,28 @@ outside this feature.
 Finishing a process does not delete a retained Workspace, home volume,
 WorkspaceExec record, transcript, or automatically created Worktree. A Workspace
 with an idle timeout may suspend to release compute while retaining its state.
-The exception is a Workspace with the `DeleteAfterProcessesExit` retention
-policy, as created by `run --rm`: the retention controller deletes it after
-the terminal grace period, independently of the CLI connection.
+The opt-in `spec.deleteAfterSuspended` stage then deletes the
+Workspace and owned storage after the configured recovery interval. No snapshot
+is taken automatically. `Retain` disables command-completion cleanup, but does
+not override an explicit lifecycle policy.
+
+A Workspace with `DeleteAfterProcessesExit`, as created by an unnamed `run`
+or `run --rm`, is deleted after the terminal grace period, independently of the
+CLI connection; this command lifetime takes precedence over idle stages.
+The optional `spec.idleTimeout` and `spec.deleteAfterSuspended` clocks both
+remain disabled when omitted or zero. `run` and `workspace create` expose
+`--idle-timeout` and `--delete-after-suspended` directly; Environments do not
+provide lifecycle defaults. CLI and direct API creation use the same fields.
+
+Automatic deletion first closes a persistent execution admission fence on the
+Workspace, then scans active executions. Before every runtime start the
+WorkspaceExec controller must conditionally update that same Workspace status.
+Admission and fence closure therefore serialize on its resourceVersion, and
+DELETE keeps the closed fence's resourceVersion. ProcessClient rejects fenced
+or deleting owners early; direct API submissions are checked by the controller
+and fail with `WorkspaceAdmissionRejected` if closure won. Ownership references
+pin resource identity and cleanup but do not grant execution admission. See the
+[concurrency proof and alternatives](../adr/0007-workspace-lifetimes.md#execution-admission-and-automatic-deletion).
 
 Deleting a Workspace:
 
@@ -829,7 +860,7 @@ Workspace API writes cannot grant runtime access to a deleting Worktree. Direct
 PVC deletion follows the same fence and cleanup path; after storage disappears,
 the live Worktree reports `VolumeDeleted` and never silently reclones data.
 
-See [the ownership decision](../adr/0005-workspace-worktree-ownership.md) for
+See [the ownership decision](../adr/0006-workspace-worktree-ownership.md) for
 foreground GC ordering, the admission protocol, shared mounts, and migration details.
 
 The shared namespace `rc-workspace` Service Account and RoleBinding outlive

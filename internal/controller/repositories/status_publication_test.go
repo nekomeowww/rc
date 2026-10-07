@@ -21,7 +21,7 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
+	"github.com/nekomeowww/rc/internal/holdset"
 	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
@@ -196,11 +196,14 @@ func TestWorktreeDeletionBlockedNamesBlockers(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: ownershipWorkspaceName, Namespace: ownershipNamespace, UID: ownershipWorkspaceUID},
 		Spec:       workspacesv1alpha1.WorkspaceSpec{Mounts: []workspacesv1alpha1.WorkspaceMount{{Name: ownershipWorktreeName, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: ownershipWorktreeName}}}},
 	}
-	writer := "other-writer-uid"
+	// A legacy Lease from an older controller still blocks after the holders drain.
+	legacyWriter := "legacy-writer-uid"
 	lease := &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{Name: worktreeclaim.LeaseName(worktree), Namespace: ownershipNamespace, Labels: map[string]string{worktreeclaim.HolderLabel: "busy-exec"}},
-		Spec:       coordinationv1.LeaseSpec{HolderIdentity: &writer},
+		ObjectMeta: metav1.ObjectMeta{Name: worktreeownership.LegacyWriteLeaseName(worktree), Namespace: ownershipNamespace, Labels: map[string]string{worktreeownership.LegacyHolderLabel: "legacy-exec"}},
+		Spec:       coordinationv1.LeaseSpec{HolderIdentity: &legacyWriter},
 	}
+	writer := holdset.Holder{Kind: worktreeownership.KindWorktreeExec, Name: "busy-exec", UID: "busy-exec-uid", Mode: worktreeownership.Write}
+	require.NoError(t, holdset.Encode(worktree, worktreeownership.HoldersAnnotation, holdset.State{Holders: []holdset.Holder{writer}}))
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "reader", Namespace: ownershipNamespace},
 		Spec:       corev1.PodSpec{Volumes: []corev1.Volume{{Name: statusVolumeName, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim.Name}}}}},
@@ -225,8 +228,11 @@ func TestWorktreeDeletionBlockedNamesBlockers(t *testing.T) {
 		message string
 		unblock func()
 	}{
+		{repositoriesv1alpha1.DeletionBlockedReasonWaitingForWriter, "WorktreeExec/busy-exec", func() {
+			require.NoError(t, (worktreeownership.MountAccess{Client: kube, Reader: kube}).Release(ctx, request.NamespacedName, worktree.UID, writer.Key()))
+		}},
 		{repositoriesv1alpha1.DeletionBlockedReasonWaitingForMounts, ownershipWorkspaceName, func() { require.NoError(t, kube.Delete(ctx, workspace)) }},
-		{repositoriesv1alpha1.DeletionBlockedReasonWaitingForWriter, "busy-exec", func() { require.NoError(t, kube.Delete(ctx, lease)) }},
+		{repositoriesv1alpha1.DeletionBlockedReasonWaitingForWriter, "legacy-exec", func() { require.NoError(t, kube.Delete(ctx, lease)) }},
 		{repositoriesv1alpha1.DeletionBlockedReasonWaitingForPods, pod.Name, func() { require.NoError(t, kube.Delete(ctx, pod)) }},
 	}
 	for _, step := range steps {

@@ -26,10 +26,10 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/holdset"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
 	"github.com/nekomeowww/rc/internal/volumeclaim"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
 	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
@@ -435,7 +435,7 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(persisted.Finalizers).To(ContainElement(worktreeDeletionFinalizer))
 	})
 
-	It("keeps deletion protected while an active writer holds the Lease", func() {
+	It("keeps deletion protected while an active writer holds the Worktree", func() {
 		scheme := runtime.NewScheme()
 		Expect(repositoriesv1alpha1.AddToScheme(scheme)).To(Succeed())
 		Expect(workspacesv1alpha1.AddToScheme(scheme)).To(Succeed())
@@ -444,12 +444,9 @@ var _ = Describe("Worktree Controller", func() {
 		worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{
 			Name: "delete-in-use", Namespace: testNamespace, UID: testWorktreeUID, DeletionTimestamp: &now, Finalizers: []string{worktreeDeletionFinalizer},
 		}}
-		holder := testWorkspaceUID
-		lease := &coordinationv1.Lease{
-			ObjectMeta: metav1.ObjectMeta{Name: worktreeclaim.LeaseName(worktree), Namespace: worktree.Namespace, Labels: map[string]string{worktreeclaim.HolderLabel: testDeveloperName}},
-			Spec:       coordinationv1.LeaseSpec{HolderIdentity: &holder},
-		}
-		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree, lease).Build()
+		writer := holdset.Holder{Kind: worktreeownership.KindWorkspace, Name: testDeveloperName, UID: testWorkspaceUID, Mode: worktreeownership.Write}
+		Expect(holdset.Encode(worktree, worktreeownership.HoldersAnnotation, holdset.State{Holders: []holdset.Holder{writer}})).To(Succeed())
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()
 		reconciler := &WorktreeReconciler{Client: client, APIReader: client, Scheme: scheme, RunnerImage: testRunnerImage}
 
 		result, err := reconciler.reconcileDelete(context.Background(), worktree)
@@ -461,7 +458,7 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(persisted.Finalizers).To(ContainElement(worktreeDeletionFinalizer))
 	})
 
-	It("completes protected deletion after acquiring the exclusive Lease", func() {
+	It("completes protected deletion once the closed Worktree has no holders", func() {
 		scheme := runtime.NewScheme()
 		Expect(corev1.AddToScheme(scheme)).To(Succeed())
 		Expect(repositoriesv1alpha1.AddToScheme(scheme)).To(Succeed())
@@ -487,7 +484,7 @@ var _ = Describe("Worktree Controller", func() {
 		}
 	})
 
-	It("keeps deletion protected when a Workspace mount races the deletion claim", func() {
+	It("keeps deletion protected when a Workspace mount races the deletion fence", func() {
 		scheme := runtime.NewScheme()
 		Expect(repositoriesv1alpha1.AddToScheme(scheme)).To(Succeed())
 		Expect(workspacesv1alpha1.AddToScheme(scheme)).To(Succeed())
@@ -515,7 +512,7 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(persisted.Finalizers).To(ContainElement(worktreeDeletionFinalizer))
 	})
 
-	It("maps Workspace and foreign Lease changes back to the referenced Worktree", func() {
+	It("maps Workspace changes back to the referenced Worktree", func() {
 		scheme := runtime.NewScheme()
 		Expect(repositoriesv1alpha1.AddToScheme(scheme)).To(Succeed())
 		worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{
@@ -529,13 +526,9 @@ var _ = Describe("Worktree Controller", func() {
 				Name: testMountName, Path: testMountName, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: worktree.Name},
 			}}},
 		}
-		lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
-			Name: worktreeclaim.LeaseName(worktree), Namespace: worktree.Namespace,
-		}}
 		request := reconcile.Request{NamespacedName: types.NamespacedName{Name: worktree.Name, Namespace: worktree.Namespace}}
 
 		Expect(reconciler.worktreesForWorkspace(context.Background(), workspace)).To(ConsistOf(request))
-		Expect(reconciler.worktreesForLease(context.Background(), lease)).To(ConsistOf(request))
 	})
 })
 
@@ -545,16 +538,17 @@ type workspaceMountRaceClient struct {
 	injected  bool
 }
 
-func (c *workspaceMountRaceClient) Create(ctx context.Context, object client.Object, options ...client.CreateOption) error {
-	if err := c.Client.Create(ctx, object, options...); err != nil {
+// Patch injects a Workspace mount right after the deletion fence commits.
+func (c *workspaceMountRaceClient) Patch(ctx context.Context, object client.Object, patch client.Patch, options ...client.PatchOption) error {
+	if err := c.Client.Patch(ctx, object, patch, options...); err != nil {
 		return err
 	}
-	if _, ok := object.(*coordinationv1.Lease); !ok || c.injected {
+	if _, ok := object.(*repositoriesv1alpha1.Worktree); !ok || c.injected {
 		return nil
 	}
 	c.injected = true
 
-	return c.Client.Create(ctx, c.workspace.DeepCopy())
+	return c.Create(ctx, c.workspace.DeepCopy())
 }
 
 func runGitCommand(directory string, arguments ...string) {

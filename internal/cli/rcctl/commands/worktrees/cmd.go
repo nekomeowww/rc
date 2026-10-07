@@ -2,15 +2,12 @@ package worktrees
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
-	coordinationv1 "k8s.io/api/coordination/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -20,9 +17,9 @@ import (
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/cluster"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/command"
+	"github.com/nekomeowww/rc/internal/holdset"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	repositoryservice "github.com/nekomeowww/rc/internal/repositories"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
 	"github.com/nekomeowww/rc/internal/worktreeownership"
 	clioutput "github.com/nekomeowww/rc/pkg/output"
 )
@@ -72,10 +69,21 @@ func newDeleteCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := runWorktreeDelete(cmd.Context(), clusterClient.Kube, namespace, args[0]); err != nil {
+			holders, err := runWorktreeDelete(cmd.Context(), clusterClient.Kube, namespace, args[0])
+			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(cmd.ErrOrStderr(), "worktree.repositories.rc.ayaka.io/%s deletion requested\n", args[0])
+			if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "worktree.repositories.rc.ayaka.io/%s deletion requested\n", args[0]); err != nil {
+				return err
+			}
+			if len(holders) == 0 {
+				return nil
+			}
+			names := make([]string, 0, len(holders))
+			for _, holder := range holders {
+				names = append(names, holder.Kind+"/"+holder.Name)
+			}
+			_, err = fmt.Fprintf(cmd.ErrOrStderr(), "deletion waits for %s to release it; check the DeletionBlocked condition with: kubectl get worktree %s -o wide\n", strings.Join(names, ", "), args[0])
 			return err
 		},
 	}
@@ -83,59 +91,40 @@ func newDeleteCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	return cmd
 }
 
-func runWorktreeDelete(ctx context.Context, kubeClient client.Client, namespace string, name string) error {
+// runWorktreeDelete refuses while a Workspace spec mounts the Worktree, then
+// requests deletion. It takes no reservation: the controller closes the
+// Worktree's admission fence and waits for admitted holders, publishing what
+// it waits for as DeletionBlocked. It returns the holders observed before
+// the DELETE so the caller can say what deletion will wait for.
+func runWorktreeDelete(ctx context.Context, kubeClient client.Client, namespace string, name string) ([]holdset.Holder, error) {
 	worktree := new(repositoriesv1alpha1.Worktree)
 	key := client.ObjectKey{Namespace: namespace, Name: name}
 	if err := kubeClient.Get(ctx, key, worktree); err != nil {
-		return fmt.Errorf("get Worktree %q: %w", name, err)
+		return nil, fmt.Errorf("get Worktree %q: %w", name, err)
 	}
-	if !controllerutil.ContainsFinalizer(worktree, worktreeclaim.DeletionFinalizer) {
+	if !controllerutil.ContainsFinalizer(worktree, worktreeownership.DeletionFinalizer) {
 		before := worktree.DeepCopy()
-		controllerutil.AddFinalizer(worktree, worktreeclaim.DeletionFinalizer)
-		if err := kubeClient.Patch(ctx, worktree, client.MergeFrom(before)); err != nil {
-			return fmt.Errorf("protect Worktree %q deletion: %w", name, err)
+		controllerutil.AddFinalizer(worktree, worktreeownership.DeletionFinalizer)
+		if err := kubeClient.Patch(ctx, worktree, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+			return nil, fmt.Errorf("protect Worktree %q deletion: %w", name, err)
 		}
 	}
 
-	blockers, err := worktreeownership.ReferenceBlockers(ctx, kubeClient, namespace, name)
+	blockers, err := worktreeownership.ListReferenceBlockers(ctx, kubeClient, namespace, name)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(blockers) > 0 {
-		return mountedWorktreeError(name, blockers)
+		return nil, mountedWorktreeError(name, blockers)
 	}
-
-	deletionLease := worktreeclaim.DeletionLease(worktree)
-	createdDeletionLease := false
-	if err := kubeClient.Create(ctx, deletionLease); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("acquire Worktree %q deletion Lease: %w", name, err)
-		}
-		current := new(coordinationv1.Lease)
-		if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(deletionLease), current); err != nil {
-			return fmt.Errorf("get Worktree %q write Lease: %w", name, err)
-		}
-		if !worktreeclaim.IsDeletionHolder(worktree, current) {
-			return fmt.Errorf("worktree %q has an active write Lease held by %q; wait for its runtime or exec to finish", name, current.Labels[worktreeclaim.HolderLabel])
-		}
-		deletionLease = current
-	} else {
-		createdDeletionLease = true
-	}
-
-	blockers, err = worktreeownership.ReferenceBlockers(ctx, kubeClient, namespace, name)
+	state, err := worktreeownership.Decode(worktree)
 	if err != nil {
-		return releaseDeletionLease(ctx, kubeClient, deletionLease, createdDeletionLease, err)
+		return nil, err
 	}
-	if len(blockers) > 0 {
-		return releaseDeletionLease(ctx, kubeClient, deletionLease, createdDeletionLease, mountedWorktreeError(name, blockers))
+	if err := kubeClient.Delete(ctx, worktree, client.Preconditions{UID: &worktree.UID}); err != nil {
+		return nil, fmt.Errorf("delete Worktree %q: %w", name, err)
 	}
-
-	if err := kubeClient.Delete(ctx, worktree); err != nil {
-		return releaseDeletionLease(ctx, kubeClient, deletionLease, createdDeletionLease, fmt.Errorf("delete Worktree %q: %w", name, err))
-	}
-
-	return nil
+	return state.Holders, nil
 }
 
 func mountedWorktreeError(name string, blockers []string) error {
@@ -143,16 +132,6 @@ func mountedWorktreeError(name string, blockers []string) error {
 		return fmt.Errorf("worktree %q is mounted by Workspace %q; unmount it first", name, blockers[0])
 	}
 	return fmt.Errorf("worktree %q is mounted by Workspaces %q; unmount them first", name, strings.Join(blockers, `", "`))
-}
-
-func releaseDeletionLease(ctx context.Context, kubeClient client.Client, lease *coordinationv1.Lease, created bool, cause error) error {
-	if !created {
-		return cause
-	}
-	if err := kubeClient.Delete(ctx, lease); err != nil && !apierrors.IsNotFound(err) {
-		return errors.Join(cause, fmt.Errorf("release Worktree deletion Lease: %w", err))
-	}
-	return cause
 }
 
 func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {

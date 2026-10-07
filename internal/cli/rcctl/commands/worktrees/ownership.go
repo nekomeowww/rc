@@ -13,7 +13,6 @@ import (
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/cluster"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
 	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
@@ -48,7 +47,7 @@ func newOwnershipCommand(flags *kubeconfig.Flags, adopt bool) *cobra.Command {
 }
 
 // changeWorktreeOwnership changes metadata only, preserving checkout, mounts,
-// PVC, and writer Leases. Optimistic locking rejects concurrent deletion or
+// PVC, and holders. Optimistic locking rejects concurrent deletion or
 // ownership changes rather than overwriting a newer object.
 func changeWorktreeOwnership(ctx context.Context, kube client.Client, namespace, name, workspaceName string, adopt bool) error {
 	worktree := new(repositoriesv1alpha1.Worktree)
@@ -77,7 +76,7 @@ func changeWorktreeOwnership(ctx context.Context, kube client.Client, namespace,
 			return err
 		}
 	}
-	controllerutil.AddFinalizer(worktree, worktreeclaim.DeletionFinalizer)
+	controllerutil.AddFinalizer(worktree, worktreeownership.DeletionFinalizer)
 	return kube.Patch(ctx, worktree, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 }
 

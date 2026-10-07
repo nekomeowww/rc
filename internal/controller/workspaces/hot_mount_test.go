@@ -20,7 +20,7 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
+	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
 func TestHotWorktreeTopologyIgnoresReadyWorktreeMounts(t *testing.T) {
@@ -167,9 +167,12 @@ func TestHotWorktreeMountKeepsRuntimeAndActiveProcess(t *testing.T) {
 	assert.Equal(t, worktree.Name, helper.Spec.Volumes[0].PersistentVolumeClaim.ClaimName)
 	assert.True(t, *helper.Spec.Containers[0].SecurityContext.Privileged)
 	assert.Equal(t, corev1.MountPropagationBidirectional, *helper.Spec.Containers[0].VolumeMounts[1].MountPropagation)
-	lease := new(coordinationv1.Lease)
-	require.NoError(t, kubeClient.Get(ctx, client.ObjectKey{Name: worktreeclaim.LeaseName(worktree), Namespace: workspace.Namespace}, lease))
-	assert.Equal(t, string(workspace.UID), *lease.Spec.HolderIdentity)
+	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(worktree), worktree))
+	state, err := worktreeownership.Decode(worktree)
+	require.NoError(t, err)
+	require.Len(t, state.Holders, 1)
+	assert.Equal(t, workspace.UID, state.Holders[0].UID)
+	assert.Equal(t, worktreeownership.Write, state.Holders[0].Mode, "a writable hot mount holds the Worktree writer")
 	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(process), process))
 	assert.Equal(t, workspacesv1alpha1.WorkspaceExecPhaseRunning, process.Status.Phase)
 

@@ -29,7 +29,6 @@ import (
 	"strings"
 	"time"
 
-	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -52,38 +51,41 @@ import (
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
 	"github.com/nekomeowww/rc/internal/volumeclaim"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
 	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
 const (
-	reasonWorktreeDeleting           = "WorktreeDeleting"
-	defaultWorkspaceServiceAccount   = "rc-workspace"
-	workspaceTopologyAnnotation      = "workspaces.rc.ayaka.io/topology"
-	workspaceManagedByLabel          = "workspaces.rc.ayaka.io/workspace"
-	workspaceRootMountPath           = "/workspace"
-	workspaceDependencyRequeue       = 2 * time.Second
-	workspaceFinalizer               = worktreeownership.WorkspaceCleanupFinalizer
-	workspaceImageAnnotation         = "workspaces.rc.ayaka.io/runtime-image"
-	workspaceRevisionAnnotation      = "workspaces.rc.ayaka.io/source-revision"
-	workspaceWriteClaimsAnnotation   = "workspaces.rc.ayaka.io/write-claims"
-	workspaceRuntimePolicyAnnotation = "workspaces.rc.ayaka.io/runtime-policy"
-	workspaceRuntimePolicyVersion    = "platform-v3"
-	repositoryRootMountPath          = "/repository"
-	runtimeContainerName             = "rc-kube"
-	persistentVolumeClaimKind        = "PersistentVolumeClaim"
-	reasonTargetNotReady             = "TargetNotReady"
-	reasonStarting                   = "Starting"
-	reasonSuspended                  = "Suspended"
-	agentTypeCodex                   = "codex"
-	defaultCredentialName            = "default"
-	verbCreate                       = "create"
-	verbDelete                       = "delete"
-	verbGet                          = "get"
-	verbList                         = "list"
-	verbPatch                        = "patch"
-	verbUpdate                       = "update"
-	verbWatch                        = "watch"
+	reasonWorktreeDeleting         = "WorktreeDeleting"
+	defaultWorkspaceServiceAccount = "rc-workspace"
+	workspaceTopologyAnnotation    = "workspaces.rc.ayaka.io/topology"
+	workspaceManagedByLabel        = "workspaces.rc.ayaka.io/workspace"
+	workspaceRootMountPath         = "/workspace"
+	workspaceDependencyRequeue     = 2 * time.Second
+	workspaceFinalizer             = worktreeownership.WorkspaceCleanupFinalizer
+	workspaceImageAnnotation       = "workspaces.rc.ayaka.io/runtime-image"
+	workspaceRevisionAnnotation    = "workspaces.rc.ayaka.io/source-revision"
+	// workspaceWriteWorktreesAnnotation lists the Worktrees a runtime Pod
+	// writes; Pods created before the hold set list legacy Lease names under
+	// legacyWorkspaceWriteClaimsAnnotation instead.
+	workspaceWriteWorktreesAnnotation    = "workspaces.rc.ayaka.io/write-worktrees"
+	legacyWorkspaceWriteClaimsAnnotation = "workspaces.rc.ayaka.io/write-claims"
+	workspaceRuntimePolicyAnnotation     = "workspaces.rc.ayaka.io/runtime-policy"
+	workspaceRuntimePolicyVersion        = "platform-v3"
+	repositoryRootMountPath              = "/repository"
+	runtimeContainerName                 = "rc-kube"
+	persistentVolumeClaimKind            = "PersistentVolumeClaim"
+	reasonTargetNotReady                 = "TargetNotReady"
+	reasonStarting                       = "Starting"
+	reasonSuspended                      = "Suspended"
+	agentTypeCodex                       = "codex"
+	defaultCredentialName                = "default"
+	verbCreate                           = "create"
+	verbDelete                           = "delete"
+	verbGet                              = "get"
+	verbList                             = "list"
+	verbPatch                            = "patch"
+	verbUpdate                           = "update"
+	verbWatch                            = "watch"
 )
 
 type resolvedWorkspace struct {
@@ -126,9 +128,9 @@ type workspaceInitializer struct {
 	action lifecycle.Action
 }
 
+// workspaceWriteClaim names a Worktree that the runtime mounts writable.
 type workspaceWriteClaim struct {
-	leaseName string
-	worktree  string
+	worktree string
 }
 
 type hotWorktreeMount struct {
@@ -318,12 +320,17 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if err := r.releaseClaims(ctx, workspace); err != nil {
 			return ctrl.Result{}, err
 		}
-		acquired, claimMessage, err := r.acquireWriteClaims(ctx, workspace, resolved.writeClaims)
-		if err != nil {
+		if reason, message, err := r.admitWorktreeMounts(ctx, workspace, resolved.worktreeMounts, worktreeModes(resolved)); err != nil {
 			return ctrl.Result{}, err
-		}
-		if !acquired {
-			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "WorktreeInUse", claimMessage)
+		} else if reason != "" {
+			// A writer conflict must not keep partial holders that block others;
+			// nothing was created from them.
+			if reason == reasonWorktreeInUse {
+				if err := r.releaseWorktreeMounts(ctx, workspace, nil); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reason, message)
 		}
 
 		gate := repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}
@@ -346,11 +353,6 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				}
 				return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "RepositoryNotReady", "Repository is busy or not ready for mounting")
 			}
-		}
-		if admitted, err := r.admitWorktreeMounts(ctx, workspace, resolved.worktreeMounts); err != nil {
-			return ctrl.Result{}, err
-		} else if !admitted {
-			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reasonWorktreeDeleting, "Worktree mount admission is closed")
 		}
 
 		pod, err = workspaceRuntimePod(workspace, resolved)
@@ -386,29 +388,36 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	currentClaims := resolved.writeClaims
 	if pod.Annotations[workspaceTopologyAnnotation] != expectedTopology {
-		currentClaims, err = workspacePodWriteClaims(pod)
+		currentClaims, err = r.workspacePodWriteClaims(ctx, pod)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 	}
-	acquired, claimMessage, err := r.acquireWriteClaims(ctx, workspace, currentClaims)
+	lost, claimReason, claimMessage, err := r.verifyWriteClaims(ctx, workspace, pod, currentClaims)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if !acquired {
+	if lost {
+		// A Worktree this runtime already writes is held by someone else: stop
+		// writing before anything else. This cannot happen through admission.
 		if resolved.runtime.OS() == corev1.Linux {
 			if removed, err := r.removeHotMounts(ctx, workspace); err != nil {
 				return ctrl.Result{}, err
 			} else if !removed {
-				return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "WorktreeInUse", claimMessage)
+				return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, claimReason, claimMessage)
 			}
 		}
 		if pod.DeletionTimestamp == nil {
 			if err := r.Delete(ctx, pod); err != nil && !errors.IsNotFound(err) {
-				return ctrl.Result{}, fmt.Errorf("stop Workspace runtime after losing Worktree write Lease: %w", err)
+				return ctrl.Result{}, fmt.Errorf("stop Workspace runtime after losing its Worktree writer: %w", err)
 			}
 		}
-		return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "WorktreeInUse", claimMessage)
+		return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, claimReason, claimMessage)
+	}
+	if claimReason != "" {
+		// A newly requested writable mount conflicts; the runtime keeps running
+		// and the mount starts once the other writer releases the Worktree.
+		return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, claimReason, claimMessage)
 	}
 	if pod.Annotations[workspaceTopologyAnnotation] != expectedTopology {
 		if active {
@@ -432,10 +441,10 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reasonStarting, "Workspace runtime Pod is starting")
 	}
 	if resolved.runtime.OS() == corev1.Linux {
-		if admitted, err := r.admitWorktreeMounts(ctx, workspace, resolved.worktreeMounts); err != nil {
+		if reason, message, err := r.admitWorktreeMounts(ctx, workspace, resolved.worktreeMounts, worktreeModes(resolved)); err != nil {
 			return ctrl.Result{}, err
-		} else if !admitted {
-			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reasonWorktreeDeleting, "Worktree mount admission is closed")
+		} else if reason != "" {
+			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reason, message)
 		}
 
 		ready, reason, message, err := r.reconcileHotMounts(ctx, workspace, pod, resolved.hotMounts, active)
@@ -445,11 +454,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if !ready {
 			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reason, message)
 		}
-		if err := r.releaseOldWorktreeMounts(ctx, workspace, pod, resolved.worktreeMounts); err != nil {
-			return ctrl.Result{}, err
-		}
-
-		if err := r.releaseWriteClaims(ctx, workspace, resolved.writeClaims); err != nil {
+		if err := r.releaseOldWorktreeMounts(ctx, workspace, pod, worktreeModes(resolved)); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -572,73 +577,9 @@ func namedList(names []string) string {
 	return fmt.Sprintf("%s and %d more", strings.Join(sorted[:shown], ", "), len(sorted)-shown)
 }
 
-func (r *WorkspaceReconciler) acquireWriteClaims(ctx context.Context, workspace *workspacesv1alpha1.Workspace, claims []workspaceWriteClaim) (bool, string, error) {
-	ordered := append([]workspaceWriteClaim(nil), claims...)
-	slices.SortFunc(ordered, func(left, right workspaceWriteClaim) int { return strings.Compare(left.leaseName, right.leaseName) })
-	created := make([]*coordinationv1.Lease, 0, len(ordered))
-	for _, claim := range ordered {
-		holder := string(workspace.UID)
-		lease := &coordinationv1.Lease{
-			ObjectMeta: metav1.ObjectMeta{Name: claim.leaseName, Namespace: workspace.Namespace, Labels: map[string]string{worktreeclaim.HolderLabel: workspace.Name}},
-			Spec:       coordinationv1.LeaseSpec{HolderIdentity: &holder},
-		}
-		if err := controllerutil.SetControllerReference(workspace, lease, r.Scheme); err != nil {
-			return false, "", fmt.Errorf("set Workspace owner on Worktree write Lease: %w", err)
-		}
-		if err := r.Create(ctx, lease); err == nil {
-			created = append(created, lease)
-			continue
-		} else if !errors.IsAlreadyExists(err) {
-			return false, "", fmt.Errorf("create Worktree write Lease: %w", err)
-		}
-		current := new(coordinationv1.Lease)
-		if err := r.Get(ctx, types.NamespacedName{Name: claim.leaseName, Namespace: workspace.Namespace}, current); err != nil {
-			return false, "", fmt.Errorf("get Worktree write Lease: %w", err)
-		}
-		if current.Spec.HolderIdentity != nil && *current.Spec.HolderIdentity == string(workspace.UID) {
-			continue
-		}
-		for _, acquired := range created {
-			_ = r.Delete(ctx, acquired)
-		}
-		worktree := claim.worktree
-		if worktree == "" {
-			worktree = claim.leaseName
-		}
-		return false, fmt.Sprintf("Worktree %s is held by another active writer", worktree), nil
-	}
-
-	return true, "", nil
-}
-
-func (r *WorkspaceReconciler) releaseWriteClaims(ctx context.Context, workspace *workspacesv1alpha1.Workspace, keep []workspaceWriteClaim) error {
-	kept := make(map[string]struct{}, len(keep))
-	for _, claim := range keep {
-		kept[claim.leaseName] = struct{}{}
-	}
-	leases := new(coordinationv1.LeaseList)
-	if err := r.List(ctx, leases, client.InNamespace(workspace.Namespace), client.MatchingLabels{worktreeclaim.HolderLabel: workspace.Name}); err != nil {
-		return fmt.Errorf("list Workspace Worktree write Leases: %w", err)
-	}
-	for index := range leases.Items {
-		lease := &leases.Items[index]
-		if _, exists := kept[lease.Name]; exists {
-			continue
-		}
-		if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != string(workspace.UID) {
-			continue
-		}
-		if err := r.Delete(ctx, lease); err != nil && !errors.IsNotFound(err) {
-			return fmt.Errorf("release Worktree write Lease: %w", err)
-		}
-	}
-
-	return nil
-}
-
 // releaseClaims keeps reservations while a runtime Pod exists. Once it and all
-// hot-mount helpers are absent, the Workspace releases parent mounts and Worktree
-// write claims. Helper cleanup is checked before relinquishing the writer Lease.
+// hot-mount helpers are absent, the Workspace releases parent mounts and every
+// Worktree holder. Helper cleanup is checked before relinquishing a writer.
 func (r *WorkspaceReconciler) releaseClaims(ctx context.Context, workspace *workspacesv1alpha1.Workspace) error {
 	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(workspace), new(corev1.Pod)); err == nil {
 		return nil
@@ -657,11 +598,7 @@ func (r *WorkspaceReconciler) releaseClaims(ctx context.Context, workspace *work
 		return err
 	}
 
-	if err := r.releaseRepositoryMounts(ctx, workspace); err != nil {
-		return err
-	}
-
-	return r.releaseWriteClaims(ctx, workspace, nil)
+	return r.releaseRepositoryMounts(ctx, workspace)
 }
 
 // releaseRepositoryMounts drops this Workspace's mount reservations from every
@@ -972,7 +909,7 @@ func (r *WorkspaceReconciler) resolveWorkspaceMount(ctx context.Context, namespa
 			}
 		}
 		if !mount.ReadOnly {
-			claim := &workspaceWriteClaim{leaseName: worktreeclaim.LeaseName(worktree), worktree: worktree.Name}
+			claim := &workspaceWriteClaim{worktree: worktree.Name}
 			return volume, volumeMount, claim, initializer, "", "", nil
 		}
 
@@ -1044,13 +981,13 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 	if err != nil {
 		return nil, err
 	}
-	writeClaimNames := make([]string, 0, len(resolved.writeClaims))
+	writeWorktrees := make([]string, 0, len(resolved.writeClaims))
 	for _, claim := range resolved.writeClaims {
-		writeClaimNames = append(writeClaimNames, claim.leaseName)
+		writeWorktrees = append(writeWorktrees, claim.worktree)
 	}
-	writeClaims, err := json.Marshal(writeClaimNames)
+	writeClaims, err := json.Marshal(writeWorktrees)
 	if err != nil {
-		return nil, fmt.Errorf("marshal Workspace write claims: %w", err)
+		return nil, fmt.Errorf("marshal Workspace write Worktrees: %w", err)
 	}
 	initializers := make([]rcplatform.Initializer, 0, len(resolved.initializers))
 	for _, initializer := range resolved.initializers {
@@ -1066,9 +1003,9 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 			Namespace: workspace.Namespace,
 			Labels:    map[string]string{workspaceManagedByLabel: workspace.Name},
 			Annotations: map[string]string{
-				workspaceTopologyAnnotation:      topology,
-				workspaceWriteClaimsAnnotation:   string(writeClaims),
-				workspaceRuntimePolicyAnnotation: workspaceRuntimePolicyVersion,
+				workspaceTopologyAnnotation:       topology,
+				workspaceWriteWorktreesAnnotation: string(writeClaims),
+				workspaceRuntimePolicyAnnotation:  workspaceRuntimePolicyVersion,
 			},
 		}, Image: resolved.image, HomeClaim: resolved.homeClaimName, HomeHostPath: resolved.homeHostPath,
 		HotMountRoot:    hotMountRoot,
@@ -1077,22 +1014,6 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 		Resources: workspace.Spec.Resources, AdditionalVolumes: resolved.volumes, AdditionalMounts: resolved.volumeMounts,
 		Initializers: initializers, BeforeStop: resolved.beforeStop,
 	})
-}
-
-func workspacePodWriteClaims(pod *corev1.Pod) ([]workspaceWriteClaim, error) {
-	encoded := pod.Annotations[workspaceWriteClaimsAnnotation]
-	if encoded == "" {
-		return nil, nil
-	}
-	names := make([]string, 0)
-	if err := json.Unmarshal([]byte(encoded), &names); err != nil {
-		return nil, fmt.Errorf("decode Workspace runtime Pod write claims: %w", err)
-	}
-	claims := make([]workspaceWriteClaim, 0, len(names))
-	for _, name := range names {
-		claims = append(claims, workspaceWriteClaim{leaseName: name})
-	}
-	return claims, nil
 }
 
 func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *resolvedWorkspace) (string, error) {
@@ -1391,7 +1312,6 @@ func (r *WorkspaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&workspacesv1alpha1.Workspace{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&corev1.Pod{}).
-		Owns(&coordinationv1.Lease{}).
 		Watches(&workspacesv1alpha1.WorkspaceExec{}, handler.EnqueueRequestsFromMapFunc(workspaceForProcess)).
 		Watches(&workspacesv1alpha1.WorkspaceEnvironment{}, handler.EnqueueRequestsFromMapFunc(r.workspacesForEnvironment)).
 		Watches(&repositoriesv1alpha1.Worktree{}, handler.EnqueueRequestsFromMapFunc(r.workspacesForWorktree)).

@@ -25,7 +25,6 @@ import (
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
-	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -45,7 +44,6 @@ import (
 	"github.com/nekomeowww/rc/internal/runtimepolicy"
 	"github.com/nekomeowww/rc/internal/volumeclaim"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
 	"github.com/nekomeowww/rc/internal/worktreeownership"
 	"github.com/nekomeowww/rc/internal/worktreestorage"
 )
@@ -60,7 +58,7 @@ const (
 	worktreeManagedByValue     = "rc"
 	worktreeRequeueDelay       = 2 * time.Second
 	gitCheckoutSubcommand      = "checkout"
-	worktreeDeletionFinalizer  = worktreeclaim.DeletionFinalizer
+	worktreeDeletionFinalizer  = worktreeownership.DeletionFinalizer
 )
 
 // WorktreeReconciler reconciles an independent child volume and the Git
@@ -80,7 +78,7 @@ type WorktreeReconciler struct {
 // +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=repositories,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
-// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;delete
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces,verbs=get;list;watch
 //
 //nolint:gocyclo // Reconcile is an explicit resource lifecycle state machine.
@@ -368,15 +366,6 @@ func (r *WorktreeReconciler) worktreesForWorkspace(_ context.Context, object cli
 		requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: workspace.Namespace}})
 	}
 	slices.SortFunc(requests, func(left, right ctrl.Request) int { return strings.Compare(left.Name, right.Name) })
-	return requests
-}
-
-func (r *WorktreeReconciler) worktreesForLease(ctx context.Context, object client.Object) []ctrl.Request {
-	names := worktreeNamesForLease(ctx, r.Client, object)
-	requests := make([]ctrl.Request, len(names))
-	for index, name := range names {
-		requests[index] = ctrl.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: object.GetNamespace()}}
-	}
 	return requests
 }
 
@@ -735,7 +724,6 @@ func (r *WorktreeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&repositoriesv1alpha1.Worktree{}).
 		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(r.worktreesForClaim)).
 		Owns(&batchv1.Job{}).
-		Watches(&coordinationv1.Lease{}, handler.EnqueueRequestsFromMapFunc(r.worktreesForLease)).
 		Watches(&workspacesv1alpha1.Workspace{}, handler.EnqueueRequestsFromMapFunc(r.worktreesForWorkspace)).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, object client.Object) []ctrl.Request {
 			pod, ok := object.(*corev1.Pod)

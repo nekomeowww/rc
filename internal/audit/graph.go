@@ -9,7 +9,7 @@ import (
 
 	repositories "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
+	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
 type graph struct {
@@ -102,10 +102,10 @@ func leaseReferences(lease, root Resource) bool {
 		}
 	}
 	worktree := &repositories.Worktree{ObjectMeta: metav1.ObjectMeta{Name: root.Name, Namespace: root.Namespace, UID: root.UID}}
-	if root.UID != "" && (lease.Holder == string(root.UID) || lease.Holder == worktreeclaim.DeletionHolder(worktree)) {
+	if root.UID != "" && (lease.Holder == string(root.UID) || lease.Holder == worktreeownership.LegacyDeletionHolder(worktree)) {
 		return true
 	}
-	if root.Kind == worktreeKind && lease.Name == worktreeclaim.LeaseName(worktree) {
+	if root.Kind == worktreeKind && lease.Name == worktreeownership.LegacyWriteLeaseName(worktree) {
 		return true
 	}
 	if lease.Reservation == "" {

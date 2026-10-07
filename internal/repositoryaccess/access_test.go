@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	repositories "github.com/nekomeowww/rc/api/repositories/v1alpha1"
-	"github.com/stretchr/testify/require"
 	"github.com/nekomeowww/rc/internal/holdset"
+	"github.com/stretchr/testify/require"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

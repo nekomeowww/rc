@@ -22,8 +22,8 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/holdset"
 	"github.com/nekomeowww/rc/internal/volumeclaim"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
 	"github.com/nekomeowww/rc/internal/worktreeownership"
 	"github.com/nekomeowww/rc/internal/worktreestorage"
 )
@@ -159,19 +159,19 @@ func TestWorktreeGCWaitsForRuntimeCleanupAndWriterThenFinishes(t *testing.T) {
 	now := metav1.Now()
 	owner := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: ownershipWorkspaceName, Namespace: ownershipNamespace, UID: ownershipWorkspaceUID, DeletionTimestamp: &now, Finalizers: []string{worktreeownership.WorkspaceCleanupFinalizer, metav1.FinalizerDeleteDependents}}, Spec: workspacesv1alpha1.WorkspaceSpec{Mounts: []workspacesv1alpha1.WorkspaceMount{{Name: ownershipWorktreeName, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: ownershipWorktreeName}}}}}
 	worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: ownershipWorktreeName, Namespace: ownershipNamespace, UID: ownershipWorktreeUID, DeletionTimestamp: &now, Finalizers: []string{worktreeDeletionFinalizer}}}
-	holder := string(owner.UID)
-	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: worktreeclaim.LeaseName(worktree), Namespace: ownershipNamespace}, Spec: coordinationv1.LeaseSpec{HolderIdentity: &holder}}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, worktree, lease).Build()
+	writer := holdset.Holder{Kind: worktreeownership.KindWorktreeExec, Name: "independent-writer", UID: "independent-writer-uid", Mode: worktreeownership.Write}
+	require.NoError(t, holdset.Encode(worktree, worktreeownership.HoldersAnnotation, holdset.State{Holders: []holdset.Holder{writer}}))
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, worktree).Build()
 	r := &WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 	blockers, err := r.cleanupReferenceBlockers(ctx, worktree)
 	require.NoError(t, err)
-	assert.Equal(t, []string{owner.Name}, blockers, "runtime teardown still protects read-only and hot mounts even if GC removes writer Leases")
+	assert.Equal(t, []string{owner.Name}, blockers, "runtime teardown still protects read-only and hot mounts")
 	owner.Finalizers = []string{metav1.FinalizerDeleteDependents}
 	require.NoError(t, kube.Update(ctx, owner))
 	result, err := r.reconcileDelete(ctx, worktree)
 	require.NoError(t, err)
 	assert.Positive(t, result.RequeueAfter, "an independent writer must still finish")
-	require.NoError(t, kube.Delete(ctx, lease))
+	require.NoError(t, (worktreeownership.MountAccess{Client: kube, Reader: kube}).Release(ctx, client.ObjectKeyFromObject(worktree), worktree.UID, writer.Key()))
 	result, err = r.reconcileDelete(ctx, worktree)
 	require.NoError(t, err)
 	assert.Zero(t, result.RequeueAfter)
@@ -211,22 +211,32 @@ func TestWorktreeDeletionFinishesWhenGCRacesFinalizerPatch(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(kube.Get(ctx, client.ObjectKeyFromObject(worktree), new(repositoriesv1alpha1.Worktree))))
 }
 
-func TestWorktreeCleanupRetriesWhenDeletionLeaseDisappears(t *testing.T) {
+// Formerly TestWorktreeCleanupRetriesWhenDeletionLeaseDisappears. The deletion
+// Lease is gone; its premise is now the fence: a writer whose admission commits
+// while cleanup closes the Worktree keeps deletion waiting, and a deletion
+// Lease left by an older rcctl never stops cleanup from finishing.
+func TestWorktreeCleanupWaitsForWriterAdmittedDuringClose(t *testing.T) {
 	ctx := t.Context()
 	_, worktree, _ := ownershipStorage(t)
 	now := metav1.Now()
 	worktree.DeletionTimestamp = &now
-	lease := worktreeclaim.DeletionLease(worktree)
+	deletionHolder := worktreeownership.LegacyDeletionHolder(worktree)
+	legacy := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: worktreeownership.LegacyWriteLeaseName(worktree), Namespace: worktree.Namespace}, Spec: coordinationv1.LeaseSpec{HolderIdentity: &deletionHolder}}
+	writer := holdset.Holder{Kind: worktreeownership.KindWorktreeExec, Name: "racing-exec", UID: "racing-exec-uid", Mode: worktreeownership.Write}
 	injected := false
-	kube := fake.NewClientBuilder().WithScheme(ownershipScheme(t)).WithObjects(worktree, lease).WithInterceptorFuncs(interceptor.Funcs{
-		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-			if _, ok := obj.(*coordinationv1.Lease); ok && !injected {
-				// ROOT CAUSE: foreground GC may delete the Lease after Create returns
-				// AlreadyExists. Cleanup must requeue without bypassing the writer check.
+	kube := fake.NewClientBuilder().WithScheme(ownershipScheme(t)).WithObjects(worktree, legacy).WithInterceptorFuncs(interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if _, ok := obj.(*repositoriesv1alpha1.Worktree); ok && !injected {
+				// ROOT CAUSE: a writer admitted between the fence's read and its write
+				// must either fail its CAS or be visible to the retried fence.
 				injected = true
-				require.NoError(t, c.Delete(ctx, lease))
+				_, err := holdset.Update(ctx, (worktreeownership.MountAccess{Client: c, Reader: c}).Store(client.ObjectKeyFromObject(worktree), worktree.UID), func(_ client.Object, state *holdset.State) (bool, error) {
+					state.Put(writer)
+					return true, nil
+				})
+				require.NoError(t, err)
 			}
-			return c.Get(ctx, key, obj, opts...)
+			return c.Patch(ctx, obj, patch, opts...)
 		},
 	}).Build()
 	r := WorktreeReconciler{Client: kube, APIReader: kube, Scheme: kube.Scheme()}
@@ -237,7 +247,9 @@ func TestWorktreeCleanupRetriesWhenDeletionLeaseDisappears(t *testing.T) {
 	assert.Positive(t, result.RequeueAfter)
 	require.NoError(t, kube.Get(ctx, req.NamespacedName, worktree))
 	assert.Contains(t, worktree.Finalizers, worktreeDeletionFinalizer)
+	require.NoError(t, (worktreeownership.MountAccess{Client: kube, Reader: kube}).Release(ctx, req.NamespacedName, worktree.UID, writer.Key()))
 	_, err = r.Reconcile(ctx, req)
 	require.NoError(t, err)
 	assert.True(t, apierrors.IsNotFound(kube.Get(ctx, req.NamespacedName, new(repositoriesv1alpha1.Worktree))))
+	assert.True(t, apierrors.IsNotFound(kube.Get(ctx, client.ObjectKeyFromObject(legacy), new(coordinationv1.Lease))), "the old deletion protocol's Lease is removed")
 }

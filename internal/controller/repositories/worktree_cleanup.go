@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 
-	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -20,7 +19,6 @@ import (
 	"github.com/nekomeowww/rc/internal/holdset"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
 	"github.com/nekomeowww/rc/internal/volumeclaim"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
 	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
@@ -31,49 +29,37 @@ type cleanupWait struct {
 	message string
 }
 
-// prepareWorktreeCleanup closes the same CAS gate used before Pod creation.
-// The mount list remains a conservative legacy/reference check, not a lock.
-// Read-only consumers and in-flight creators are covered by durable holders;
-// the ordinary writer Lease continues to serialize Workspace/WorktreeExec use.
+// prepareWorktreeCleanup closes the same CAS fence used before every Pod or
+// Job creation, then waits for the holders admitted before it to drain. The
+// mount list remains a conservative reference check, not a lock. A legacy write
+// Lease from an older controller or CLI still blocks until it disappears.
 // When ready (wait is nil), it returns the resolved PVC name that cleanup must
 // act on. Otherwise wait names what cleanup is waiting for.
 func (r *WorktreeReconciler) prepareWorktreeCleanup(ctx context.Context, worktree *repositoriesv1alpha1.Worktree) (string, *cleanupWait, error) {
 	log := logf.FromContext(ctx)
-	drained, err := (worktreeownership.MountAccess{Client: r.Client, Reader: r.APIReader}).Close(ctx, worktree)
+	remaining, err := (worktreeownership.MountAccess{Client: r.Client, Reader: r.APIReader}).Close(ctx, worktree)
 	if err != nil {
 		return "", nil, err
 	}
-	if !drained {
-		return "", &cleanupWait{reason: repositoriesv1alpha1.DeletionBlockedReasonWaitingForMounts, message: "Waiting for admitted Workspace mounts to be released"}, nil
+	if wait := holderWait(remaining); wait != nil {
+		return "", wait, nil
 	}
 	if wait, err := r.cleanupReferenceWait(ctx, worktree); err != nil || wait != nil {
 		return "", wait, err
 	}
-	deletionLease := worktreeclaim.DeletionLease(worktree)
-	if err := r.Create(ctx, deletionLease); err != nil {
-		if !errors.IsAlreadyExists(err) {
-			return "", nil, fmt.Errorf("acquire Worktree deletion Lease: %w", err)
-		}
-		current := new(coordinationv1.Lease)
-		if err := r.Get(ctx, client.ObjectKeyFromObject(deletionLease), current); err != nil {
-			// Foreground GC can remove the Lease between Create and Get. Requeue
-			// to acquire it again; disappearance does not authorize cleanup.
-			if errors.IsNotFound(err) {
-				return "", &cleanupWait{reason: repositoriesv1alpha1.DeletionBlockedReasonWaitingForWriter, message: "Waiting to acquire the Worktree write Lease for deletion"}, nil
-			}
-			return "", nil, fmt.Errorf("get Worktree deletion Lease: %w", err)
-		}
-		if !worktreeclaim.IsDeletionHolder(worktree, current) {
-			holder := current.Labels[worktreeclaim.HolderLabel]
-			log.Info("Worktree deletion is waiting for active writer", "worktree", worktree.Name, "holder", holder)
-			return "", &cleanupWait{reason: repositoriesv1alpha1.DeletionBlockedReasonWaitingForWriter, message: fmt.Sprintf("Waiting for writer %q to release the Worktree write Lease %s", holder, current.Name)}, nil
-		}
+	legacy, err := worktreeownership.LegacyWriterOf(ctx, r.APIReader, worktree)
+	if err != nil {
+		return "", nil, fmt.Errorf("check legacy Worktree write Lease: %w", err)
 	}
-
-	// Re-list after acquiring the writer claim for legacy clients. New runtime
-	// admissions are fenced atomically, including after this final list.
-	if wait, err := r.cleanupReferenceWait(ctx, worktree); err != nil || wait != nil {
-		return "", wait, err
+	if legacy != nil {
+		if !legacy.Deletion {
+			log.Info("Worktree deletion is waiting for legacy writer", "worktree", worktree.Name, "holder", legacy.Name)
+			return "", &cleanupWait{reason: repositoriesv1alpha1.DeletionBlockedReasonWaitingForWriter, message: fmt.Sprintf("Waiting for writer %q to release legacy write Lease %s", legacy.Name, legacy.Lease.Name)}, nil
+		}
+		// The old deletion protocol's own Lease grants nothing; the fence is closed.
+		if err := r.Delete(ctx, legacy.Lease, client.Preconditions{UID: &legacy.Lease.UID}); err != nil && !errors.IsNotFound(err) {
+			return "", nil, fmt.Errorf("delete legacy Worktree deletion Lease: %w", err)
+		}
 	}
 	claimName, _, resolveErr := volumeclaim.Resolve(ctx, r.APIReader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
 	if resolveErr != nil && claimName == "" {
@@ -94,6 +80,28 @@ func (r *WorktreeReconciler) prepareWorktreeCleanup(ctx context.Context, worktre
 		return "", &cleanupWait{reason: repositoriesv1alpha1.DeletionBlockedReasonWaitingForPods, message: "Waiting for Pods using the Worktree volume to stop: " + strings.Join(consumers, ", ")}, nil
 	}
 	return claimName, nil, nil
+}
+
+// holderWait reports holders admitted before the fence closed. A writer is
+// reported as WaitingForWriter; readers as WaitingForMounts.
+func holderWait(remaining []holdset.Holder) *cleanupWait {
+	if len(remaining) == 0 {
+		return nil
+	}
+	writers := make([]string, 0)
+	readers := make([]string, 0, len(remaining))
+	for _, holder := range remaining {
+		name := holder.Kind + "/" + holder.Name
+		if holder.Mode == worktreeownership.Write {
+			writers = append(writers, name)
+		} else {
+			readers = append(readers, name)
+		}
+	}
+	if len(writers) > 0 {
+		return &cleanupWait{reason: repositoriesv1alpha1.DeletionBlockedReasonWaitingForWriter, message: "Waiting for writers to release the Worktree: " + strings.Join(writers, ", ")}
+	}
+	return &cleanupWait{reason: repositoriesv1alpha1.DeletionBlockedReasonWaitingForMounts, message: "Waiting for admitted Workspace mounts to be released: " + strings.Join(readers, ", ")}
 }
 
 // cleanupReferenceWait reports Workspaces whose spec still mounts a deleting

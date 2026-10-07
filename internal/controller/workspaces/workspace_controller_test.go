@@ -26,6 +26,7 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,12 +34,15 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/holdset"
 	"github.com/nekomeowww/rc/internal/lifecycle"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
+	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
 const (
@@ -336,11 +340,13 @@ func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 	requirements.NoError(kubeClient.Get(ctx, types.NamespacedName{Name: "rc-workspace", Namespace: workspace.Namespace}, role), "get shared Role")
 	assertions.Contains(role.Rules, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"persistentvolumeclaims"}, Verbs: []string{verbGet}}, "nested rcctl can preflight storage with read-only access")
 	assertions.Contains(role.Rules[1].Resources, "workspaceexecs", "nested rcctl can manage process resources")
+	holders := worktreeHoldersOf(t, kubeClient, worktree)
+	requirements.Len(holders, 1, "claim each writable Worktree atomically")
+	assertions.Equal(workspace.UID, holders[0].UID, "Workspace UID holds the Worktree writer")
+	assertions.Equal(worktreeownership.Write, holders[0].Mode)
 	leases := new(coordinationv1.LeaseList)
-	requirements.NoError(kubeClient.List(ctx, leases, client.InNamespace(workspace.Namespace)), "list Worktree write Leases")
-	requirements.Len(leases.Items, 1, "claim each writable Worktree atomically")
-	requirements.NotNil(leases.Items[0].Spec.HolderIdentity, "Lease records holder")
-	assertions.Equal(string(workspace.UID), *leases.Items[0].Spec.HolderIdentity, "Workspace UID holds Worktree write Lease")
+	requirements.NoError(kubeClient.List(ctx, leases, client.InNamespace(workspace.Namespace)))
+	assertions.Empty(leases.Items, "Worktree writers no longer use Leases")
 
 	persisted := new(workspacesv1alpha1.Workspace)
 	requirements.NoError(kubeClient.Get(ctx, key, persisted), "get reconciled Workspace")
@@ -374,20 +380,36 @@ func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 	_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 	requirements.NoError(err, "accept hot Worktree mount while process is active")
 	requirements.NoError(kubeClient.Get(ctx, key, pod), "retain runtime Pod for hot Worktree mount")
-	blockedLeases := new(coordinationv1.LeaseList)
-	requirements.NoError(kubeClient.List(ctx, blockedLeases, client.InNamespace(workspace.Namespace)), "list claims after blocked topology edit")
-	assertions.Len(blockedLeases.Items, 2, "reserve the added Worktree without replacing the runtime")
+	assertions.Len(worktreeHoldersOf(t, kubeClient, secondWorktree), 1, "reserve the added Worktree without replacing the runtime")
 	requirements.NoError(kubeClient.Get(ctx, key, currentWorkspace), "get Workspace to revert topology")
 	currentWorkspace.Spec.Mounts = originalMounts
 	requirements.NoError(kubeClient.Update(ctx, currentWorkspace), "revert blocked topology edit")
 	requirements.NoError(kubeClient.Delete(ctx, activeProcess), "remove active process")
-	foreignHolder := "another-workspace-uid"
-	leases.Items[0].Spec.HolderIdentity = &foreignHolder
-	requirements.NoError(kubeClient.Update(ctx, &leases.Items[0]), "simulate Worktree Lease loss")
+	foreign := holdset.Holder{Kind: worktreeownership.KindWorkspace, Name: "another", UID: "another-workspace-uid", Mode: worktreeownership.Write}
+	requirements.NoError(kubeClient.Get(ctx, client.ObjectKeyFromObject(worktree), worktree))
+	requirements.NoError(holdset.Encode(worktree, worktreeownership.HoldersAnnotation, holdset.State{Holders: []holdset.Holder{foreign}}))
+	requirements.NoError(kubeClient.Update(ctx, worktree), "simulate Worktree writer loss")
 	_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
-	requirements.NoError(err, "reconcile lost Worktree Lease")
-	removedPod := new(corev1.Pod)
-	assertions.Error(kubeClient.Get(ctx, key, removedPod), "stop runtime Pod immediately after losing write claim")
+	requirements.NoError(err, "reconcile Worktree writer conflict")
+	requirements.NoError(kubeClient.Get(ctx, key, pod), "a writer conflict on a Worktree not yet mounted keeps the runtime")
+	requirements.NoError(kubeClient.Get(ctx, key, persisted))
+	ready = meta.FindStatusCondition(persisted.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady)
+	requirements.NotNil(ready)
+	assertions.Equal(reasonWorktreeInUse, ready.Reason, "surface the conflict as a condition")
+	assertions.Contains(ready.Message, "Workspace/another")
+	// Once a helper writes the Worktree, losing its writer unmounts it at once.
+	requirements.NoError(kubeClient.Get(ctx, client.ObjectKeyFromObject(worktree), worktree))
+	helper := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "lost-writer-helper", Namespace: workspace.Namespace,
+		Labels: map[string]string{workspaceManagedByLabel: workspace.Name, hotMountHelperLabel: hotMountLabelValue},
+	}, Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "lost-source", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: worktree.Status.VolumeClaimName}}}}}}
+	requirements.NoError(controllerutil.SetControllerReference(workspace, helper, scheme))
+	requirements.NoError(kubeClient.Create(ctx, helper))
+	for range 3 {
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		requirements.NoError(err, "reconcile lost Worktree writer")
+	}
+	assertions.True(apierrors.IsNotFound(kubeClient.Get(ctx, client.ObjectKeyFromObject(helper), new(corev1.Pod))), "stop writing a Worktree whose writer was lost")
 }
 
 func TestWorkspaceSuspendsAfterIdleTimeout(t *testing.T) {
@@ -557,4 +579,13 @@ func TestWorkspaceSuspendsWithoutExecutions(t *testing.T) {
 	requirements.NoError(kubeClient.Get(context.Background(), client.ObjectKeyFromObject(workspace), persisted), "get idle Workspace")
 	requirements.Equal(workspacesv1alpha1.WorkspaceDesiredStateSuspended, persisted.Spec.DesiredState, "release runtime compute after the idle timeout")
 	requirements.NotNil(persisted.Status.SuspendedAt, "persist confirmed suspension separately from Ready=False")
+}
+
+func worktreeHoldersOf(t *testing.T, reader client.Reader, worktree *repositoriesv1alpha1.Worktree) []holdset.Holder {
+	t.Helper()
+	current := new(repositoriesv1alpha1.Worktree)
+	require.NoError(t, reader.Get(context.Background(), client.ObjectKeyFromObject(worktree), current))
+	state, err := worktreeownership.Decode(current)
+	require.NoError(t, err)
+	return state.Holders
 }

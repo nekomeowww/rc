@@ -26,7 +26,6 @@ import (
 	"github.com/stretchr/testify/require"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -37,8 +36,9 @@ import (
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	commandutil "github.com/nekomeowww/rc/internal/cli/rcctl/command"
+	"github.com/nekomeowww/rc/internal/holdset"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
+	"github.com/nekomeowww/rc/internal/worktreeownership"
 	clioutput "github.com/nekomeowww/rc/pkg/output"
 )
 
@@ -376,7 +376,7 @@ func TestApplyWorktreeMountValidatesReadyBeforeStoppingProcesses(t *testing.T) {
 	assert.Zero(t, stopCalls, "do not stop processes before Worktree readiness validation succeeds")
 }
 
-func TestApplyWorktreeMountValidatesWriteLeaseBeforeStoppingProcesses(t *testing.T) {
+func TestApplyWorktreeMountWithActiveWriterPersistsIntentAndReportsWriter(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
 	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
@@ -389,23 +389,25 @@ func TestApplyWorktreeMountValidatesWriteLeaseBeforeStoppingProcesses(t *testing
 			Type: repositoriesv1alpha1.WorktreeConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1, Reason: testWorktreeReadyReason,
 		}}},
 	}
-	foreignHolder := "other-writer-uid"
-	lease := &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{Name: worktreeclaim.LeaseName(worktree), Namespace: worktree.Namespace, Labels: map[string]string{worktreeclaim.HolderLabel: "other-writer"}},
-		Spec:       coordinationv1.LeaseSpec{HolderIdentity: &foreignHolder},
-	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, worktree, lease).Build()
-	stopCalls := 0
+	writer := holdset.Holder{Kind: worktreeownership.KindWorktreeExec, Name: "other-writer", UID: "other-writer-uid", Mode: worktreeownership.Write}
+	require.NoError(t, holdset.Encode(worktree, worktreeownership.HoldersAnnotation, holdset.State{Holders: []holdset.Holder{writer}}))
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, worktree).Build()
 
-	_, err := applyWorktreeMount(context.Background(), kubeClient, workspace, workspace.Namespace, worktree.Name, mountOptions{},
+	result, err := applyWorktreeMount(context.Background(), kubeClient, workspace, workspace.Namespace, worktree.Name, mountOptions{},
 		func(context.Context, *workspacesv1alpha1.Workspace) ([]string, error) {
-			stopCalls++
 			return nil, nil
 		})
 
-	require.Error(t, err, "reject a Worktree held by another writer")
-	assert.ErrorContains(t, err, "other-writer", "identify the active writer")
-	assert.Zero(t, stopCalls, "do not stop processes before Worktree Lease validation succeeds")
+	// Admission is asynchronous: the Workspace controller reports the conflict
+	// as Ready=False WorktreeInUse and mounts once the writer releases it.
+	require.NoError(t, err)
+	assert.Equal(t, []string{"WorktreeExec/other-writer"}, result.writers, "identify the active writer for the hint")
+	persisted := new(workspacesv1alpha1.Workspace)
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(workspace), persisted))
+	require.Len(t, persisted.Spec.Mounts, 1, "persist mount intent")
+	leases := new(coordinationv1.LeaseList)
+	require.NoError(t, kubeClient.List(context.Background(), leases))
+	assert.Empty(t, leases.Items, "rcctl takes no reservation")
 }
 
 func TestApplyWorktreeMountRejectsStaleReadyBeforeStoppingProcesses(t *testing.T) {
@@ -461,12 +463,9 @@ func TestApplyWorkspaceMountPreservesPartiallyStoppedProcesses(t *testing.T) {
 	persisted := new(workspacesv1alpha1.Workspace)
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(workspace), persisted))
 	assert.Empty(t, persisted.Spec.Mounts, "roll back topology when process shutdown is incomplete")
-	lease := new(coordinationv1.Lease)
-	err = kubeClient.Get(context.Background(), types.NamespacedName{Name: worktreeclaim.LeaseName(worktree), Namespace: worktree.Namespace}, lease)
-	assert.True(t, apierrors.IsNotFound(err), "release a newly reserved Lease after rollback")
 }
 
-func TestApplyWorkspaceMountReservesWriteLeaseBeforeStoppingProcesses(t *testing.T) {
+func TestApplyWorkspaceMountPersistsIntentBeforeStoppingProcesses(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
 	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
@@ -484,9 +483,9 @@ func TestApplyWorkspaceMountReservesWriteLeaseBeforeStoppingProcesses(t *testing
 
 	_, err := applyWorkspaceMount(context.Background(), kubeClient, client.ObjectKeyFromObject(workspace), mount,
 		func(ctx context.Context, current *workspacesv1alpha1.Workspace) ([]string, error) {
-			lease := new(coordinationv1.Lease)
-			require.NoError(t, kubeClient.Get(ctx, types.NamespacedName{Name: worktreeclaim.LeaseName(worktree), Namespace: worktree.Namespace}, lease), "reserve the write Lease before invoking the stopper")
-			assert.Equal(t, string(workspace.UID), *lease.Spec.HolderIdentity)
+			leases := new(coordinationv1.LeaseList)
+			require.NoError(t, kubeClient.List(ctx, leases))
+			assert.Empty(t, leases.Items, "rcctl takes no reservation; the controller admits the writer")
 			persisted := new(workspacesv1alpha1.Workspace)
 			require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(workspace), persisted))
 			assert.Equal(t, []workspacesv1alpha1.WorkspaceMount{mount}, persisted.Spec.Mounts, "persist topology intent before stopping processes")
@@ -522,4 +521,25 @@ func TestApplyHotWorktreeMountDoesNotStopProcesses(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, stopCalls, "hot mounting keeps running WorkspaceExecs")
 	assert.Equal(t, []workspacesv1alpha1.WorkspaceMount{mount}, result.workspace.Spec.Mounts)
+}
+
+func TestWaitEndsWithPendingMountWhenWorktreeIsInUse(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
+	workspace := &workspacesv1alpha1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testWorkspaceNamespace, UID: testWorkspaceUID, Generation: 3},
+		Status: workspacesv1alpha1.WorkspaceStatus{ObservedGeneration: 3, Conditions: []metav1.Condition{{
+			Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionFalse, ObservedGeneration: 3,
+			Reason: reasonWorktreeInUse, Message: "Worktree code is held for writing by WorktreeExec/build",
+		}}},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace).Build()
+
+	err := waitWorkspaceGenerationReady(t.Context(), kubeClient, workspace, 3)
+
+	// The mount is accepted; its admission waits for the other writer.
+	var inUse *worktreeInUseError
+	require.ErrorAs(t, err, &inUse)
+	assert.Contains(t, inUse.message, "WorktreeExec/build")
 }

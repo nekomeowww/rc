@@ -16,7 +16,6 @@ import (
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/conditions"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
 )
 
 // GeneratedForLabel records checkout provenance and bootstrap hints. It never
@@ -26,6 +25,10 @@ const GeneratedForLabel = "workspaces.rc.ayaka.io/generated-for"
 // WorkspaceCleanupFinalizer marks runtime teardown, which finishes before GC
 // waits for dependent Worktrees. Unlike foregroundDeletion it is a live blocker.
 const WorkspaceCleanupFinalizer = "workspaces.rc.ayaka.io/terminate-processes"
+
+// DeletionFinalizer keeps a Worktree present until the controller has closed
+// its hold set, drained every holder, and verified no Pod uses its volume.
+const DeletionFinalizer = "repositories.rc.ayaka.io/worktree-delete-protection"
 
 // VolumeProtectionFinalizer keeps foreground GC from removing storage before
 // the Worktree's mount, runtime, writer, and clone checks have completed.
@@ -41,7 +44,7 @@ func InitializeGenerated(workspace *workspacesv1alpha1.Workspace, worktree *repo
 		worktree.Labels = make(map[string]string)
 	}
 	worktree.Labels[GeneratedForLabel] = workspace.Name
-	controllerutil.AddFinalizer(worktree, worktreeclaim.DeletionFinalizer)
+	controllerutil.AddFinalizer(worktree, DeletionFinalizer)
 }
 
 // ReadyAtCurrentGeneration reports whether the Worktree's status and Ready
@@ -72,17 +75,27 @@ func IsOwnedBy(worktree *repositoriesv1alpha1.Worktree, workspace *workspacesv1a
 }
 
 // ReferenceBlockers lists live Workspace mounts that protect a Worktree from
-// deletion. Deleting Workspaces finish runtime cleanup and release writer Leases first;
-// counting their mounts here would deadlock foreground garbage collection.
+// deletion. Deleting Workspaces finish runtime cleanup and release their holders
+// first; counting their mounts here would deadlock foreground garbage collection.
 // This is a conservative reference check, not an admission lock. Callers must
-// close MountAccess and acquire the exclusive writer Lease before finalizing.
+// close MountAccess and wait for its holders to drain before finalizing.
 func ReferenceBlockers(ctx context.Context, reader client.Reader, namespace, name string) ([]string, error) {
+	return ListReferenceBlockers(ctx, reader, namespace, name)
+}
+
+// ListReferenceBlockers is ReferenceBlockers for clients without a cache
+// index: it lists every Workspace in the namespace.
+func ListReferenceBlockers(ctx context.Context, reader client.Reader, namespace, name string) ([]string, error) {
 	workspaces := new(workspacesv1alpha1.WorkspaceList)
 	if err := reader.List(ctx, workspaces, client.InNamespace(namespace)); err != nil {
 		return nil, fmt.Errorf("list Workspace references for Worktree %q: %w", name, err)
 	}
+	return referenceBlockers(workspaces.Items, name), nil
+}
+
+func referenceBlockers(workspaces []workspacesv1alpha1.Workspace, name string) []string {
 	blockers := make([]string, 0)
-	for _, workspace := range workspaces.Items {
+	for _, workspace := range workspaces {
 		if !workspace.DeletionTimestamp.IsZero() && !slices.Contains(workspace.Finalizers, WorkspaceCleanupFinalizer) {
 			continue
 		}
@@ -94,7 +107,7 @@ func ReferenceBlockers(ctx context.Context, reader client.Reader, namespace, nam
 		}
 	}
 	slices.Sort(blockers)
-	return blockers, nil
+	return blockers
 }
 
 // ProtectVolume upgrades an existing owned PVC before an explicit adoption can

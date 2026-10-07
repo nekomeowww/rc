@@ -29,7 +29,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -42,7 +41,6 @@ import (
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
@@ -56,7 +54,6 @@ import (
 	"github.com/nekomeowww/rc/internal/volumeclaim"
 	workspaceservice "github.com/nekomeowww/rc/internal/workspaces"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
 	"github.com/nekomeowww/rc/internal/worktreeownership"
 	clioutput "github.com/nekomeowww/rc/pkg/output"
 )
@@ -95,6 +92,9 @@ type workspaceStopper func(context.Context, *workspacesv1alpha1.Workspace) ([]st
 type workspaceMountResult struct {
 	workspace        *workspacesv1alpha1.Workspace
 	stoppedProcesses []string
+	// writers lists other writers observed on a newly mounted writable
+	// Worktree. The controller admits the mount after they release it.
+	writers []string
 }
 
 type listOptions struct {
@@ -517,69 +517,53 @@ func applyWorkspaceMount(
 		return workspaceMountResult{}, fmt.Errorf("get updated Workspace generation: %w", err)
 	}
 	if err := validateWorkspaceMountSource(ctx, kubeClient, current, mount); err != nil {
-		return workspaceMountResult{}, rollbackWorkspaceMount(ctx, kubeClient, key, mount, nil, false, err)
+		return workspaceMountResult{}, rollbackWorkspaceMount(ctx, kubeClient, key, mount, err)
 	}
-	lease, createdLease, err := reserveWorkspaceMountLease(ctx, kubeClient, current, mount)
+	writers, err := otherWorktreeWriters(ctx, kubeClient, current, mount)
 	if err != nil {
-		return workspaceMountResult{}, rollbackWorkspaceMount(ctx, kubeClient, key, mount, nil, false, err)
+		return workspaceMountResult{}, rollbackWorkspaceMount(ctx, kubeClient, key, mount, err)
 	}
 
 	if (current.Spec.OS == "" || current.Spec.OS == corev1.Linux) && mount.WorktreeRef != nil {
 		worktree := new(repositoriesv1alpha1.Worktree)
 		if err := kubeClient.Get(ctx, client.ObjectKey{Name: mount.WorktreeRef.Name, Namespace: current.Namespace}, worktree); err != nil {
-			return workspaceMountResult{}, rollbackWorkspaceMount(ctx, kubeClient, key, mount, lease, createdLease, err)
+			return workspaceMountResult{}, rollbackWorkspaceMount(ctx, kubeClient, key, mount, err)
 		}
 		if meta.IsStatusConditionTrue(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady) && !worktreebootstrap.Deferred(worktree) {
-			return workspaceMountResult{workspace: current}, nil
+			return workspaceMountResult{workspace: current, writers: writers}, nil
 		}
 	}
 	stopped, err := stop(ctx, current)
-	result := workspaceMountResult{workspace: current, stoppedProcesses: stopped}
+	result := workspaceMountResult{workspace: current, stoppedProcesses: stopped, writers: writers}
 	if err != nil {
-		return result, rollbackWorkspaceMount(ctx, kubeClient, key, mount, lease, createdLease, err)
+		return result, rollbackWorkspaceMount(ctx, kubeClient, key, mount, err)
 	}
 
-	return workspaceMountResult{workspace: current, stoppedProcesses: stopped}, nil
+	return result, nil
 }
 
-func reserveWorkspaceMountLease(
-	ctx context.Context,
-	kubeClient client.Client,
-	workspace *workspacesv1alpha1.Workspace,
-	mount workspacesv1alpha1.WorkspaceMount,
-) (*coordinationv1.Lease, bool, error) {
+// otherWorktreeWriters reports, without reserving anything, the writers that
+// currently hold a Worktree this mount would write. Admission happens in the
+// Workspace controller; a conflict surfaces there as Ready=False WorktreeInUse.
+func otherWorktreeWriters(ctx context.Context, kubeClient client.Client, workspace *workspacesv1alpha1.Workspace, mount workspacesv1alpha1.WorkspaceMount) ([]string, error) {
 	if mount.ReadOnly || mount.WorktreeRef == nil {
-		return nil, false, nil
+		return nil, nil
 	}
 	worktree := new(repositoriesv1alpha1.Worktree)
 	if err := kubeClient.Get(ctx, client.ObjectKey{Name: mount.WorktreeRef.Name, Namespace: workspace.Namespace}, worktree); err != nil {
-		return nil, false, fmt.Errorf("get Worktree %q before reserving its write Lease: %w", mount.WorktreeRef.Name, err)
+		return nil, fmt.Errorf("get Worktree %q holders: %w", mount.WorktreeRef.Name, err)
 	}
-	holder := string(workspace.UID)
-	lease := &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{Name: worktreeclaim.LeaseName(worktree), Namespace: workspace.Namespace, Labels: map[string]string{worktreeclaim.HolderLabel: workspace.Name}},
-		Spec:       coordinationv1.LeaseSpec{HolderIdentity: &holder},
+	state, err := worktreeownership.Decode(worktree)
+	if err != nil {
+		return nil, err
 	}
-	if err := controllerutil.SetControllerReference(workspace, lease, kubeClient.Scheme()); err != nil {
-		return nil, false, fmt.Errorf("set Workspace owner on Worktree write Lease: %w", err)
-	}
-	if err := kubeClient.Create(ctx, lease); err == nil {
-		return lease, true, nil
-	} else if !apierrors.IsAlreadyExists(err) {
-		return nil, false, fmt.Errorf("reserve Worktree %q write Lease: %w", worktree.Name, err)
-	}
-	current := new(coordinationv1.Lease)
-	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(lease), current); err != nil {
-		return nil, false, fmt.Errorf("get Worktree %q write Lease: %w", worktree.Name, err)
-	}
-	if current.Spec.HolderIdentity == nil || *current.Spec.HolderIdentity != holder {
-		activeHolder := current.Labels[worktreeclaim.HolderLabel]
-		if activeHolder == "" && current.Spec.HolderIdentity != nil {
-			activeHolder = *current.Spec.HolderIdentity
+	writers := make([]string, 0)
+	for _, holder := range state.Holders {
+		if holder.Mode == worktreeownership.Write && holder.UID != workspace.UID {
+			writers = append(writers, holder.Kind+"/"+holder.Name)
 		}
-		return nil, false, fmt.Errorf("worktree %q has an active writer %q", worktree.Name, activeHolder)
 	}
-	return current, false, nil
+	return writers, nil
 }
 
 func rollbackWorkspaceMount(
@@ -587,8 +571,6 @@ func rollbackWorkspaceMount(
 	kubeClient client.Client,
 	key client.ObjectKey,
 	mount workspacesv1alpha1.WorkspaceMount,
-	lease *coordinationv1.Lease,
-	createdLease bool,
 	cause error,
 ) error {
 	current := new(workspacesv1alpha1.Workspace)
@@ -604,11 +586,6 @@ func rollbackWorkspaceMount(
 	current.Spec.Mounts = mounts
 	if err := kubeClient.Update(ctx, current); err != nil {
 		return errors.Join(cause, fmt.Errorf("roll back Workspace mount: %w", err))
-	}
-	if createdLease && lease != nil {
-		if err := kubeClient.Delete(ctx, lease); err != nil && !apierrors.IsNotFound(err) {
-			return errors.Join(cause, fmt.Errorf("release reserved Worktree write Lease: %w", err))
-		}
 	}
 	return cause
 }
@@ -648,25 +625,7 @@ func validateWorkspaceMountSource(ctx context.Context, kubeClient client.Client,
 	if worktree.Status.ObservedGeneration < worktree.Generation || (!worktreeReady && !canInitialize) || worktree.Status.VolumeClaimName == "" {
 		return fmt.Errorf("worktree %q is not Ready", worktree.Name)
 	}
-	if mount.ReadOnly {
-		return nil
-	}
-
-	lease := new(coordinationv1.Lease)
-	leaseKey := client.ObjectKey{Name: worktreeclaim.LeaseName(worktree), Namespace: workspace.Namespace}
-	if err := kubeClient.Get(ctx, leaseKey, lease); apierrors.IsNotFound(err) {
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("check Worktree %q write Lease: %w", worktree.Name, err)
-	}
-	if lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity == string(workspace.UID) {
-		return nil
-	}
-	holder := lease.Labels[worktreeclaim.HolderLabel]
-	if holder == "" && lease.Spec.HolderIdentity != nil {
-		holder = *lease.Spec.HolderIdentity
-	}
-	return fmt.Errorf("worktree %q has an active writer %q", worktree.Name, holder)
+	return nil
 }
 
 func cleanupGeneratedWorktree(ctx context.Context, kubeClient client.Client, worktree *repositoriesv1alpha1.Worktree, cause error) error {
@@ -865,7 +824,7 @@ func reviewWorkspaceDeletion(ctx context.Context, kubeClient client.Client, work
 	for index := range worktrees.Items {
 		worktree := &worktrees.Items[index]
 		if worktreeownership.IsOwnedBy(worktree, workspace) {
-			blockers, err := worktreeownership.ReferenceBlockers(ctx, kubeClient, workspace.Namespace, worktree.Name)
+			blockers, err := worktreeownership.ListReferenceBlockers(ctx, kubeClient, workspace.Namespace, worktree.Name)
 			if err != nil {
 				return nil, err
 			}
@@ -1190,6 +1149,9 @@ func waitWorkspaceGenerationReady(ctx context.Context, kubeClient client.Client,
 			return true, nil
 		}
 		condition := meta.FindStatusCondition(current.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady)
+		if condition != nil && condition.Status == metav1.ConditionFalse && condition.ObservedGeneration >= generation && condition.Reason == reasonWorktreeInUse {
+			return false, &worktreeInUseError{workspace: current.Name, message: condition.Message}
+		}
 		if condition != nil && condition.Status == metav1.ConditionFalse && condition.ObservedGeneration >= generation && !workspaceReadinessTransient(condition.Reason) {
 			return false, fmt.Errorf("workspace %q runtime failed for generation %d: %s", current.Name, generation, condition.Message)
 		}
@@ -1199,7 +1161,7 @@ func waitWorkspaceGenerationReady(ctx context.Context, kubeClient client.Client,
 
 func workspaceReadinessTransient(reason string) bool {
 	switch reason {
-	case "Provisioning", "Starting", "Replacing", "Stopping", "Mounting", "Unmounting", "WorktreeNotReady", "RepositoryNotReady", "WorktreeInUse":
+	case "Provisioning", "Starting", "Replacing", "Stopping", "Mounting", "Unmounting", "WorktreeNotReady", "RepositoryNotReady", reasonWorktreeInUse:
 		return true
 	default:
 		return false
@@ -1210,9 +1172,29 @@ func workspaceReadyForGeneration(workspace *workspacesv1alpha1.Workspace, genera
 	return conditions.ReadyAtGeneration(workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady, generation, workspace.Status.ObservedGeneration)
 }
 
+// reasonWorktreeInUse is the Workspace Ready reason for a writable mount whose
+// Worktree another writer holds. The mount stays in spec and starts later.
+const reasonWorktreeInUse = "WorktreeInUse"
+
+// worktreeInUseError ends a wait: the mount is accepted but pending.
+type worktreeInUseError struct {
+	workspace string
+	message   string
+}
+
+func (e *worktreeInUseError) Error() string {
+	return fmt.Sprintf("workspace %q mount is waiting: %s", e.workspace, e.message)
+}
+
 func finishTopologyChange(cmd *cobra.Command, kubeClient client.Client, result workspaceMountResult, noWait bool) error {
 	if err := reportStoppedProcesses(cmd, result.stoppedProcesses); err != nil {
 		return err
+	}
+	if len(result.writers) > 0 {
+		if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "warning: the Worktree is held for writing by %s; workspace/%s reports Ready=False reason %s until it is released (check: rcctl workspace get %s)\n",
+			strings.Join(result.writers, ", "), result.workspace.Name, reasonWorktreeInUse, result.workspace.Name); err != nil {
+			return err
+		}
 	}
 	if noWait {
 		_, err := fmt.Fprintf(cmd.ErrOrStderr(), "workspace/%s topology updated; runtime reconciliation pending\n", result.workspace.Name)
@@ -1222,6 +1204,11 @@ func finishTopologyChange(cmd *cobra.Command, kubeClient client.Client, result w
 	indicator := progress.Start(cmd.ErrOrStderr(), "waiting for Workspace mount update...")
 	defer indicator.Stop()
 	if err := waitWorkspaceGenerationReady(cmd.Context(), kubeClient, result.workspace, result.workspace.Generation); err != nil {
+		var inUse *worktreeInUseError
+		if errors.As(err, &inUse) {
+			indicator.Stop()
+			_, err = fmt.Fprintf(cmd.ErrOrStderr(), "workspace/%s topology updated; %s (check: rcctl workspace get %s)\n", result.workspace.Name, inUse.message, result.workspace.Name)
+		}
 		return err
 	}
 	current := new(workspacesv1alpha1.Workspace)

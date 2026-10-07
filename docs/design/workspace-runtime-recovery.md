@@ -29,7 +29,7 @@ Environments cannot hide a terminal runtime or block its cleanup.
 4. Remove old hot mounts. Failed helpers must complete their node cleanup Pods.
 5. Delete the terminal runtime with a UID precondition. Wait for actual absence,
    including any deletion finalizers; do not force deletion.
-6. After the runtime and all mount/cleanup Pods are absent, release writer Leases
+6. After the runtime and all mount/cleanup Pods are absent, release Worktree holders
    and Repository reservations. The existing provisioning path reacquires claims
    and creates the replacement using retained home storage.
 7. Publish Ready only when the replacement runtime and required mounts are ready;

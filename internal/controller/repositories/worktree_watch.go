@@ -17,34 +17,13 @@ package repositories
 import (
 	"context"
 
-	coordinationv1 "k8s.io/api/coordination/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
-	"github.com/nekomeowww/rc/internal/worktreeclaim"
 )
-
-func worktreeNamesForLease(ctx context.Context, kubeClient client.Client, object client.Object) []string {
-	lease, ok := object.(*coordinationv1.Lease)
-	if !ok {
-		return nil
-	}
-	worktrees := new(repositoriesv1alpha1.WorktreeList)
-	if err := kubeClient.List(ctx, worktrees, client.InNamespace(lease.Namespace)); err != nil {
-		return nil
-	}
-	names := make([]string, 0, 1)
-	for index := range worktrees.Items {
-		worktree := &worktrees.Items[index]
-		if worktreeclaim.LeaseName(worktree) == lease.Name {
-			names = append(names, worktree.Name)
-		}
-	}
-	return names
-}
 
 // Index dependencies by their spec reference; labels and status can be absent
 // before a Worktree's first reconcile.

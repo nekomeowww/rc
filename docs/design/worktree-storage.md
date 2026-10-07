@@ -129,7 +129,7 @@ read current source state and revalidate. Preflight is advisory, not authority.
 ## Inspection and driver capability boundaries
 
 The previous parallel-inspection rationale does not justify a global RWX
-default. WorktreeExec and Workspace use the same exclusive write Lease; concurrent
+default. WorktreeExec and Workspace share one exclusive Worktree writer; concurrent
 commands belong inside a Workspace. Linux hot-mount helpers already run on the
 Workspace node. External inspection Pods must respect actual access-mode and
 scheduling constraints; RWO does not promise cross-node access, and RWOP does

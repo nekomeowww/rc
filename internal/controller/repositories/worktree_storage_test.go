@@ -129,9 +129,8 @@ func TestWorktreeCloneRecoversSourceAfterStatusWriteFailure(t *testing.T) {
 			assert.Equal(t, phase != corev1.ClaimBound, busy, "retain original admission until Bound, then release it despite the parent change")
 
 			// ROOT CAUSE:
-			// A lost child must not authorize a fresh clone from today's parent.
-			// The cache may still show pre-creation status, so both creation evidence
-			// and child existence must come from the live reader after a restart.
+			// Explicit child deletion must not authorize a fresh clone from today's
+			// parent. The live reader drives the durable deletion fence after restart.
 			require.NoError(t, c.Delete(ctx, persisted))
 			replacement := source.DeepCopy()
 			replacement.Name, replacement.ResourceVersion = cloneStorageTestReplacement, ""
@@ -146,18 +145,20 @@ func TestWorktreeCloneRecoversSourceAfterStatusWriteFailure(t *testing.T) {
 				},
 			})
 			restarted = &WorktreeReconciler{Client: cached, APIReader: c, Scheme: c.Scheme()}
-			_, err = restarted.Reconcile(ctx, reconcile.Request{NamespacedName: key})
-			require.NoError(t, err)
-			assert.True(t, apierrors.IsNotFound(c.Get(ctx, key, new(corev1.PersistentVolumeClaim))))
+			for range 3 {
+				_, err = restarted.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+				require.NoError(t, err)
+			}
+			assert.True(t, apierrors.IsNotFound(c.Get(ctx, claimKey, new(corev1.PersistentVolumeClaim))))
 			require.NoError(t, c.Get(ctx, key, worktree))
 			ready := meta.FindStatusCondition(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady)
 			require.NotNil(t, ready)
-			assert.Equal(t, "VolumeClaimLost", ready.Reason)
+			assert.Equal(t, "VolumeDeleted", ready.Reason)
 			assert.Equal(t, source.Name, worktree.Status.SourceVolumeClaimName)
 			assert.True(t, meta.IsStatusConditionFalse(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionVolumeReady))
 			busy, err = (repositoryaccess.Gate{Client: c}).Busy(ctx, repository, "another-operation")
 			require.NoError(t, err)
-			assert.False(t, busy, "a lost child must release its reservation")
+			assert.False(t, busy, "a deleted child must release its reservation")
 		})
 	}
 }

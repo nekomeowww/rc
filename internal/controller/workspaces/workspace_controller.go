@@ -53,15 +53,17 @@ import (
 	"github.com/nekomeowww/rc/internal/volumeclaim"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
+	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
 const (
+	reasonWorktreeDeleting           = "WorktreeDeleting"
 	defaultWorkspaceServiceAccount   = "rc-workspace"
 	workspaceTopologyAnnotation      = "workspaces.rc.ayaka.io/topology"
 	workspaceManagedByLabel          = "workspaces.rc.ayaka.io/workspace"
 	workspaceRootMountPath           = "/workspace"
 	workspaceDependencyRequeue       = 2 * time.Second
-	workspaceFinalizer               = "workspaces.rc.ayaka.io/terminate-processes"
+	workspaceFinalizer               = worktreeownership.WorkspaceCleanupFinalizer
 	workspaceImageAnnotation         = "workspaces.rc.ayaka.io/runtime-image"
 	workspaceRevisionAnnotation      = "workspaces.rc.ayaka.io/source-revision"
 	workspaceWriteClaimsAnnotation   = "workspaces.rc.ayaka.io/write-claims"
@@ -98,6 +100,7 @@ type resolvedWorkspace struct {
 	serviceAccount       string
 	automountSAToken     bool
 	writeClaims          []workspaceWriteClaim
+	worktreeMounts       []*repositoriesv1alpha1.Worktree
 	initializers         []workspaceInitializer
 	beforeStop           []lifecycle.Action
 	homeHostPath         string
@@ -138,7 +141,8 @@ type WorkspaceReconciler struct {
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces/finalizers,verbs=update
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaceenvironments;workspaceexecs,verbs=get;list;watch
-// +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=repositories;worktrees,verbs=get;list;watch
+// +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=repositories,verbs=get;list;watch
+// +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=worktrees,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims;pods;serviceaccounts;configmaps;secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods/exec;pods/log;pods/portforward,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch
@@ -241,6 +245,14 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	// Closing storage admission must not prevent its current consumer from stopping.
+	if reason == reasonWorktreeDeleting && workspace.Spec.DesiredState == workspacesv1alpha1.WorkspaceDesiredStateSuspended {
+		active, _, _, err := workspaceProcessState(ctx, r.Client, workspace)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		return r.suspendWorkspace(ctx, workspace, resolved, active)
+	}
 	if reason != "" {
 		result := ctrl.Result{}
 		if strings.HasSuffix(reason, "NotReady") || strings.HasSuffix(reason, "NotFound") || reason == "WorktreeInUse" {
@@ -274,31 +286,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{Requeue: true}, nil
 	}
 	if desiredState == workspacesv1alpha1.WorkspaceDesiredStateSuspended {
-		if active {
-			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "ActiveProcesses", "Workspace cannot suspend while processes are active")
-		}
-		if removed, err := r.removeHotMounts(ctx, workspace); err != nil {
-			return ctrl.Result{}, err
-		} else if !removed {
-			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Unmounting", "Workspace Worktree mounts are stopping")
-		}
-		pod := new(corev1.Pod)
-		if err := reader.Get(ctx, req.NamespacedName, pod); err == nil {
-			if !metav1.IsControlledBy(pod, workspace) {
-				return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "RuntimePodConflict", "A Pod with the Workspace runtime name exists but is not owned by this Workspace")
-			}
-			if err := r.Delete(ctx, pod); err != nil {
-				return ctrl.Result{}, fmt.Errorf("delete suspended Workspace runtime Pod: %w", err)
-			}
-			log.Info("Deleted Workspace runtime Pod", "name", pod.Name)
-			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Stopping", "Workspace runtime Pod is stopping")
-		} else if !errors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("get suspended Workspace runtime Pod: %w", err)
-		}
-		if err := r.releaseClaims(ctx, workspace); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Suspended", "Workspace runtime is suspended")
+		return r.suspendWorkspace(ctx, workspace, resolved, active)
 	}
 
 	if resolved.automountSAToken && resolved.serviceAccount == defaultWorkspaceServiceAccount {
@@ -349,6 +337,12 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "RepositoryNotReady", "Repository is busy or not ready for mounting")
 			}
 		}
+		if admitted, err := r.admitWorktreeMounts(ctx, workspace, resolved.worktreeMounts); err != nil {
+			return ctrl.Result{}, err
+		} else if !admitted {
+			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reasonWorktreeDeleting, "Worktree mount admission is closed")
+		}
+
 		pod, err = workspaceRuntimePod(workspace, resolved)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -420,6 +414,12 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reasonStarting, "Workspace runtime Pod is starting")
 	}
 	if resolved.runtime.OS() == corev1.Linux {
+		if admitted, err := r.admitWorktreeMounts(ctx, workspace, resolved.worktreeMounts); err != nil {
+			return ctrl.Result{}, err
+		} else if !admitted {
+			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reasonWorktreeDeleting, "Worktree mount admission is closed")
+		}
+
 		ready, reason, message, err := r.reconcileHotMounts(ctx, workspace, pod, resolved.hotMounts, active)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -427,6 +427,10 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if !ready {
 			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reason, message)
 		}
+		if err := r.releaseOldWorktreeMounts(ctx, workspace, pod, resolved.worktreeMounts); err != nil {
+			return ctrl.Result{}, err
+		}
+
 		if err := r.releaseWriteClaims(ctx, workspace, resolved.writeClaims); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -498,6 +502,12 @@ func (r *WorkspaceReconciler) finalizeWorkspace(ctx context.Context, workspace *
 	} else if !errors.IsNotFound(err) {
 		return ctrl.Result{}, fmt.Errorf("get runtime Pod while finalizing Workspace: %w", err)
 	}
+	if gone, err := r.hotMountsGone(ctx, workspace); err != nil {
+		return ctrl.Result{}, err
+	} else if !gone {
+		return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, nil
+	}
+
 	if err := r.releaseClaims(ctx, workspace); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -583,6 +593,14 @@ func (r *WorkspaceReconciler) releaseClaims(ctx context.Context, workspace *work
 	if err := reader.Get(ctx, client.ObjectKeyFromObject(workspace), new(corev1.Pod)); err == nil {
 		return nil
 	} else if !errors.IsNotFound(err) {
+		return err
+	}
+
+	if gone, err := r.hotMountsGone(ctx, workspace); err != nil || !gone {
+		return err
+	}
+
+	if err := r.releaseWorktreeMounts(ctx, workspace, nil); err != nil {
 		return err
 	}
 
@@ -698,6 +716,21 @@ func (r *WorkspaceReconciler) resolveWorkspaceDependencies(ctx context.Context, 
 		}
 		if reason != "" {
 			return resolved, reason, message, nil
+		}
+
+		if mount.WorktreeRef != nil {
+			captured := new(repositoriesv1alpha1.Worktree)
+			reader := r.APIReader
+			if reader == nil {
+				reader = r.Client
+			}
+			if err := reader.Get(ctx, client.ObjectKey{Namespace: workspace.Namespace, Name: mount.WorktreeRef.Name}, captured); err != nil {
+				return nil, "", "", err
+			}
+			if captured.Status.VolumeClaimName != volume.PersistentVolumeClaim.ClaimName || worktreeownership.MountsClosed(captured) {
+				return resolved, reasonWorktreeDeleting, "Worktree changed while resolving the mount", nil
+			}
+			resolved.worktreeMounts = append(resolved.worktreeMounts, captured)
 		}
 		if resolved.runtime.OS() == corev1.Linux && mount.WorktreeRef != nil {
 			if _, duplicate := hotWorktreeNames[mount.WorktreeRef.Name]; duplicate {
@@ -841,6 +874,10 @@ func (r *WorkspaceReconciler) resolveWorkspaceMount(ctx context.Context, namespa
 			}
 			return volume, volumeMount, nil, nil, "", "", fmt.Errorf("get mounted Worktree: %w", err)
 		}
+		if worktreeownership.MountsClosed(worktree) {
+			return volume, volumeMount, nil, nil, reasonWorktreeDeleting, fmt.Sprintf("Mounted Worktree %s is being deleted or has lost its storage", worktree.Name), nil
+		}
+
 		ready := meta.FindStatusCondition(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady)
 		worktreeReady := ready != nil && ready.Status == metav1.ConditionTrue
 		deferred := worktreebootstrap.Deferred(worktree)

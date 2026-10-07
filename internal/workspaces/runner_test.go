@@ -378,7 +378,11 @@ func TestRunnerRollsBackTemporaryTopologyWhenWorktreeCreationFails(t *testing.T)
 	requirements.Error(kubeClient.Get(context.Background(), client.ObjectKey{Name: "temporary-rollback", Namespace: runnerTestNamespace}, workspace), "delete the partially created Workspace")
 	worktrees := new(repositoriesv1alpha1.WorktreeList)
 	requirements.NoError(kubeClient.List(context.Background(), worktrees), "list Worktrees after rollback")
-	requirements.Empty(worktrees.Items, "delete every Worktree created before the failure")
+	requirements.Len(worktrees.Items, 1, "only the first Worktree was created")
+	// Cleanup requests deletion; the controller must release clone reservations
+	// and writer protection before the API object can disappear.
+	requirements.False(worktrees.Items[0].DeletionTimestamp.IsZero(), "request deletion of every created Worktree")
+	requirements.Contains(worktrees.Items[0].Finalizers, "repositories.rc.ayaka.io/worktree-delete-protection")
 }
 
 func TestRunnerCreatesRetainedNamedWorkspace(t *testing.T) {
@@ -396,6 +400,20 @@ func TestRunnerCreatesRetainedNamedWorkspace(t *testing.T) {
 	assert.Equal(t, "retained", target.Workspace.Name)
 	assert.Equal(t, workspacesv1alpha1.WorkspaceRetentionPolicyRetain, target.Workspace.Spec.EffectiveRetentionPolicy())
 	assert.False(t, target.Workspace.Spec.IsTemporary())
+}
+
+func TestRunnerRejectsDeletingWorktreeBeforeCreatingWorkspace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, repositoriesv1alpha1.AddToScheme(scheme))
+	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
+	now := metav1.Now()
+	worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: "deleting", Namespace: runnerTestNamespace, DeletionTimestamp: &now, Finalizers: []string{"test/hold"}}, Status: repositoriesv1alpha1.WorktreeStatus{Conditions: []metav1.Condition{{Type: repositoriesv1alpha1.WorktreeConditionReady, Status: metav1.ConditionTrue}}}}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()
+	_, err := (&Runner{Client: kube}).Prepare(context.Background(), RunRequest{Create: true, Name: "new-workspace", Namespace: runnerTestNamespace, Worktrees: []MountRequest{{Name: worktree.Name}}})
+	require.ErrorContains(t, err, "is being deleted")
+	workspaces := new(workspacesv1alpha1.WorkspaceList)
+	require.NoError(t, kube.List(context.Background(), workspaces))
+	assert.Empty(t, workspaces.Items)
 }
 
 func TestRunnerRejectsPVCConflictBeforeCreatingTopology(t *testing.T) {

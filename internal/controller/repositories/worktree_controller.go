@@ -46,6 +46,7 @@ import (
 	"github.com/nekomeowww/rc/internal/volumeclaim"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
+	"github.com/nekomeowww/rc/internal/worktreeownership"
 	"github.com/nekomeowww/rc/internal/worktreestorage"
 )
 
@@ -107,10 +108,7 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	worktreePath := worktreePath(worktree)
 	claimName, err := volumeclaim.Resolve(ctx, reader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
-	if volumeclaim.IsConflict(err) {
-		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimConflict", err.Error(), worktree.Status.VolumeClaimName, worktree.Status.SourceVolumeClaimName, worktreePath)
-	}
-	if err != nil {
+	if err != nil && claimName == "" {
 		return ctrl.Result{}, err
 	}
 	claim := new(corev1.PersistentVolumeClaim)
@@ -118,11 +116,20 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// Read directly before creation: a cached absence must not replan a child
 	// already created from an earlier source observation.
-	err = reader.Get(ctx, claimKey, claim)
-	if err != nil && !errors.IsNotFound(err) {
-		return ctrl.Result{}, fmt.Errorf("get Worktree PersistentVolumeClaim: %w", err)
+	claimErr := reader.Get(ctx, claimKey, claim)
+	if claimErr != nil && !errors.IsNotFound(claimErr) {
+		return ctrl.Result{}, fmt.Errorf("get Worktree PersistentVolumeClaim: %w", claimErr)
 	}
-	if errors.IsNotFound(err) {
+	// Handle storage deletion before Repository readiness or checkout work. The
+	// parent may already be absent; that must not strand a PVC finalizer.
+	if worktreeownership.MountsClosed(worktree) || (errors.IsNotFound(claimErr) && worktree.Status.VolumeClaimName != "") || (claimErr == nil && metav1.IsControlledBy(claim, worktree) && !claim.DeletionTimestamp.IsZero()) {
+		return r.reconcileStorageDeletion(ctx, worktree)
+	}
+	if volumeclaim.IsConflict(err) {
+		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimConflict", err.Error(), worktree.Status.VolumeClaimName, worktree.Status.SourceVolumeClaimName, worktreePath)
+	}
+	err = claimErr
+	if errors.IsNotFound(claimErr) {
 		// A recorded child is durable creation evidence. Its loss must not silently
 		// authorize a new clone from today's Repository under the same Worktree.
 		if worktree.Status.VolumeClaimName != "" {
@@ -210,6 +217,9 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if sourceErr != nil {
 		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimSpecChanged", sourceErr.Error(), claim.Name, "", worktreePath)
 	}
+	if err := worktreeownership.EnsureVolumeProtection(ctx, r.Client, claim); err != nil {
+		return ctrl.Result{}, err
+	}
 	if !worktreeClaimMatches(claim, worktree.Spec.Storage) {
 		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimSpecChanged", "Changing the Worktree child volume specification is not supported", claim.Name, sourceClaimName, worktreePath)
 	}
@@ -289,39 +299,15 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 }
 
 func (r *WorktreeReconciler) reconcileDelete(ctx context.Context, worktree *repositoriesv1alpha1.Worktree) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
-	blockers, err := r.worktreeReferenceBlockers(ctx, worktree)
+	// Once our cleanup is complete, leave remaining finalizers to their owners.
+	if !controllerutil.ContainsFinalizer(worktree, worktreeDeletionFinalizer) {
+		return ctrl.Result{}, nil
+	}
+	ready, err := r.prepareWorktreeCleanup(ctx, worktree)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if len(blockers) > 0 {
-		log.Info("Worktree deletion is waiting for Workspace references", "worktree", worktree.Name, "workspaces", blockers)
-		return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, nil
-	}
-
-	deletionLease := worktreeclaim.DeletionLease(worktree)
-	if err := r.Create(ctx, deletionLease); err != nil {
-		if !errors.IsAlreadyExists(err) {
-			return ctrl.Result{}, fmt.Errorf("acquire Worktree deletion Lease: %w", err)
-		}
-		current := new(coordinationv1.Lease)
-		if err := r.Get(ctx, client.ObjectKeyFromObject(deletionLease), current); err != nil {
-			return ctrl.Result{}, fmt.Errorf("get Worktree deletion Lease: %w", err)
-		}
-		if !worktreeclaim.IsDeletionHolder(worktree, current) {
-			log.Info("Worktree deletion is waiting for active writer", "worktree", worktree.Name, "holder", current.Labels[worktreeclaim.HolderLabel])
-			return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, nil
-		}
-	}
-
-	// Re-list after acquiring the exclusive Lease so a Workspace that raced the
-	// initial availability check cannot be orphaned by finalizer removal.
-	blockers, err = r.worktreeReferenceBlockers(ctx, worktree)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if len(blockers) > 0 {
-		log.Info("Worktree deletion is waiting for Workspace references", "worktree", worktree.Name, "workspaces", blockers)
+	if !ready {
 		return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, nil
 	}
 
@@ -334,28 +320,41 @@ func (r *WorktreeReconciler) reconcileDelete(ctx context.Context, worktree *repo
 	// Use the same identity as provisioning, including recovery before status is
 	// persisted. Absence at the CR name does not prove its selected PVC is gone.
 	claimName, err := volumeclaim.Resolve(ctx, reader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
-	if err != nil {
+	if err != nil && claimName == "" {
 		return ctrl.Result{}, err
 	}
 	claim := new(corev1.PersistentVolumeClaim)
 	claimKey := client.ObjectKey{Namespace: worktree.Namespace, Name: claimName}
-	if err := reader.Get(ctx, claimKey, claim); err == nil && metav1.IsControlledBy(claim, worktree) && claim.Status.Phase != corev1.ClaimBound {
-		return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, nil
+	if err := reader.Get(ctx, claimKey, claim); err == nil && metav1.IsControlledBy(claim, worktree) {
+		if claim.DeletionTimestamp.IsZero() && claim.Status.Phase != corev1.ClaimBound {
+			return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, nil
+		}
+		// Foreground GC has already cancelled a terminating claim. It cannot bind
+		// now: release our guard, then wait for PVC/provisioner cleanup instead of
+		// waiting forever for ClaimBound. Keep the source reservation until absent.
+		if err := worktreeownership.ReleaseVolumeProtection(ctx, r.Client, claim); err != nil {
+			return ctrl.Result{}, err
+		}
+		if !claim.DeletionTimestamp.IsZero() {
+			return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, nil
+		}
 	} else if err != nil && !errors.IsNotFound(err) {
 		return ctrl.Result{}, err
 	}
+
 	if err := (repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}).Release(ctx, worktree.Namespace, repositoryaccess.Token("clone", worktree)); err != nil {
 		return ctrl.Result{}, err
 	}
 	key := client.ObjectKeyFromObject(worktree)
 	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current := new(repositoriesv1alpha1.Worktree)
-		if err := r.Get(ctx, key, current); err != nil {
+		if err := reader.Get(ctx, key, current); err != nil {
 			return client.IgnoreNotFound(err)
 		}
 		before := current.DeepCopy()
 		controllerutil.RemoveFinalizer(current, worktreeDeletionFinalizer)
-		return r.Patch(ctx, current, client.MergeFrom(before))
+		// Foreground GC can complete deletion after the GET; absence is success.
+		return client.IgnoreNotFound(r.Patch(ctx, current, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})))
 	}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("remove Worktree deletion finalizer: %w", err)
 	}
@@ -364,23 +363,11 @@ func (r *WorktreeReconciler) reconcileDelete(ctx context.Context, worktree *repo
 }
 
 func (r *WorktreeReconciler) worktreeReferenceBlockers(ctx context.Context, worktree *repositoriesv1alpha1.Worktree) ([]string, error) {
-	workspaces := new(workspacesv1alpha1.WorkspaceList)
-	if err := r.List(ctx, workspaces, client.InNamespace(worktree.Namespace)); err != nil {
-		return nil, fmt.Errorf("list Workspaces before deleting Worktree: %w", err)
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
 	}
-	blockers := make([]string, 0)
-	for index := range workspaces.Items {
-		workspace := &workspaces.Items[index]
-		for _, mount := range workspace.Spec.Mounts {
-			if mount.WorktreeRef != nil && mount.WorktreeRef.Name == worktree.Name {
-				blockers = append(blockers, workspace.Name)
-				break
-			}
-		}
-	}
-	slices.Sort(blockers)
-
-	return blockers, nil
+	return worktreeownership.ReferenceBlockers(ctx, reader, worktree.Namespace, worktree.Name)
 }
 
 func (r *WorktreeReconciler) worktreesForWorkspace(_ context.Context, object client.Object) []ctrl.Request {
@@ -474,8 +461,9 @@ func worktreeVolumeClaim(
 ) *corev1.PersistentVolumeClaim {
 	return &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      claimName,
-			Namespace: worktree.Namespace,
+			Name:       claimName,
+			Namespace:  worktree.Namespace,
+			Finalizers: []string{worktreeownership.VolumeProtectionFinalizer},
 			Labels: map[string]string{
 				worktreeManagedByLabel:  worktreeManagedByValue,
 				worktreeRepositoryLabel: worktree.Spec.RepositoryRef.Name,

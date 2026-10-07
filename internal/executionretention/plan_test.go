@@ -9,7 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestBuildForTargetAppliesCountPolicy(t *testing.T) {
+func TestPolicyForAppliesCountPolicy(t *testing.T) {
 	now := time.Date(2026, 10, 7, 0, 0, 0, 0, time.UTC)
 	completed := metav1.NewTime(now.Add(-time.Hour))
 	executions := []workspacesv1alpha1.WorkspaceExec{
@@ -17,7 +17,8 @@ func TestBuildForTargetAppliesCountPolicy(t *testing.T) {
 		{ObjectMeta: metav1.ObjectMeta{Name: "old"}, Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, CompletedAt: &completed}},
 	}
 	target := &workspacesv1alpha1.Workspace{Spec: workspacesv1alpha1.WorkspaceSpec{ExecutionRetention: &workspacesv1alpha1.ExecutionRetentionPolicy{MaxEntries: 1, TTLAfterFinished: &metav1.Duration{Duration: 24 * time.Hour}}}}
-	plan, err := BuildForTarget(executions, target, now)
-	require.NoError(t, err)
+	policy, ok := PolicyFor(target)
+	require.True(t, ok)
+	plan := Build(executions, policy, now)
 	require.Equal(t, []int{1}, plan.Remove)
 }

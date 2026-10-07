@@ -5,7 +5,6 @@ package executionretention
 
 import (
 	"cmp"
-	"fmt"
 	"slices"
 	"time"
 
@@ -49,17 +48,6 @@ func PolicyFor(target client.Object) (policy *workspacesv1alpha1.ExecutionRetent
 	default:
 		return nil, false
 	}
-}
-
-// BuildForTarget resolves a target's effective policy and applies it to a
-// complete target-scoped execution snapshot. Unsupported, deleting, and
-// temporary targets fail closed because they have no history-pruning policy.
-func BuildForTarget(executions []workspacesv1alpha1.WorkspaceExec, target client.Object, now time.Time) (Plan, error) {
-	policy, ok := PolicyFor(target)
-	if !ok {
-		return Plan{}, fmt.Errorf("execution target is absent, deleting, temporary, or unsupported (%T); it has no history-pruning policy", target)
-	}
-	return Build(executions, policy, now), nil
 }
 
 // Build applies the canonical retention defaults, pins, terminal-state checks,

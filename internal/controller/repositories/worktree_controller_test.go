@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
@@ -364,6 +365,11 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(k8sClient.Create(ctx, repository)).To(Succeed())
 		repository.Status = readyRepositoryStatus(repository.Name)
 		Expect(k8sClient.Status().Update(ctx, repository)).To(Succeed())
+		source := parentVolumeClaim(repository, repository.Status.VolumeClaimName)
+		Expect(controllerutil.SetControllerReference(repository, source, k8sClient.Scheme())).To(Succeed())
+		Expect(k8sClient.Create(ctx, source)).To(Succeed())
+		source.Status = corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound, Capacity: source.Spec.Resources.Requests.DeepCopy()}
+		Expect(k8sClient.Status().Update(ctx, source)).To(Succeed())
 		worktree := &repositoriesv1alpha1.Worktree{
 			ObjectMeta: metav1Object("deletion-clone-child"),
 			Spec:       repositoriesv1alpha1.WorktreeSpec{RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: repository.Name}, Branch: "pending"},

@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	"github.com/nekomeowww/rc/internal/volumeclaim"
 )
 
 // WorktreeAddRequest describes one independent child volume and Git checkout
@@ -79,6 +80,9 @@ func (c *WorktreeClient) Start(ctx context.Context, request WorktreeAddRequest) 
 		}
 	}
 
+	if err := volumeclaim.Preflight(ctx, c.Client, worktree, volumeclaim.Worktree, 0); err != nil {
+		return nil, err
+	}
 	err = c.Create(ctx, worktree)
 	if err != nil {
 		return nil, fmt.Errorf("create Worktree: %w", err)

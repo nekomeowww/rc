@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -400,6 +401,9 @@ func runAdd(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, options addOp
 	}
 
 	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		return fmt.Errorf("register core API types: %w", err)
+	}
 	if err := repositoriesv1alpha1.AddToScheme(scheme); err != nil {
 		return fmt.Errorf("register Repository API types: %w", err)
 	}

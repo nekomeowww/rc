@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -77,6 +78,9 @@ func run(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, options cloneOpt
 	}
 
 	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		return fmt.Errorf("register core API types: %w", err)
+	}
 	if err := repositoriesv1alpha1.AddToScheme(scheme); err != nil {
 		return fmt.Errorf("register Repository API types: %w", err)
 	}

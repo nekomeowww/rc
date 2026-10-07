@@ -25,6 +25,8 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/repositoryaccess"
+	"github.com/nekomeowww/rc/internal/volumeclaim"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
 )
@@ -67,7 +69,7 @@ var _ = Describe("Worktree Controller", func() {
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		Expect(err).NotTo(HaveOccurred())
 		claim := new(corev1.PersistentVolumeClaim)
-		Expect(k8sClient.Get(ctx, key, claim)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: "worktree-" + worktreeName}, claim)).To(Succeed())
 		claim.Status.Phase = corev1.ClaimBound
 		Expect(k8sClient.Status().Update(ctx, claim)).To(Succeed())
 		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
@@ -90,7 +92,7 @@ var _ = Describe("Worktree Controller", func() {
 				InitContainers: []corev1.Container{{Name: containerName, Image: testRunnerImage, Command: []string{"true"}}},
 				Containers:     []corev1.Container{{Name: "runtime", Image: testRunnerImage, Command: []string{"sleep", "3600"}}},
 				Volumes: []corev1.Volume{{Name: worktreeVolumeTestName, VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: worktreeName},
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim.Name},
 				}}},
 			},
 		}
@@ -156,7 +158,7 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		claim := new(corev1.PersistentVolumeClaim)
-		Expect(k8sClient.Get(ctx, key, claim)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: "worktree-" + worktreeName}, claim)).To(Succeed())
 		Expect(claim.Spec.DataSource.Kind).To(Equal("PersistentVolumeClaim"))
 		Expect(claim.Spec.DataSource.Name).To(Equal(repositoryName))
 		Expect(claim.Spec.AccessModes).To(Equal([]corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}))
@@ -175,7 +177,7 @@ var _ = Describe("Worktree Controller", func() {
 				Volumes: []corev1.Volume{{
 					Name: worktreeVolumeTestName,
 					VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: worktreeName,
+						ClaimName: claim.Name,
 					}},
 				}},
 			},
@@ -207,7 +209,7 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(job.Spec.Template.Spec.SecurityContext.RunAsGroup).To(HaveValue(Equal(int64(1000))))
 		Expect(job.Spec.Template.Spec.SecurityContext.FSGroup).To(HaveValue(Equal(int64(1000))))
 		Expect(job.Spec.Template.Spec.SecurityContext.FSGroupChangePolicy).To(HaveValue(Equal(corev1.FSGroupChangeOnRootMismatch)))
-		Expect(job.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ClaimName).To(Equal(worktreeName))
+		Expect(job.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ClaimName).To(Equal(claim.Name))
 		Expect(job.Spec.Template.Labels[worktreeUIDLabel]).To(Equal(string(worktree.UID)))
 		Expect(metav1.IsControlledBy(job, worktree)).To(BeTrue())
 
@@ -228,7 +230,7 @@ var _ = Describe("Worktree Controller", func() {
 		ready := meta.FindStatusCondition(persisted.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady)
 		Expect(ready).NotTo(BeNil())
 		Expect(ready.Status).To(Equal(metav1.ConditionTrue))
-		Expect(persisted.Status.VolumeClaimName).To(Equal(worktreeName))
+		Expect(persisted.Status.VolumeClaimName).To(Equal(claim.Name))
 		Expect(persisted.Status.WorktreePath).To(Equal(workerMountPath))
 
 		// Kubernetes deletes the completed bootstrap Job after its TTL. The
@@ -337,6 +339,50 @@ var _ = Describe("Worktree Controller", func() {
 		head := exec.Command("git", "rev-parse", "--verify", "HEAD")
 		head.Dir = repositoryRoot
 		Expect(head.Run()).NotTo(Succeed())
+	})
+
+	It("keeps a Pending typed clone reserved during Worktree deletion", func() {
+		ctx := context.Background()
+		Expect(workspacesv1alpha1.AddToScheme(k8sClient.Scheme())).To(Succeed())
+		repository := readyRepository("deletion-clone-parent")
+		Expect(k8sClient.Create(ctx, repository)).To(Succeed())
+		repository.Status = readyRepositoryStatus(repository.Name)
+		Expect(k8sClient.Status().Update(ctx, repository)).To(Succeed())
+		worktree := &repositoriesv1alpha1.Worktree{
+			ObjectMeta: metav1Object("deletion-clone-child"),
+			Spec:       repositoriesv1alpha1.WorktreeSpec{RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: repository.Name}, Branch: "pending"},
+		}
+		Expect(k8sClient.Create(ctx, worktree)).To(Succeed())
+		reconciler := &WorktreeReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: testRunnerImage}
+		request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(worktree)}
+		_, err := reconciler.Reconcile(ctx, request)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, request.NamespacedName, worktree)).To(Succeed())
+		Expect(worktree.Status.VolumeClaimName).To(Equal(volumeclaim.Name(volumeclaim.Worktree, worktree.Name, 0)))
+		claim := new(corev1.PersistentVolumeClaim)
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: worktree.Namespace, Name: worktree.Status.VolumeClaimName}, claim)).To(Succeed())
+		claim.Status.Phase = corev1.ClaimPending
+		Expect(k8sClient.Status().Update(ctx, claim)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, worktree)).To(Succeed())
+		gate := repositoryaccess.Gate{Client: k8sClient}
+		for range 2 {
+			result, err := reconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+			Expect(k8sClient.Get(ctx, request.NamespacedName, worktree)).To(Succeed())
+			Expect(worktree.Finalizers).To(ContainElement(worktreeDeletionFinalizer))
+			busy, err := gate.Busy(ctx, repository, "another-writer")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(busy).To(BeTrue())
+		}
+		claim.Status.Phase = corev1.ClaimBound
+		Expect(k8sClient.Status().Update(ctx, claim)).To(Succeed())
+		_, err = reconciler.Reconcile(ctx, request)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, request.NamespacedName, worktree))).To(BeTrue())
+		busy, err := gate.Busy(ctx, repository, "another-writer")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(busy).To(BeFalse())
 	})
 
 	It("keeps deletion protected while a Workspace references the Worktree", func() {

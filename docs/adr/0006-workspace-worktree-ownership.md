@@ -2,7 +2,7 @@
 status: accepted
 ---
 
-# Give generated Worktrees one Workspace lifecycle
+# ADR 0006: Give generated Worktrees one Workspace lifecycle
 
 Worktree content is an independent Git checkout, but its resource lifecycle can
 be either independent or Workspace-owned. Independence of Git history and storage

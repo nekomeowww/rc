@@ -29,6 +29,30 @@ const (
 	// RepositoryConditionStorageReady reports whether the parent volume can
 	// accept an exec request.
 	RepositoryConditionStorageReady = "StorageReady"
+
+	// RepositoryConditionDeletionBlocked is True only while a Repository with a
+	// deletionTimestamp is still present and rc observes what it waits on. It
+	// is absent otherwise. rc holds no finalizer on Repository, so it reports
+	// Kubernetes garbage-collection waits: live Pods that use the parent volume
+	// and the owned parent PVC itself.
+	RepositoryConditionDeletionBlocked = "DeletionBlocked"
+)
+
+// Reasons of the DeletionBlocked condition on Worktree and Repository. The
+// condition message names the blocking objects.
+const (
+	// DeletionBlockedReasonWaitingForMounts means Workspaces still reference or
+	// hold admitted mounts of the volume.
+	DeletionBlockedReasonWaitingForMounts = "WaitingForMounts"
+	// DeletionBlockedReasonWaitingForWriter means another writer holds the
+	// exclusive write Lease.
+	DeletionBlockedReasonWaitingForWriter = "WaitingForWriter"
+	// DeletionBlockedReasonWaitingForPods means non-terminal Pods still use the
+	// volume.
+	DeletionBlockedReasonWaitingForPods = "WaitingForPods"
+	// DeletionBlockedReasonWaitingForVolume means the owned PVC is still
+	// provisioning or is being deleted.
+	DeletionBlockedReasonWaitingForVolume = "WaitingForVolume"
 )
 
 // RepositoryCredentialReference selects a Credential in the same namespace as
@@ -147,6 +171,7 @@ type RepositoryStatus struct {
 // +kubebuilder:printcolumn:name="Ref",type=string,JSONPath=".spec.ref"
 // +kubebuilder:printcolumn:name="Updated",type=date,JSONPath=".status.lastUpdatedAt"
 // +kubebuilder:printcolumn:name="Volume",type=string,JSONPath=".status.volumeClaimName"
+// +kubebuilder:printcolumn:name="Blocked",type=string,JSONPath=".status.conditions[?(@.type=='DeletionBlocked')].reason",priority=1
 
 // Repository is the Schema for the repositories API
 type Repository struct {

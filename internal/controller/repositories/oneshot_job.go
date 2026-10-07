@@ -31,9 +31,11 @@ import (
 type oneShotJobState int
 
 type oneShotStatusAdapter[T client.Object] struct {
-	newObject     func() T
-	status        func(T) (string, []metav1.Condition)
-	apply         func(T, string, []metav1.Condition)
+	newObject func() T
+	status    func(T) (string, []metav1.Condition)
+	apply     func(T, string, []metav1.Condition)
+	// completedAt returns the address of the status completion time.
+	completedAt   func(T) **metav1.Time
 	conditionType string
 	resourceKind  string
 }
@@ -84,6 +86,22 @@ func (a oneShotStatusAdapter[T]) set(
 	message string,
 	jobName string,
 ) error {
+	return a.setAt(ctx, kubeClient, key, status, reason, message, jobName, nil)
+}
+
+// setAt records the Succeeded condition. A terminal status also records
+// completedAt once: completed when known, otherwise the time of this write.
+// A terminal condition is never rewritten.
+func (a oneShotStatusAdapter[T]) setAt(
+	ctx context.Context,
+	kubeClient client.Client,
+	key client.ObjectKey,
+	status metav1.ConditionStatus,
+	reason string,
+	message string,
+	jobName string,
+	completed *metav1.Time,
+) error {
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current := a.newObject()
 		if err := kubeClient.Get(ctx, key, current); err != nil {
@@ -106,7 +124,18 @@ func (a oneShotStatusAdapter[T]) set(
 			Message:            message,
 		})
 		a.apply(current, jobName, conditions)
-		if currentJobName == jobName && slices.Equal(currentConditions, conditions) {
+		completedAt := a.completedAt(current)
+		completionChanged := false
+		if status != metav1.ConditionUnknown && *completedAt == nil {
+			if completed != nil {
+				*completedAt = completed.DeepCopy()
+			} else {
+				now := metav1.Now()
+				*completedAt = &now
+			}
+			completionChanged = true
+		}
+		if !completionChanged && currentJobName == jobName && slices.Equal(currentConditions, conditions) {
 			return nil
 		}
 		if err := kubeClient.Status().Patch(ctx, current, client.MergeFrom(before)); err != nil {
@@ -114,6 +143,48 @@ func (a oneShotStatusAdapter[T]) set(
 		}
 		return nil
 	})
+}
+
+// backfillCompletedAt sets completedAt once on a result recorded before the
+// field existed. The terminal condition's transition time is that result's
+// recording time, so the retention clock does not restart.
+func (a oneShotStatusAdapter[T]) backfillCompletedAt(ctx context.Context, kubeClient client.Client, key client.ObjectKey) error {
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := a.newObject()
+		if err := kubeClient.Get(ctx, key, current); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		_, conditions := a.status(current)
+		condition := meta.FindStatusCondition(conditions, a.conditionType)
+		completedAt := a.completedAt(current)
+		if condition == nil || condition.Status == metav1.ConditionUnknown || *completedAt != nil {
+			return nil
+		}
+		before, ok := current.DeepCopyObject().(T)
+		if !ok {
+			return fmt.Errorf("copy %s status object", a.resourceKind)
+		}
+		*completedAt = condition.LastTransitionTime.DeepCopy()
+		if err := kubeClient.Status().Patch(ctx, current, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+			return fmt.Errorf("backfill %s completion time: %w", a.resourceKind, err)
+		}
+		return nil
+	})
+}
+
+// jobCompletionTime is the Job's completion time, or the transition time of
+// its terminal condition when Kubernetes records no completion time (a failed
+// Job). It returns nil when neither is known.
+func jobCompletionTime(job *batchv1.Job) *metav1.Time {
+	if job.Status.CompletionTime != nil {
+		return job.Status.CompletionTime
+	}
+	for _, condition := range job.Status.Conditions {
+		if condition.Status == corev1.ConditionTrue && (condition.Type == batchv1.JobComplete || condition.Type == batchv1.JobFailed) && !condition.LastTransitionTime.IsZero() {
+			return &condition.LastTransitionTime
+		}
+	}
+	return nil
 }
 
 func terminalJobOutcome(job *batchv1.Job) (metav1.ConditionStatus, string, string, bool) {

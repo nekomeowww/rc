@@ -27,6 +27,10 @@ spec:
     - jsonPath: .status.worktreePath
       name: Path
       type: string
+    - jsonPath: .status.conditions[?(@.type=='DeletionBlocked')].reason
+      name: Blocked
+      priority: 1
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date

@@ -117,7 +117,7 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return r.reconcileStorageDeletion(ctx, worktree)
 	}
 	if volumeclaim.IsConflict(err) {
-		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimConflict", err.Error(), worktree.Status.VolumeClaimName, worktree.Status.SourceVolumeClaimName, worktreePath)
+		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, repositoriesv1alpha1.WorktreeReasonVolumeClaimConflict, err.Error(), worktree.Status.VolumeClaimName, worktree.Status.SourceVolumeClaimName, worktreePath)
 	}
 	if claim == nil {
 		// A recorded child is durable creation evidence. Its loss must not silently
@@ -126,7 +126,7 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			if err := r.releaseClone(ctx, worktree); err != nil {
 				return ctrl.Result{}, err
 			}
-			return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimLost", "Previously created child PVC is missing; restore the child or recreate the Worktree explicitly", worktree.Status.VolumeClaimName, worktree.Status.SourceVolumeClaimName, worktreePath)
+			return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, repositoriesv1alpha1.WorktreeReasonVolumeClaimLost, "Previously created child PVC is missing; restore the child or recreate the Worktree explicitly", worktree.Status.VolumeClaimName, worktree.Status.SourceVolumeClaimName, worktreePath)
 		}
 		// Repository state is an input to creation only. An existing independent
 		// child must recover even if its Repository was replaced or removed.
@@ -294,18 +294,21 @@ func (r *WorktreeReconciler) reconcileDelete(ctx context.Context, worktree *repo
 	// Cleanup resolves the same identity as provisioning, including recovery
 	// before status is persisted. Absence at the CR name does not prove its
 	// selected PVC is gone.
-	claimName, ready, err := r.prepareWorktreeCleanup(ctx, worktree)
+	claimName, wait, err := r.prepareWorktreeCleanup(ctx, worktree)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if !ready {
-		return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, nil
+	if wait != nil {
+		return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, r.setDeletionBlocked(ctx, worktree, wait)
 	}
 	claim := new(corev1.PersistentVolumeClaim)
 	claimKey := client.ObjectKey{Namespace: worktree.Namespace, Name: claimName}
 	if err := r.APIReader.Get(ctx, claimKey, claim); err == nil && metav1.IsControlledBy(claim, worktree) {
 		if claim.DeletionTimestamp.IsZero() && claim.Status.Phase != corev1.ClaimBound {
-			return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, nil
+			return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, r.setDeletionBlocked(ctx, worktree, &cleanupWait{
+				reason:  repositoriesv1alpha1.DeletionBlockedReasonWaitingForVolume,
+				message: fmt.Sprintf("Waiting for PersistentVolumeClaim %s to finish provisioning", claim.Name),
+			})
 		}
 		// Foreground GC has already cancelled a terminating claim. It cannot bind
 		// now: release our guard, then wait for PVC/provisioner cleanup instead of
@@ -314,12 +317,21 @@ func (r *WorktreeReconciler) reconcileDelete(ctx context.Context, worktree *repo
 			return ctrl.Result{}, err
 		}
 		if !claim.DeletionTimestamp.IsZero() {
-			return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, nil
+			return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, r.setDeletionBlocked(ctx, worktree, &cleanupWait{
+				reason:  repositoriesv1alpha1.DeletionBlockedReasonWaitingForVolume,
+				message: fmt.Sprintf("Waiting for PersistentVolumeClaim %s to be deleted", claim.Name),
+			})
 		}
 	} else if err != nil && !errors.IsNotFound(err) {
 		return ctrl.Result{}, err
 	}
 
+	// Remaining finalizers belong to others; do not leave a stale blocker.
+	if meta.FindStatusCondition(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionDeletionBlocked) != nil {
+		if err := r.setDeletionBlocked(ctx, worktree, nil); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	if err := r.releaseClone(ctx, worktree); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -671,7 +683,9 @@ func (r *WorktreeReconciler) setWorktreeStatus(ctx context.Context, worktree *re
 			current.Status.VolumeClaimName = claimName
 		}
 		current.Status.WorktreePath = path
-		if reason == "VolumeClaimLost" {
+		// Storage failures also withdraw VolumeReady: deferred Workspaces mount on
+		// VolumeReady alone and must not mount a lost or foreign claim.
+		if reason == repositoriesv1alpha1.WorktreeReasonVolumeClaimLost || reason == repositoriesv1alpha1.WorktreeReasonVolumeClaimConflict {
 			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 				Type: repositoriesv1alpha1.WorktreeConditionVolumeReady, Status: metav1.ConditionFalse,
 				ObservedGeneration: current.Generation, Reason: reason, Message: message,

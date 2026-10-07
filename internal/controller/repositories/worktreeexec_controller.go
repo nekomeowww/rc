@@ -55,6 +55,7 @@ var worktreeExecStatus = oneShotStatusAdapter[*repositoriesv1alpha1.WorktreeExec
 		exec.Status.JobName = jobName
 		exec.Status.Conditions = conditions
 	},
+	completedAt:   func(exec *repositoriesv1alpha1.WorktreeExec) **metav1.Time { return &exec.Status.CompletedAt },
 	conditionType: repositoriesv1alpha1.WorktreeExecConditionSucceeded,
 	resourceKind:  "WorktreeExec",
 }
@@ -86,6 +87,11 @@ func (r *WorktreeExecReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	condition := meta.FindStatusCondition(exec.Status.Conditions, repositoriesv1alpha1.WorktreeExecConditionSucceeded)
 	if condition != nil && condition.Status != metav1.ConditionUnknown {
+		if exec.Status.CompletedAt == nil {
+			if err := worktreeExecStatus.backfillCompletedAt(ctx, r.Client, req.NamespacedName); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		return ctrl.Result{}, r.releaseClaim(ctx, exec)
 	}
 	if len(exec.Spec.Command) == 0 || exec.Spec.Command[0] == "" {
@@ -336,7 +342,7 @@ func (r *WorktreeExecReconciler) reflectJobStatus(ctx context.Context, exec *rep
 		if err := r.releaseClaim(ctx, exec); err != nil {
 			return err
 		}
-		return r.setSucceeded(ctx, exec, status, reason, message, job.Name)
+		return worktreeExecStatus.setAt(ctx, r.Client, client.ObjectKeyFromObject(exec), status, reason, message, job.Name, jobCompletionTime(job))
 	}
 	return r.setSucceeded(ctx, exec, metav1.ConditionUnknown, "CommandRunning", "Command has not completed", job.Name)
 }

@@ -30,6 +30,10 @@ spec:
     - jsonPath: .status.volumeClaimName
       name: Volume
       type: string
+    - jsonPath: .status.conditions[?(@.type=='DeletionBlocked')].reason
+      name: Blocked
+      priority: 1
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:

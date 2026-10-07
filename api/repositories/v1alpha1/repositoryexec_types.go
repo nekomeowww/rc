@@ -60,6 +60,13 @@ type RepositoryExecStatus struct {
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 
+	// completedAt is when the command reached its terminal result: the Job
+	// completion or failure time, or the time a failure without a finished Job
+	// was recorded. It is set once, together with the terminal Succeeded
+	// condition, and is never rewritten.
+	// +optional
+	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+
 	// conditions represent the current state of the RepositoryExec resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
@@ -80,6 +87,7 @@ type RepositoryExecStatus struct {
 // +kubebuilder:printcolumn:name="Repository",type=string,JSONPath=".spec.repositoryRef.name"
 // +kubebuilder:printcolumn:name="Succeeded",type=string,JSONPath=".status.conditions[?(@.type=='Succeeded')].status"
 // +kubebuilder:printcolumn:name="Job",type=string,JSONPath=".status.jobName"
+// +kubebuilder:printcolumn:name="Completed",type=date,JSONPath=".status.completedAt"
 
 // RepositoryExec is the Schema for the repositoryexecs API
 type RepositoryExec struct {

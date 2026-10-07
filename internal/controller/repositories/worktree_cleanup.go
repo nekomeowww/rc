@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -22,61 +23,113 @@ import (
 	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
+// cleanupWait explains why Worktree cleanup cannot proceed yet. Its reason is
+// one of the DeletionBlockedReason* API constants.
+type cleanupWait struct {
+	reason  string
+	message string
+}
+
 // prepareWorktreeCleanup closes the same CAS gate used before Pod creation.
 // The mount list remains a conservative legacy/reference check, not a lock.
 // Read-only consumers and in-flight creators are covered by durable holders;
 // the ordinary writer Lease continues to serialize Workspace/WorktreeExec use.
-// When ready, it returns the resolved PVC name that cleanup must act on.
-func (r *WorktreeReconciler) prepareWorktreeCleanup(ctx context.Context, worktree *repositoriesv1alpha1.Worktree) (string, bool, error) {
+// When ready (wait is nil), it returns the resolved PVC name that cleanup must
+// act on. Otherwise wait names what cleanup is waiting for.
+func (r *WorktreeReconciler) prepareWorktreeCleanup(ctx context.Context, worktree *repositoriesv1alpha1.Worktree) (string, *cleanupWait, error) {
 	log := logf.FromContext(ctx)
 	drained, err := (worktreeownership.MountAccess{Client: r.Client, Reader: r.APIReader}).Close(ctx, worktree)
-	if err != nil || !drained {
-		return "", false, err
+	if err != nil {
+		return "", nil, err
 	}
-	blockers, err := r.cleanupReferenceBlockers(ctx, worktree)
-	if err != nil || len(blockers) > 0 {
-		return "", false, err
+	if !drained {
+		return "", &cleanupWait{reason: repositoriesv1alpha1.DeletionBlockedReasonWaitingForMounts, message: "Waiting for admitted Workspace mounts to be released"}, nil
+	}
+	if wait, err := r.cleanupReferenceWait(ctx, worktree); err != nil || wait != nil {
+		return "", wait, err
 	}
 	deletionLease := worktreeclaim.DeletionLease(worktree)
 	if err := r.Create(ctx, deletionLease); err != nil {
 		if !errors.IsAlreadyExists(err) {
-			return "", false, fmt.Errorf("acquire Worktree deletion Lease: %w", err)
+			return "", nil, fmt.Errorf("acquire Worktree deletion Lease: %w", err)
 		}
 		current := new(coordinationv1.Lease)
 		if err := r.Get(ctx, client.ObjectKeyFromObject(deletionLease), current); err != nil {
 			// Foreground GC can remove the Lease between Create and Get. Requeue
 			// to acquire it again; disappearance does not authorize cleanup.
 			if errors.IsNotFound(err) {
-				return "", false, nil
+				return "", &cleanupWait{reason: repositoriesv1alpha1.DeletionBlockedReasonWaitingForWriter, message: "Waiting to acquire the Worktree write Lease for deletion"}, nil
 			}
-			return "", false, fmt.Errorf("get Worktree deletion Lease: %w", err)
+			return "", nil, fmt.Errorf("get Worktree deletion Lease: %w", err)
 		}
 		if !worktreeclaim.IsDeletionHolder(worktree, current) {
-			log.Info("Worktree deletion is waiting for active writer", "worktree", worktree.Name, "holder", current.Labels[worktreeclaim.HolderLabel])
-			return "", false, nil
+			holder := current.Labels[worktreeclaim.HolderLabel]
+			log.Info("Worktree deletion is waiting for active writer", "worktree", worktree.Name, "holder", holder)
+			return "", &cleanupWait{reason: repositoriesv1alpha1.DeletionBlockedReasonWaitingForWriter, message: fmt.Sprintf("Waiting for writer %q to release the Worktree write Lease %s", holder, current.Name)}, nil
 		}
 	}
 
 	// Re-list after acquiring the writer claim for legacy clients. New runtime
 	// admissions are fenced atomically, including after this final list.
-	blockers, err = r.cleanupReferenceBlockers(ctx, worktree)
-	if err != nil || len(blockers) > 0 {
-		return "", false, err
+	if wait, err := r.cleanupReferenceWait(ctx, worktree); err != nil || wait != nil {
+		return "", wait, err
 	}
 	claimName, _, resolveErr := volumeclaim.Resolve(ctx, r.APIReader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
 	if resolveErr != nil && claimName == "" {
-		return "", false, resolveErr
+		return "", nil, resolveErr
 	}
 	pods := new(corev1.PodList)
 	if err := r.APIReader.List(ctx, pods, client.InNamespace(worktree.Namespace)); err != nil {
-		return "", false, err
+		return "", nil, err
 	}
+	consumers := make([]string, 0)
 	for _, pod := range pods.Items {
 		if pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed && podUsesPersistentVolumeClaim(&pod, claimName) {
-			return "", false, nil
+			consumers = append(consumers, pod.Name)
 		}
 	}
-	return claimName, true, nil
+	if len(consumers) > 0 {
+		slices.Sort(consumers)
+		return "", &cleanupWait{reason: repositoriesv1alpha1.DeletionBlockedReasonWaitingForPods, message: "Waiting for Pods using the Worktree volume to stop: " + strings.Join(consumers, ", ")}, nil
+	}
+	return claimName, nil, nil
+}
+
+// cleanupReferenceWait reports Workspaces whose spec still mounts a deleting
+// Worktree.
+func (r *WorktreeReconciler) cleanupReferenceWait(ctx context.Context, worktree *repositoriesv1alpha1.Worktree) (*cleanupWait, error) {
+	blockers, err := r.cleanupReferenceBlockers(ctx, worktree)
+	if err != nil || len(blockers) == 0 {
+		return nil, err
+	}
+	return &cleanupWait{reason: repositoriesv1alpha1.DeletionBlockedReasonWaitingForMounts, message: "Waiting for Workspaces that mount this Worktree: " + strings.Join(blockers, ", ")}, nil
+}
+
+// setDeletionBlocked publishes why the deletion finalizer is waiting. A nil
+// wait removes the condition. It writes only while the Worktree is deleting.
+func (r *WorktreeReconciler) setDeletionBlocked(ctx context.Context, worktree *repositoriesv1alpha1.Worktree, wait *cleanupWait) error {
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := new(repositoriesv1alpha1.Worktree)
+		if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(worktree), current); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if current.UID != worktree.UID || current.DeletionTimestamp.IsZero() {
+			return nil
+		}
+		before := current.DeepCopy()
+		if wait == nil {
+			meta.RemoveStatusCondition(&current.Status.Conditions, repositoriesv1alpha1.WorktreeConditionDeletionBlocked)
+		} else {
+			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+				Type: repositoriesv1alpha1.WorktreeConditionDeletionBlocked, Status: metav1.ConditionTrue,
+				ObservedGeneration: current.Generation, Reason: wait.reason, Message: wait.message,
+			})
+		}
+		if slices.Equal(current.Status.Conditions, before.Status.Conditions) {
+			return nil
+		}
+		return client.IgnoreNotFound(r.Status().Patch(ctx, current, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})))
+	})
 }
 
 // cleanupReferenceBlockers preserves references when deleting a Worktree. An
@@ -93,11 +146,11 @@ func (r *WorktreeReconciler) cleanupReferenceBlockers(ctx context.Context, workt
 // live Worktree or silently cloning replacement data. The durable fence remains
 // after the PVC disappears, and other Kubernetes storage finalizers stay intact.
 func (r *WorktreeReconciler) reconcileStorageDeletion(ctx context.Context, worktree *repositoriesv1alpha1.Worktree) (ctrl.Result, error) {
-	claimName, ready, err := r.prepareWorktreeCleanup(ctx, worktree)
+	claimName, wait, err := r.prepareWorktreeCleanup(ctx, worktree)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if !ready {
+	if wait != nil {
 		return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, r.setStorageDeletionStatus(ctx, worktree, "VolumeDeleting", "Storage deletion requested; waiting for mounts, writers and Pods to stop")
 	}
 	claim := new(corev1.PersistentVolumeClaim)

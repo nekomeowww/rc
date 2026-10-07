@@ -19,7 +19,9 @@ package repositories
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -29,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -63,6 +66,7 @@ type RepositoryReconciler struct {
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 
 // Reconcile ensures that every Repository owns one persistent parent volume and
 // that its configured remote is bootstrapped into that volume.
@@ -76,7 +80,7 @@ func (r *RepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	if !repository.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, nil
+		return r.reconcileDeletionBlocked(ctx, repository)
 	}
 	gate := repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}
 	token := repositoryaccess.Token("bootstrap", repository)
@@ -255,6 +259,85 @@ func (r *RepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	return ctrl.Result{}, setRepositoryStorageReady(ctx, r.Client, repository, metav1.ConditionFalse, "Initializing", "Repository bootstrap Job is running", claim.Name, nil)
+}
+
+// reconcileDeletionBlocked publishes why a deleting Repository is still
+// present. rc holds no Repository finalizer: only Kubernetes garbage collection
+// (foreground deletion) or foreign finalizers keep it. rc reports the waits it
+// can observe: live Pods using the parent volume, then the owned parent PVC.
+func (r *RepositoryReconciler) reconcileDeletionBlocked(ctx context.Context, repository *repositoriesv1alpha1.Repository) (ctrl.Result, error) {
+	wait, err := r.repositoryDeletionWait(ctx, repository)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.setDeletionBlocked(ctx, repository, wait); err != nil {
+		return ctrl.Result{}, err
+	}
+	if wait == nil {
+		return ctrl.Result{}, nil
+	}
+	return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+}
+
+func (r *RepositoryReconciler) repositoryDeletionWait(ctx context.Context, repository *repositoriesv1alpha1.Repository) (*cleanupWait, error) {
+	claimName := repository.Status.VolumeClaimName
+	if claimName == "" {
+		return nil, nil
+	}
+	pods := new(corev1.PodList)
+	if err := r.APIReader.List(ctx, pods, client.InNamespace(repository.Namespace)); err != nil {
+		return nil, fmt.Errorf("list Pods using deleting Repository volume: %w", err)
+	}
+	consumers := make([]string, 0)
+	for index := range pods.Items {
+		pod := &pods.Items[index]
+		if pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed && podUsesPersistentVolumeClaim(pod, claimName) {
+			consumers = append(consumers, pod.Name)
+		}
+	}
+	if len(consumers) > 0 {
+		slices.Sort(consumers)
+		return &cleanupWait{reason: repositoriesv1alpha1.DeletionBlockedReasonWaitingForPods, message: "Waiting for Pods using the Repository volume to stop: " + strings.Join(consumers, ", ")}, nil
+	}
+	claim := new(corev1.PersistentVolumeClaim)
+	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: repository.Namespace, Name: claimName}, claim)
+	if errors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get deleting Repository PersistentVolumeClaim: %w", err)
+	}
+	if !metav1.IsControlledBy(claim, repository) {
+		return nil, nil
+	}
+	return &cleanupWait{reason: repositoriesv1alpha1.DeletionBlockedReasonWaitingForVolume, message: fmt.Sprintf("Waiting for PersistentVolumeClaim %s to be deleted", claim.Name)}, nil
+}
+
+// setDeletionBlocked writes DeletionBlocked only while the Repository is
+// deleting. A nil wait removes the condition.
+func (r *RepositoryReconciler) setDeletionBlocked(ctx context.Context, repository *repositoriesv1alpha1.Repository, wait *cleanupWait) error {
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := new(repositoriesv1alpha1.Repository)
+		if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(repository), current); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if current.UID != repository.UID || current.DeletionTimestamp.IsZero() {
+			return nil
+		}
+		before := current.DeepCopy()
+		if wait == nil {
+			meta.RemoveStatusCondition(&current.Status.Conditions, repositoriesv1alpha1.RepositoryConditionDeletionBlocked)
+		} else {
+			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+				Type: repositoriesv1alpha1.RepositoryConditionDeletionBlocked, Status: metav1.ConditionTrue,
+				ObservedGeneration: current.Generation, Reason: wait.reason, Message: wait.message,
+			})
+		}
+		if slices.Equal(current.Status.Conditions, before.Status.Conditions) {
+			return nil
+		}
+		return client.IgnoreNotFound(r.Status().Patch(ctx, current, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})))
+	})
 }
 
 func parentVolumeClaim(repository *repositoriesv1alpha1.Repository, claimName string) *corev1.PersistentVolumeClaim {

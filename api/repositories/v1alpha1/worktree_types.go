@@ -32,6 +32,23 @@ const (
 	// WorktreeConditionReady reports whether the child volume and its isolated
 	// Git checkout are ready for a workload to mount.
 	WorktreeConditionReady = "Ready"
+
+	// WorktreeConditionDeletionBlocked is True only while the Worktree has a
+	// deletionTimestamp and its controller's finalizer is waiting. It is absent
+	// otherwise. Reasons are the DeletionBlockedReason* constants.
+	WorktreeConditionDeletionBlocked = "DeletionBlocked"
+)
+
+// Storage failure reasons. Both VolumeReady and Ready are False with these
+// reasons. Other storage-owning kinds use the same reason names on their
+// storage condition (for example StorageReady).
+const (
+	// WorktreeReasonVolumeClaimLost means the recorded child PVC is missing.
+	// The controller does not create a replacement checkout.
+	WorktreeReasonVolumeClaimLost = "VolumeClaimLost"
+	// WorktreeReasonVolumeClaimConflict means the PVC selected for this
+	// Worktree is not controlled by this Worktree incarnation.
+	WorktreeReasonVolumeClaimConflict = "VolumeClaimConflict"
 )
 
 // WorktreeStorageSpec optionally overrides the storage inherited from the
@@ -160,6 +177,7 @@ type WorktreeStatus struct {
 // +kubebuilder:printcolumn:name="Repository",type=string,JSONPath=".spec.repositoryRef.name"
 // +kubebuilder:printcolumn:name="Volume",type=string,JSONPath=".status.volumeClaimName"
 // +kubebuilder:printcolumn:name="Path",type=string,JSONPath=".status.worktreePath"
+// +kubebuilder:printcolumn:name="Blocked",type=string,JSONPath=".status.conditions[?(@.type=='DeletionBlocked')].reason",priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=".metadata.creationTimestamp"
 type Worktree struct {
 	metav1.TypeMeta `json:",inline"`

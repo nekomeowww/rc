@@ -56,6 +56,7 @@ var repositoryExecStatus = oneShotStatusAdapter[*repositoriesv1alpha1.Repository
 		exec.Status.JobName = jobName
 		exec.Status.Conditions = conditions
 	},
+	completedAt:   func(exec *repositoriesv1alpha1.RepositoryExec) **metav1.Time { return &exec.Status.CompletedAt },
 	conditionType: repositoriesv1alpha1.RepositoryExecConditionSucceeded,
 	resourceKind:  "RepositoryExec",
 }
@@ -91,6 +92,15 @@ func (r *RepositoryExecReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	token := repositoryaccess.Token("repository-exec", exec)
 	succeeded := meta.FindStatusCondition(exec.Status.Conditions, repositoriesv1alpha1.RepositoryExecConditionSucceeded)
+	if succeeded != nil && succeeded.Status != metav1.ConditionUnknown && exec.Status.CompletedAt == nil {
+		if err := repositoryExecStatus.backfillCompletedAt(ctx, r.Client, req.NamespacedName); err != nil {
+			return ctrl.Result{}, err
+		}
+		// The finalizer release below uses an optimistic lock on this object.
+		if err := r.APIReader.Get(ctx, req.NamespacedName, exec); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
+		}
+	}
 	if !exec.DeletionTimestamp.IsZero() || (succeeded != nil && succeeded.Status != metav1.ConditionUnknown) {
 		done, err := releaseRepositoryOperation(ctx, r.Client, r.APIReader, exec, token, exec.Status.JobName)
 		if err != nil || done {
@@ -230,7 +240,7 @@ func (r *RepositoryExecReconciler) reflectJobStatus(
 	job *batchv1.Job,
 ) error {
 	if status, reason, message, terminal := terminalJobOutcome(job); terminal {
-		return r.setSucceeded(ctx, exec, status, reason, message, job.Name)
+		return repositoryExecStatus.setAt(ctx, r.Client, client.ObjectKeyFromObject(exec), status, reason, message, job.Name, jobCompletionTime(job))
 	}
 
 	return r.setSucceeded(ctx, exec, metav1.ConditionUnknown, "CommandRunning", "Command has not completed", job.Name)

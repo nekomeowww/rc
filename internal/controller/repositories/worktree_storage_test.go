@@ -175,7 +175,7 @@ func TestWorktreeCloneRecoveryUsesCommittedClaim(t *testing.T) {
 		{name: "Repository removed"},
 		{name: "Repository replaced", replaceRepository: true},
 		{name: "malformed source", configure: func(claim *corev1.PersistentVolumeClaim) { claim.Spec.DataSource = nil }, wantReason: cloneStorageTestSpecChangedReason},
-		{name: "owner incarnation mismatch", configure: func(claim *corev1.PersistentVolumeClaim) { claim.OwnerReferences[0].UID = "previous-worktree" }, wantReason: "VolumeClaimConflict"},
+		{name: "owner incarnation mismatch", configure: func(claim *corev1.PersistentVolumeClaim) { claim.OwnerReferences[0].UID = "previous-worktree" }, wantReason: repositoriesv1alpha1.WorktreeReasonVolumeClaimConflict},
 		{name: "explicit storage conflict", configure: func(claim *corev1.PersistentVolumeClaim) {
 			class := "unexpected-class"
 			claim.Spec.StorageClassName = &class
@@ -222,6 +222,12 @@ func TestWorktreeCloneRecoveryUsesCommittedClaim(t *testing.T) {
 			if tt.wantReason != "" {
 				assert.Equal(t, tt.wantReason, ready.Reason)
 				assert.Empty(t, jobs.Items, "invalid or unowned storage must not be bootstrapped")
+				if tt.wantReason == repositoriesv1alpha1.WorktreeReasonVolumeClaimConflict {
+					volumeReady := meta.FindStatusCondition(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionVolumeReady)
+					require.NotNil(t, volumeReady)
+					assert.Equal(t, metav1.ConditionFalse, volumeReady.Status, "deferred Workspaces must not mount a foreign claim")
+					assert.Equal(t, tt.wantReason, volumeReady.Reason)
+				}
 			} else {
 				assert.Equal(t, "Initializing", ready.Reason)
 				assert.Equal(t, source.Name, worktree.Status.SourceVolumeClaimName)

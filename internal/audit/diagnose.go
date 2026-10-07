@@ -3,14 +3,22 @@ package audit
 import (
 	"fmt"
 	"strings"
+	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	repositories "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	workspaces "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 )
 
 const (
 	severityUnknown    = "unknown"
 	missingRuntimeCode = "MissingRuntime"
 	missingStorageCode = "MissingStorage"
+
+	readyCondition           = "Ready"
+	deletionBlockedCondition = "DeletionBlocked"
 )
 
 func diagnose(inventory Inventory, policy Policy) []Finding {
@@ -45,12 +53,7 @@ func resourceFindings(r Resource, g graph, inventory Inventory, policy Policy) [
 		for _, lease := range leases {
 			related = append(related, lease.ObjectRef)
 		}
-		code := "DeletionPending"
-		if older(*r.DeletingAt, inventory.ObservedAt.Time, policy.UnhealthyFor) {
-			code = "DeletionBlocker"
-		}
-		var details strings.Builder
-		details.WriteString("Deletion has not converged; finalizers=" + strings.Join(r.Finalizers, ","))
+		code, details := deletionEvidence(r, inventory.ObservedAt.Time, policy)
 		for _, lease := range leases {
 			details.WriteString("; Lease=" + lease.Name + " holder=" + lease.Holder + " reservation=" + lease.Reservation)
 		}
@@ -61,7 +64,7 @@ func resourceFindings(r Resource, g graph, inventory Inventory, policy Policy) [
 			add("StaleStatus", severityUnknown, "Status does not reflect the current spec generation")
 		}
 		for _, c := range r.Conditions {
-			if c.Type == "Ready" || c.Type == "StorageReady" || c.Type == "VolumeReady" {
+			if c.Type == readyCondition || c.Type == "StorageReady" || c.Type == "VolumeReady" {
 				if c.Status != metav1.ConditionTrue && older(c.LastTransitionTime, inventory.ObservedAt.Time, policy.UnhealthyFor) {
 					add("LongUnhealthy", "warning", c.Type+"="+string(c.Status)+": "+c.Reason+"; "+c.Message)
 				}
@@ -72,9 +75,6 @@ func resourceFindings(r Resource, g graph, inventory Inventory, policy Policy) [
 	if r.Kind == worktreeKind && inventory.Complete && r.DeletingAt == nil && len(g.worktreeBlockers(r, inventory, policy)) == 0 {
 		add("UnreferencedWorktree", "warning", "No observed mounts, active/recent executions, live PVC consumers or Leases; Git data safety remains unknown")
 	}
-	if r.Kind == podKind && r.Terminal && runtimePod(r, g) {
-		add("TerminalRuntimePod", "warning", "Runtime Pod is "+r.Phase+": "+r.Reason+"; "+r.Message)
-	}
 	pvcFindings(r, g, policy, add)
 	if isHistory(r) && r.Terminal {
 		add("TerminalHistory", "info", "Terminal "+r.Phase+" record; retention and dependencies determine cleanup eligibility")
@@ -82,24 +82,103 @@ func resourceFindings(r Resource, g graph, inventory Inventory, policy Policy) [
 	return findings
 }
 
-// dependencyFindings distinguishes absent dependencies from unreadable evidence.
-// A stale Ready condition cannot establish that a referenced Pod or PVC exists.
+// deletionEvidence explains a pending deletion. Kinds whose controller
+// publishes DeletionBlocked report its reason, message and age; other kinds,
+// and publishing kinds whose controller has not yet written the condition, fall
+// back to the finalizers that hold the object.
+func deletionEvidence(r Resource, now time.Time, policy Policy) (string, *strings.Builder) {
+	details := &strings.Builder{}
+	since := *r.DeletingAt
+	blocked := meta.FindStatusCondition(r.Conditions, deletionBlockedCondition)
+	switch {
+	case publishesDeletionBlocked(r) && blocked != nil && blocked.Status == metav1.ConditionTrue:
+		since = blocked.LastTransitionTime
+		details.WriteString("DeletionBlocked=" + blocked.Reason + " for " + age(since, now) + ": " + blocked.Message)
+	case publishesDeletionBlocked(r):
+		details.WriteString("Deletion has not converged; DeletionBlocked is not published; finalizers=" + strings.Join(r.Finalizers, ","))
+	default:
+		details.WriteString("Deletion has not converged; finalizers=" + strings.Join(r.Finalizers, ","))
+	}
+	if older(since, now, policy.UnhealthyFor) {
+		return "DeletionBlocker", details
+	}
+	return "DeletionPending", details
+}
+
+// publishesDeletionBlocked lists the kinds whose finalizer-holding (or, for
+// Repository, garbage-collection-observing) controller writes DeletionBlocked.
+func publishesDeletionBlocked(r Resource) bool {
+	return (r.APIVersion == workspaceAPI && r.Kind == workspaceKind) ||
+		(r.APIVersion == repoAPI && (r.Kind == worktreeKind || r.Kind == repositoryKind))
+}
+
+func age(since metav1.Time, now time.Time) string {
+	if since.IsZero() || since.After(now) {
+		return "unknown time"
+	}
+	return now.Sub(since.Time).Round(time.Second).String()
+}
+
+// dependencyFindings reports storage and runtime failures that the controller
+// published in StorageReady/VolumeReady and Ready. It keeps one direct
+// existence check of the PVC and Pod named in status: a stale Ready condition
+// from a controller that is down cannot establish that they exist.
 func dependencyFindings(r Resource, g graph, inventory Inventory) []Finding {
 	result := []Finding{}
+	// missing records relations the controller already reports as absent, so
+	// the existence check does not repeat them.
+	missing := map[string]bool{}
+	add := func(code, relation, message string) {
+		related := []ObjectRef{}
+		for _, ref := range r.References {
+			if ref.Relation == relation {
+				related = append(related, ref.Target)
+			}
+		}
+		missing[relation] = missing[relation] || code == missingStorageCode || code == missingRuntimeCode
+		result = append(result, Finding{Code: code, Severity: "warning", Resource: r.ObjectRef, Message: message, Related: related})
+	}
+	if storage := storageCondition(r); storage != nil && storage.Status != metav1.ConditionTrue {
+		switch storage.Reason {
+		case workspaces.ReasonVolumeClaimLost:
+			add(missingStorageCode, pvcRelation, storage.Type+"="+storage.Reason+": "+storage.Message)
+		case workspaces.ReasonVolumeClaimConflict:
+			add("PVCConflict", pvcRelation, storage.Type+"="+storage.Reason+": "+storage.Message)
+		}
+	}
+	if ready := meta.FindStatusCondition(r.Conditions, readyCondition); r.Kind == workspaceKind && ready != nil && ready.Status != metav1.ConditionTrue {
+		switch ready.Reason {
+		case workspaces.WorkspaceReasonRuntimeMissing:
+			add(missingRuntimeCode, runtimeRelation, "Ready="+ready.Reason+": "+ready.Message)
+		case workspaces.WorkspaceReasonRuntimeTerminal:
+			detail := ready.Reason
+			if degraded := meta.FindStatusCondition(r.Conditions, workspaces.WorkspaceConditionDegraded); degraded != nil && degraded.Status == metav1.ConditionTrue {
+				detail = degraded.Reason
+			}
+			add("TerminalRuntimePod", runtimeRelation, "Ready="+ready.Reason+" ("+detail+"): "+ready.Message)
+		}
+	}
+	if r.StorageUnpublished && r.DeletingAt == nil && !missing[pvcRelation] {
+		result = append(result, Finding{Code: "StorageUnpublished", Severity: severityUnknown, Resource: r.ObjectRef, Message: "Status names no PVC; storage is unknown until the controller publishes it"})
+	}
 	for _, ref := range r.References {
-		if ref.Relation != pvcRelation && ref.Relation != runtimeRelation {
+		if (ref.Relation != pvcRelation && ref.Relation != runtimeRelation) || missing[ref.Relation] {
 			continue
 		}
-		target, exists := g.resolve(ref.Target)
-		if !exists {
+		if _, exists := g.resolve(ref.Target); !exists {
 			result = append(result, unresolvedDependency(r, ref, inventory))
-			continue
-		}
-		if ref.Relation == pvcRelation && !controlledBy(target, r) {
-			result = append(result, Finding{Code: "PVCConflict", Severity: severityUnknown, Resource: r.ObjectRef, Message: "Expected PVC is not controlled by this resource UID; legacy/missing owners are unverified", Related: []ObjectRef{target.ObjectRef}})
 		}
 	}
 	return result
+}
+
+// storageCondition returns the condition in which the object's controller
+// publishes PVC health: VolumeReady on Worktree, StorageReady elsewhere.
+func storageCondition(r Resource) *metav1.Condition {
+	if r.Kind == worktreeKind {
+		return meta.FindStatusCondition(r.Conditions, repositories.WorktreeConditionVolumeReady)
+	}
+	return meta.FindStatusCondition(r.Conditions, workspaces.ConditionStorageReady)
 }
 
 func unresolvedDependency(r Resource, ref Reference, inventory Inventory) Finding {
@@ -125,22 +204,6 @@ func (inventory Inventory) covers(ref ObjectRef) bool {
 	for _, observation := range inventory.Coverage {
 		if observation.APIVersion == ref.APIVersion && observation.Kind == ref.Kind {
 			return observation.Complete
-		}
-	}
-	return false
-}
-
-func runtimePod(pod Resource, g graph) bool {
-	for _, incoming := range g.incoming(pod) {
-		if incoming.Relation == "referenced-by:"+runtimeRelation {
-			return true
-		}
-	}
-	for _, ref := range pod.References {
-		if ref.Relation == ownerRelation && (ref.Target.Kind == workspaceKind || ref.Target.Kind == "WorkspaceEnvironment") {
-			if _, ok := g.resolve(ref.Target); ok {
-				return true
-			}
 		}
 	}
 	return false

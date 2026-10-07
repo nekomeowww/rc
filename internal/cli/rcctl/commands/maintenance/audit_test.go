@@ -106,25 +106,34 @@ func TestDoctorReportsEvidence(t *testing.T) {
 	for _, finding := range report.Findings {
 		assert.Contains(t, out, finding.Code)
 	}
+	// Lifecycle deadlines are shown as published, never recomputed.
+	assert.Contains(t, out, "idle-suspend-at=2026-01-03T00:00:00Z")
+	assert.Contains(t, out, "delete-at=none")
 }
 
 // TestPruneReportsBacklogReadOnly relies on the fixture server failing every
 // non-GET request: prune must never delete history itself.
 func TestPruneReportsBacklogReadOnly(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		retention string
-		want      string
-		pending   int
+		name, retention, history string
+		retentionState, status   string
+		pending                  *int32
 	}{
-		{"unset", "", audit.RetentionUnset, 0},
-		{"configured", `{"ttlAfterFinished":"24h"}`, audit.RetentionConfigured, 1},
+		{"unpublished", "", "", audit.RetentionUnset, audit.HistoryStatusUnpublished, nil},
+		{"stale", "", `{"retained":3,"pendingCleanup":0,"observedGeneration":1}`, audit.RetentionUnset, audit.HistoryStatusStale, new(int32(0))},
+		{"configured", `{"ttlAfterFinished":"24h"}`, `{"retained":0,"pendingCleanup":1,"effectiveTTL":"24h0m0s","effectiveMaxEntries":100,"observedGeneration":2}`, audit.RetentionConfigured, audit.HistoryStatusCurrent, new(int32(1))},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			run := configuredAuditFixture(t, auditFixtureOptions{edit: func(responses map[string]json.RawMessage) {
-				if tc.retention != "" {
-					setWorkspaceRetention(t, responses, tc.retention)
-				}
+				editWorkspace(t, responses, func(workspace map[string]any) {
+					workspace["metadata"].(map[string]any)["generation"] = 2
+					if tc.retention != "" {
+						workspace["spec"].(map[string]any)["executionRetention"] = decode(t, tc.retention)
+					}
+					if tc.history != "" {
+						workspace["status"].(map[string]any)["executionHistory"] = decode(t, tc.history)
+					}
+				})
 			}})
 			out, err := run(pruneCommand, "-o", "json")
 			require.NoError(t, err)
@@ -135,18 +144,22 @@ func TestPruneReportsBacklogReadOnly(t *testing.T) {
 			target := report.Targets[0]
 			assert.Equal(t, "Workspace", target.Target.Kind)
 			assert.Equal(t, "dev", target.Target.Name)
-			assert.Equal(t, tc.want, target.Retention)
+			assert.Equal(t, tc.retentionState, target.Retention)
+			assert.Equal(t, tc.status, target.Status)
 			assert.Equal(t, tc.pending, target.PendingCleanup)
-			assert.Equal(t, 1-tc.pending, target.Retained)
 			for _, format := range [][]string{{}, {"-o", "wide"}} {
 				out, err = run(append([]string{pruneCommand}, format...)...)
 				require.NoError(t, err)
 				assert.Contains(t, out, "Workspace/audit/dev")
-				assert.Contains(t, out, tc.want)
+				assert.Contains(t, out, tc.status)
 			}
 			out, err = run(pruneCommand, "-o", "yaml")
 			require.NoError(t, err)
-			assert.Contains(t, out, fmt.Sprintf("pendingCleanup: %d", tc.pending))
+			if tc.pending != nil {
+				assert.Contains(t, out, fmt.Sprintf("pendingCleanup: %d", *tc.pending))
+			} else {
+				assert.NotContains(t, out, "pendingCleanup")
+			}
 		})
 	}
 }
@@ -159,15 +172,19 @@ func TestPruneRejectsRemovedDeletionFlags(t *testing.T) {
 	}
 }
 
-func setWorkspaceRetention(t *testing.T, responses map[string]json.RawMessage, retention string) {
+func decode(t *testing.T, value string) any {
+	t.Helper()
+	var result any
+	require.NoError(t, json.Unmarshal([]byte(value), &result))
+	return result
+}
+
+func editWorkspace(t *testing.T, responses map[string]json.RawMessage, edit func(map[string]any)) {
 	t.Helper()
 	path := "/apis/workspaces.rc.ayaka.io/v1alpha1/namespaces/audit/workspaces"
 	var list map[string]any
 	require.NoError(t, json.Unmarshal(responses[path], &list))
-	var policy any
-	require.NoError(t, json.Unmarshal([]byte(retention), &policy))
-	workspace := list["items"].([]any)[0].(map[string]any)
-	workspace["spec"].(map[string]any)["executionRetention"] = policy
+	edit(list["items"].([]any)[0].(map[string]any))
 	data, err := json.Marshal(list)
 	require.NoError(t, err)
 	responses[path] = data

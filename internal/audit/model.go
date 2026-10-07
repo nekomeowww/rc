@@ -8,6 +8,8 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+
+	workspaces "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 )
 
 // Policy defines conservative diagnostic age and capacity thresholds. CLI
@@ -64,8 +66,12 @@ type Resource struct {
 	RequestedBytes     *int64                  `json:"requestedBytes,omitempty"`
 	CapacityBytes      *int64                  `json:"capacityBytes,omitempty"`
 	StorageClass       string                  `json:"storageClass,omitempty"`
-	Holder             string                  `json:"holder,omitempty"`
-	Reservation        string                  `json:"reservation,omitempty"`
+	// StorageUnpublished is set when the object owns a PVC but status names none.
+	StorageUnpublished bool `json:"storageUnpublished,omitempty"`
+	// Lifecycle is the Workspace's published suspension and deletion deadlines.
+	Lifecycle   *workspaces.WorkspaceLifecycleStatus `json:"lifecycle,omitempty"`
+	Holder      string                               `json:"holder,omitempty"`
+	Reservation string                               `json:"reservation,omitempty"`
 }
 
 // Observation distinguishes an empty successful list from unavailable evidence.

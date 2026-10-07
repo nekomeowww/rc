@@ -1,7 +1,6 @@
 package audit
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -27,6 +26,7 @@ const (
 	workspaceAPI             = "workspaces.rc.ayaka.io/v1alpha1"
 	pvcKind                  = "PersistentVolumeClaim"
 	worktreeKind             = "Worktree"
+	repositoryKind           = "Repository"
 	workspaceKind            = "Workspace"
 	workspaceEnvironmentKind = "WorkspaceEnvironment"
 	workspaceExecKind        = "WorkspaceExec"
@@ -139,26 +139,26 @@ func projectRC(r *Resource, object client.Object) {
 	switch o := object.(type) {
 	case *repositories.Worktree:
 		r.Conditions, r.ObservedGeneration, r.Locked = o.Status.Conditions, o.Status.ObservedGeneration, o.Spec.Lock
-		r.reference(repoAPI, "Repository", o.Spec.RepositoryRef.Name, "source")
-		r.reference("v1", pvcKind, cmp.Or(o.Status.VolumeClaimName, o.Name), pvcRelation)
+		r.reference(repoAPI, repositoryKind, o.Spec.RepositoryRef.Name, "source")
+		r.storage(o.Status.VolumeClaimName)
 		r.reference("batch/v1", jobKind, o.Status.JobName, "bootstrap")
 	case *repositories.Repository:
 		r.Conditions, r.ObservedGeneration = o.Status.Conditions, o.Status.ObservedGeneration
-		r.reference("v1", pvcKind, cmp.Or(o.Status.VolumeClaimName, o.Name), pvcRelation)
+		r.storage(o.Status.VolumeClaimName)
 	case *workspaces.Workspace:
 		r.Conditions, r.ObservedGeneration, r.Phase = o.Status.Conditions, o.Status.ObservedGeneration, string(o.Spec.DesiredState)
-		name := o.Status.HomeVolumeClaimName
+		r.Lifecycle = o.Status.Lifecycle
+		// Darwin Workspaces use node-local host storage and publish no PVC.
 		if o.Spec.OS != corev1.OSName("darwin") {
-			name = cmp.Or(name, o.Name)
+			r.storage(o.Status.HomeVolumeClaimName)
 		}
-		r.reference("v1", pvcKind, name, pvcRelation)
 		r.reference("v1", podKind, o.Status.RuntimePodName, runtimeRelation)
 		for _, mount := range o.Spec.Mounts {
 			if mount.WorktreeRef != nil {
 				r.reference(repoAPI, worktreeKind, mount.WorktreeRef.Name, mountRelation)
 			}
 			if mount.RepositoryRef != nil {
-				r.reference(repoAPI, "Repository", mount.RepositoryRef.Name, mountRelation)
+				r.reference(repoAPI, repositoryKind, mount.RepositoryRef.Name, mountRelation)
 			}
 		}
 	case *workspaces.WorkspaceEnvironment:
@@ -175,30 +175,37 @@ func projectRC(r *Resource, object client.Object) {
 		r.Conditions = o.Status.Conditions
 		r.reference(repoAPI, worktreeKind, o.Spec.WorktreeRef.Name, "execution")
 		r.reference("batch/v1", jobKind, o.Status.JobName, "execution-job")
-		projectResult(r)
+		projectResult(r, o.Status.CompletedAt)
 	case *repositories.RepositoryExec:
 		r.Conditions = o.Status.Conditions
-		r.reference(repoAPI, "Repository", o.Spec.RepositoryRef.Name, "execution")
+		r.reference(repoAPI, repositoryKind, o.Spec.RepositoryRef.Name, "execution")
 		r.reference("batch/v1", jobKind, o.Status.JobName, "execution-job")
-		projectResult(r)
+		projectResult(r, o.Status.CompletedAt)
 	case *repositories.RepositorySync:
 		r.Conditions = o.Status.Conditions
-		r.reference(repoAPI, "Repository", o.Spec.RepositoryRef.Name, "execution")
+		r.reference(repoAPI, repositoryKind, o.Spec.RepositoryRef.Name, "execution")
 		r.reference("batch/v1", jobKind, o.Status.JobName, "execution-job")
-		projectResult(r)
-		if o.Status.CompletedAt != nil {
-			r.CompletedAt = o.Status.CompletedAt
-		}
+		projectResult(r, o.Status.CompletedAt)
 	}
 }
 
-func projectResult(r *Resource) {
+// storage records the PVC named in status. Names are never predicted from the
+// object name: an empty name means the controller has not published storage.
+func (r *Resource) storage(name string) {
+	r.StorageUnpublished = name == ""
+	r.reference("v1", pvcKind, name, pvcRelation)
+}
+
+// projectResult reads the controller-published completion time. A terminal
+// record without status.completedAt stays undated, which keeps it active for
+// age-based evidence.
+func projectResult(r *Resource, completedAt *metav1.Time) {
 	condition := meta.FindStatusCondition(r.Conditions, repositories.WorktreeExecConditionSucceeded)
 	if condition == nil || (condition.Status != metav1.ConditionTrue && condition.Status != metav1.ConditionFalse) {
 		return
 	}
 	r.Terminal = true
-	r.CompletedAt = &condition.LastTransitionTime
+	r.CompletedAt = completedAt
 	r.Phase = string(workspaces.WorkspaceExecPhaseSucceeded)
 	if condition.Status == metav1.ConditionFalse {
 		r.Phase = string(workspaces.WorkspaceExecPhaseFailed)

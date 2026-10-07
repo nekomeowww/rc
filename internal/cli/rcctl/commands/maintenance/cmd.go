@@ -87,14 +87,15 @@ func connect(flags *kubeconfig.Flags, allNamespaces bool) (*cluster.Client, stri
 }
 
 // pruneHint is printed on stderr so structured stdout stays one document.
-const pruneHint = "rcctl prune is read-only. The rc controller deletes terminal execution history; configure it with spec.executionRetention (ttlAfterFinished, maxEntries) on the Workspace or WorkspaceEnvironment, or set spec.retain on a WorkspaceExec to keep it."
+const pruneHint = "rcctl prune is read-only and shows status.executionHistory as published by the rc controller. The controller deletes terminal execution history; configure it with spec.executionRetention (ttlAfterFinished, maxEntries) on the Workspace or WorkspaceEnvironment, or set spec.retain on a WorkspaceExec to keep it. STATUS Stale or Unpublished means the controller has not caught up or is not running."
 
 func newPruneCommand(flags *kubeconfig.Flags) *cobra.Command {
 	options := &pruneOptions{}
 	cmd := &cobra.Command{
 		Use:   "prune",
 		Short: "Report terminal execution history awaiting controller cleanup (read-only)",
-		Long: "Report, for each Workspace and WorkspaceEnvironment, how many WorkspaceExec records are retained and how many terminal records are past the target's spec.executionRetention policy and wait for the controller to delete them. " +
+		Long: "Report, for each Workspace and WorkspaceEnvironment, the controller-published status.executionHistory: how many WorkspaceExec records are retained and how many wait for the controller to delete them, and the ExecutionHistoryCompliant reason. " +
+			"Summaries older than the target spec are marked Stale and missing ones Unpublished; the command never recomputes them. " +
 			"This command never deletes anything: the rc controller performs history cleanup with fresh reads and preconditions. To remove history sooner, lower spec.executionRetention.ttlAfterFinished or maxEntries on the target. Use doctor for Workspace, Worktree, Repository and PVC diagnostics.",
 		Example: "  rcctl prune\n  rcctl prune -A -o json",
 		Args:    cobra.NoArgs,
@@ -105,7 +106,8 @@ func newPruneCommand(flags *kubeconfig.Flags) *cobra.Command {
 	return cmd
 }
 
-// runPrune reads the execution history backlog. It issues only LIST requests.
+// runPrune reads the published execution history backlog. It issues only LIST
+// requests for Workspaces and WorkspaceEnvironments.
 func runPrune(cmd *cobra.Command, flags *kubeconfig.Flags, options *pruneOptions) error {
 	if err := options.output.Validate(true); err != nil {
 		return err

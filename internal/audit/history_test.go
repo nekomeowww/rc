@@ -68,72 +68,82 @@ func historyFor(t *testing.T, report HistoryReport, kind, name string) HistoryTa
 	return HistoryTarget{}
 }
 
-func completedAgo(record *workspaces.WorkspaceExec, age time.Duration) *workspaces.WorkspaceExec {
-	record.Status.CompletedAt = new(metav1.NewTime(auditNow.Add(-age)))
-	return record
+func publishedHistory(generation int64, retained, pending int32, ttl time.Duration) *workspaces.ExecutionHistoryStatus {
+	history := &workspaces.ExecutionHistoryStatus{Retained: retained, PendingCleanup: pending, ObservedGeneration: generation}
+	if ttl > 0 {
+		history.EffectiveTTL, history.EffectiveMaxEntries = &metav1.Duration{Duration: ttl}, 100
+	}
+	return history
 }
 
-func TestExecutionHistoryReportsBacklogWithoutWrites(t *testing.T) {
+func compliant(status metav1.ConditionStatus, reason, message string) []metav1.Condition {
+	return []metav1.Condition{{Type: workspaces.ConditionExecutionHistoryCompliant, Status: status, Reason: reason, Message: message, LastTransitionTime: metav1.NewTime(auditNow)}}
+}
+
+func TestExecutionHistoryReadsPublishedStatusWithoutWrites(t *testing.T) {
 	day := 24 * time.Hour
-	configured := &workspaces.Workspace{ObjectMeta: fixtureMeta(testWorkspaceName), Spec: workspaces.WorkspaceSpec{ExecutionRetention: &workspaces.ExecutionRetentionPolicy{TTLAfterFinished: &metav1.Duration{Duration: 30 * day}, MaxEntries: 2}}}
-	unset := &workspaces.Workspace{ObjectMeta: fixtureMeta("unset")}
+	policy := &workspaces.ExecutionRetentionPolicy{TTLAfterFinished: &metav1.Duration{Duration: day}}
+	backlog := &workspaces.Workspace{ObjectMeta: fixtureMeta(testWorkspaceName), Spec: workspaces.WorkspaceSpec{ExecutionRetention: policy}}
+	backlog.Generation = 3
+	backlog.Status.ExecutionHistory = publishedHistory(3, 4, 2, day)
+	backlog.Status.Conditions = compliant(metav1.ConditionFalse, workspaces.ReasonCleanupBacklog, "2 WorkspaceExec records wait for cleanup")
+	stale := &workspaces.Workspace{ObjectMeta: fixtureMeta("stale"), Spec: workspaces.WorkspaceSpec{ExecutionRetention: policy}}
+	stale.Generation = 2
+	stale.Status.ExecutionHistory = publishedHistory(1, 7, 0, 0)
+	stale.Status.Conditions = compliant(metav1.ConditionTrue, workspaces.ReasonPolicyUnset, "No executionRetention policy")
+	unpublished := &workspaces.Workspace{ObjectMeta: fixtureMeta("unpublished")}
 	temporary := &workspaces.Workspace{ObjectMeta: fixtureMeta("temporary"), Spec: workspaces.WorkspaceSpec{RetentionPolicy: workspaces.WorkspaceRetentionPolicyDeleteAfterProcessesExit}}
-	environment := &workspaces.WorkspaceEnvironment{ObjectMeta: fixtureMeta("env"), Spec: workspaces.WorkspaceEnvironmentSpec{ExecutionRetention: &workspaces.ExecutionRetentionPolicy{TTLAfterFinished: &metav1.Duration{Duration: day}}}}
-	retarget := func(record *workspaces.WorkspaceExec, kind workspaces.WorkspaceExecTargetKind, name string) *workspaces.WorkspaceExec {
-		record.Spec.TargetRef = workspaces.WorkspaceExecTargetReference{Kind: kind, Name: name}
-		return record
-	}
-	pinned := completedAgo(terminalRecord("pinned"), 60*day)
-	pinned.Spec.Retain = true
-	running := terminalRecord("running")
-	running.Status.Phase, running.Status.CompletedAt = workspaces.WorkspaceExecPhaseRunning, nil
-	deleting := completedAgo(terminalRecord("deleting"), 60*day)
-	deleting.DeletionTimestamp = new(metav1.NewTime(auditNow))
-	objects := []client.Object{
-		configured, unset, temporary, environment,
-		// configured: one expired by TTL, one evicted by maxEntries=2, two kept.
-		completedAgo(terminalRecord("expired"), 40*day),
-		completedAgo(terminalRecord("newest"), day),
-		completedAgo(terminalRecord("newer"), 2*day),
-		completedAgo(terminalRecord("over-limit"), 3*day),
-		pinned, running, deleting,
-		retarget(completedAgo(terminalRecord("unset-old"), 365*day), workspaces.WorkspaceExecTargetWorkspace, unset.Name),
-		retarget(completedAgo(terminalRecord("temporary-old"), 365*day), workspaces.WorkspaceExecTargetWorkspace, temporary.Name),
-		retarget(completedAgo(terminalRecord("env-old"), 2*day), workspaces.WorkspaceExecTargetWorkspaceEnvironment, environment.Name),
-		retarget(completedAgo(terminalRecord("orphan-old"), 365*day), workspaces.WorkspaceExecTargetWorkspace, "gone"),
-	}
+	deleting := &workspaces.Workspace{ObjectMeta: fixtureMeta("deleting")}
+	deleting.Finalizers, deleting.DeletionTimestamp = []string{"fixture"}, new(metav1.NewTime(auditNow))
+	deleting.Status.ExecutionHistory = publishedHistory(0, 9, 9, 0)
+	environment := &workspaces.WorkspaceEnvironment{ObjectMeta: fixtureMeta("env")}
+	environment.Status.ExecutionHistory = publishedHistory(0, 5, 0, 0)
+	environment.Status.Conditions = compliant(metav1.ConditionTrue, workspaces.ReasonPolicyUnset, "history is kept")
+	// A WorkspaceExec is visible but never read: the report trusts the target summary.
+	objects := []client.Object{backlog, stale, unpublished, temporary, deleting, environment, terminalRecord("expired")}
+
 	counts := &requestCounts{}
 	report, err := ExecutionHistory(t.Context(), readOnlyClient(t, counts, objects...), testNamespace, auditNow)
 	require.NoError(t, err)
 	assert.True(t, report.Complete)
-	assert.Equal(t, 3, counts.lists, "one LIST per kind")
+	assert.Equal(t, 2, counts.lists, "one LIST per target kind; WorkspaceExecs are not listed")
 	assert.Zero(t, counts.gets)
+	assert.Len(t, report.Targets, 6)
 
+	count := func(n int32) *int32 { return &n }
 	for _, tc := range []struct {
-		kind, name, retention       string
-		retained, pending, deleting int
+		kind, name, retention, status, reason string
+		retained, pending                     *int32
 	}{
-		{workspaceKind, testWorkspaceName, RetentionConfigured, 5, 2, 1},
-		{workspaceKind, unset.Name, RetentionUnset, 1, 0, 0},
-		{workspaceKind, temporary.Name, RetentionTemporary, 1, 0, 0},
-		{workspaceEnvironmentKind, environment.Name, RetentionConfigured, 0, 1, 0},
-		{workspaceKind, "gone", RetentionTargetMissing, 1, 0, 0},
+		{workspaceKind, testWorkspaceName, RetentionConfigured, HistoryStatusCurrent, workspaces.ReasonCleanupBacklog, count(4), count(2)},
+		{workspaceKind, stale.Name, RetentionConfigured, HistoryStatusStale, workspaces.ReasonPolicyUnset, count(7), count(0)},
+		{workspaceKind, unpublished.Name, RetentionUnset, HistoryStatusUnpublished, "", nil, nil},
+		{workspaceKind, temporary.Name, RetentionTemporary, HistoryStatusNotApplicable, "", nil, nil},
+		{workspaceKind, deleting.Name, RetentionTargetDeleting, HistoryStatusNotApplicable, "", nil, nil},
+		{workspaceEnvironmentKind, environment.Name, RetentionUnset, HistoryStatusCurrent, workspaces.ReasonPolicyUnset, count(5), count(0)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := historyFor(t, report, tc.kind, tc.name)
 			assert.Equal(t, tc.retention, got.Retention)
+			assert.Equal(t, tc.status, got.Status)
+			assert.Equal(t, tc.reason, got.Reason)
 			assert.Equal(t, tc.retained, got.Retained)
 			assert.Equal(t, tc.pending, got.PendingCleanup)
-			assert.Equal(t, tc.deleting, got.Deleting)
 		})
 	}
+	got := historyFor(t, report, workspaceKind, testWorkspaceName)
+	assert.Equal(t, &metav1.Duration{Duration: day}, got.EffectiveTTL)
+	assert.EqualValues(t, 100, got.EffectiveMaxEntries)
+	assert.Contains(t, historyFor(t, report, workspaceKind, stale.Name).Message, "older spec generation")
+	assert.Contains(t, historyFor(t, report, workspaceKind, unpublished.Name).Message, "not published")
 }
 
-func TestExecutionHistoryWithoutExecutionVisibilityReportsNoTargets(t *testing.T) {
+func TestExecutionHistoryKeepsVisibleTargetsWhenOneKindIsHidden(t *testing.T) {
 	counts := &requestCounts{}
-	base := readOnlyClient(t, counts, terminalRecord("done"))
+	environment := &workspaces.WorkspaceEnvironment{ObjectMeta: fixtureMeta("env")}
+	base := readOnlyClient(t, counts, &workspaces.Workspace{ObjectMeta: fixtureMeta(testWorkspaceName)}, environment)
 	kube := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-		if _, ok := list.(*workspaces.WorkspaceExecList); ok {
+		if _, ok := list.(*workspaces.WorkspaceList); ok {
 			return assert.AnError
 		}
 		return c.List(ctx, list, opts...)
@@ -141,5 +151,7 @@ func TestExecutionHistoryWithoutExecutionVisibilityReportsNoTargets(t *testing.T
 	report, err := ExecutionHistory(t.Context(), kube, testNamespace, auditNow)
 	require.NoError(t, err)
 	assert.False(t, report.Complete)
-	assert.Empty(t, report.Targets)
+	require.Len(t, report.Targets, 1)
+	assert.Equal(t, workspaceEnvironmentKind, report.Targets[0].Target.Kind)
+	assert.Equal(t, HistoryStatusUnpublished, report.Targets[0].Status)
 }

@@ -78,9 +78,7 @@ func TestPartialVisibilityIsUnknown(t *testing.T) {
 	history, err := ExecutionHistory(t.Context(), kube, testNamespace, auditNow)
 	require.NoError(t, err)
 	assert.False(t, history.Complete)
-	require.Len(t, history.Targets, 1)
-	assert.Equal(t, RetentionUnknown, history.Targets[0].Retention)
-	assert.Zero(t, history.Targets[0].PendingCleanup)
+	assert.Empty(t, history.Targets)
 }
 
 func TestWorktreeSafetyExcludesRecentExecLocksLeasesAndMounts(t *testing.T) {
@@ -88,7 +86,7 @@ func TestWorktreeSafetyExcludesRecentExecLocksLeasesAndMounts(t *testing.T) {
 	for name, related := range map[string]client.Object{
 		"mount":       &workspaces.Workspace{ObjectMeta: fixtureMeta(testWorkspaceName), Spec: workspaces.WorkspaceSpec{Mounts: []workspaces.WorkspaceMount{{Name: testWorktree, WorktreeRef: &workspaces.LocalReference{Name: testWorktree}}}}},
 		"active-exec": &repositories.WorktreeExec{ObjectMeta: fixtureMeta("exec"), Spec: repositories.WorktreeExecSpec{WorktreeRef: repositories.WorktreeReference{Name: testWorktree}}},
-		"recent-exec": &repositories.WorktreeExec{ObjectMeta: fixtureMeta("exec"), Spec: repositories.WorktreeExecSpec{WorktreeRef: repositories.WorktreeReference{Name: testWorktree}}, Status: repositories.WorktreeExecStatus{Conditions: []metav1.Condition{{Type: repositories.WorktreeExecConditionSucceeded, Status: metav1.ConditionFalse, LastTransitionTime: metav1.NewTime(auditNow)}}}},
+		"recent-exec": &repositories.WorktreeExec{ObjectMeta: fixtureMeta("exec"), Spec: repositories.WorktreeExecSpec{WorktreeRef: repositories.WorktreeReference{Name: testWorktree}}, Status: repositories.WorktreeExecStatus{CompletedAt: new(metav1.NewTime(auditNow)), Conditions: []metav1.Condition{{Type: repositories.WorktreeExecConditionSucceeded, Status: metav1.ConditionFalse, LastTransitionTime: metav1.NewTime(auditNow)}}}},
 		"lease":       worktreeclaim.DeletionLease(worktree),
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -127,12 +125,18 @@ func TestLongUnhealthyAndLargeStorageAreEvidenceNotDeletePermission(t *testing.T
 }
 
 func TestDataResourcesStayInDoctorOnly(t *testing.T) {
-	workspace := &workspaces.Workspace{ObjectMeta: fixtureMeta(testWorkspaceName)}
-	worktree := &repositories.Worktree{ObjectMeta: fixtureMeta(testWorktree)}
+	workspace := &workspaces.Workspace{ObjectMeta: fixtureMeta(testWorkspaceName), Spec: workspaces.WorkspaceSpec{OS: "darwin"}}
+	worktree := &repositories.Worktree{ObjectMeta: fixtureMeta(testWorktree), Status: repositories.WorktreeStatus{VolumeClaimName: testWorktree, Conditions: []metav1.Condition{
+		{Type: repositories.WorktreeConditionVolumeReady, Status: metav1.ConditionFalse, Reason: repositories.WorktreeReasonVolumeClaimConflict, Message: "PVC is controlled by another object", LastTransitionTime: metav1.NewTime(auditNow)},
+	}}}
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: fixtureMeta(testWorktree), Spec: corev1.PersistentVolumeClaimSpec{Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("40Gi")}}}}
 	kube := fixtureClient(t, workspace, worktree, pvc)
 	report := scanReport(t, kube)
-	requireFinding(t, report, "PVCConflict")
+	conflict := requireFinding(t, report, "PVCConflict")
+	assert.Equal(t, worktree.Name, conflict.Resource.Name)
+	assert.Contains(t, conflict.Message, repositories.WorktreeReasonVolumeClaimConflict)
+	require.Len(t, conflict.Related, 1)
+	assert.Equal(t, pvc.Name, conflict.Related[0].Name)
 	assert.EqualValues(t, 40*1024*1024*1024, report.Summary.PVCRequestedBytes)
 }
 

@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,6 +42,7 @@ func TestGeneratedWorktreeLifecycle(t *testing.T) {
 			require.NoError(t, repositoriesv1alpha1.AddToScheme(scheme))
 			require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
 			require.NoError(t, coordinationv1.AddToScheme(scheme))
+			require.NoError(t, corev1.AddToScheme(scheme))
 			workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: ownershipTestNamespace, UID: testWorkspaceUID}}
 			repo := &repositoriesv1alpha1.Repository{ObjectMeta: metav1.ObjectMeta{Name: ownershipTestRepository, Namespace: ownershipTestNamespace}, Status: repositoriesv1alpha1.RepositoryStatus{Conditions: []metav1.Condition{{Type: repositoriesv1alpha1.RepositoryConditionStorageReady, Status: metav1.ConditionTrue}}}}
 			kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repo).WithInterceptorFuncs(interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {

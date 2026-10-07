@@ -52,6 +52,7 @@ import (
 	"github.com/nekomeowww/rc/internal/cli/rcctl/progress"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	repositoryservice "github.com/nekomeowww/rc/internal/repositories"
+	"github.com/nekomeowww/rc/internal/volumeclaim"
 	workspaceservice "github.com/nekomeowww/rc/internal/workspaces"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
@@ -189,6 +190,11 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			}
 			if options.idleTimeout > 0 {
 				workspace.Spec.IdleTimeout = &metav1.Duration{Duration: options.idleTimeout}
+			}
+			if osName != darwinOSName {
+				if err := volumeclaim.Preflight(cmd.Context(), clusterClient.Kube, workspace, volumeclaim.WorkspaceHome, 0); err != nil {
+					return err
+				}
 			}
 			if err := clusterClient.Kube.Create(cmd.Context(), workspace); err != nil {
 				return fmt.Errorf("create Workspace: %w", err)
@@ -340,6 +346,9 @@ func mountRepository(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, sele
 		mount.ReadOnly = true
 	} else {
 		worktree := generatedWorkspaceWorktree(workspace, repository, mountName, accessModes)
+		if err := volumeclaim.Preflight(cmd.Context(), clusterClient.Kube, worktree, volumeclaim.Worktree, 0); err != nil {
+			return err
+		}
 		if err := clusterClient.Kube.Create(cmd.Context(), worktree); err != nil {
 			return fmt.Errorf("create mounted Worktree: %w", err)
 		}

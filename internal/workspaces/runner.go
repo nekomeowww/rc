@@ -35,6 +35,8 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/rcplatform"
+	"github.com/nekomeowww/rc/internal/volumeclaim"
 	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
@@ -339,6 +341,10 @@ func (runner *Runner) createTarget(ctx context.Context, request RunRequest) (tar
 	for _, name := range request.CredentialRefs {
 		workspace.Spec.CredentialRefs = append(workspace.Spec.CredentialRefs, workspacesv1alpha1.LocalReference{Name: name})
 	}
+	if err := runner.preflightTarget(ctx, workspace, generatedWorktrees); err != nil {
+		return RunTarget{}, err
+	}
+
 	if err := runner.Client.Create(ctx, workspace); err != nil {
 		return RunTarget{}, fmt.Errorf("create Workspace %q: %w", workspace.Name, err)
 	}
@@ -352,6 +358,22 @@ func (runner *Runner) createTarget(ctx context.Context, request RunRequest) (tar
 	}
 
 	return RunTarget{Workspace: workspace, Created: true}, nil
+}
+
+// preflightTarget checks all intended volumes before creating any part of a
+// runtime, so an occupied generated Worktree claim cannot leave a Workspace.
+func (runner *Runner) preflightTarget(ctx context.Context, workspace *workspacesv1alpha1.Workspace, worktrees []*repositoriesv1alpha1.Worktree) error {
+	if workspace.Spec.OS != rcplatform.Darwin {
+		if err := volumeclaim.Preflight(ctx, runner.Client, workspace, volumeclaim.WorkspaceHome, 0); err != nil {
+			return err
+		}
+	}
+	for _, worktree := range worktrees {
+		if err := volumeclaim.Preflight(ctx, runner.Client, worktree, volumeclaim.Worktree, 0); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (runner *Runner) rollbackTarget(ctx context.Context, workspace *workspacesv1alpha1.Workspace, worktrees []*repositoriesv1alpha1.Worktree, cause error) error {

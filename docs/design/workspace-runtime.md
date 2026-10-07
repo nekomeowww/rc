@@ -728,8 +728,9 @@ rcctl -n default workspace mount repo rc \
   --access-mode ReadWriteOnce
 ```
 
-When `--access-mode` is omitted, generated Worktrees retain the existing
-`ReadWriteMany` default.
+When `--access-mode` is omitted, generated Worktrees inherit the actual source
+PVC access modes (normally `ReadWriteOnce`). Explicit `ReadWriteMany` remains
+available for a driver that supports it. See [clone storage planning](worktree-storage.md).
 Mount and unmount validate the requested topology before stopping processes,
 then wait for `status.observedGeneration` and the Ready condition to observe
 the updated generation unless `--no-wait` is set. An explicitly selected

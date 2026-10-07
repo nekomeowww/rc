@@ -16,6 +16,7 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
+	"github.com/nekomeowww/rc/internal/volumeclaim"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
 	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
@@ -64,12 +65,16 @@ func (r *WorktreeReconciler) prepareWorktreeCleanup(ctx context.Context, worktre
 	if reader == nil {
 		reader = r.Client
 	}
+	claimName, resolveErr := volumeclaim.Resolve(ctx, reader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
+	if resolveErr != nil && claimName == "" {
+		return false, resolveErr
+	}
 	pods := new(corev1.PodList)
 	if err := reader.List(ctx, pods, client.InNamespace(worktree.Namespace)); err != nil {
 		return false, err
 	}
 	for _, pod := range pods.Items {
-		if pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed && podUsesPersistentVolumeClaim(&pod, worktree.Name) {
+		if pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed && podUsesPersistentVolumeClaim(&pod, claimName) {
 			return false, nil
 		}
 	}
@@ -101,8 +106,12 @@ func (r *WorktreeReconciler) reconcileStorageDeletion(ctx context.Context, workt
 	if reader == nil {
 		reader = r.Client
 	}
+	claimName, resolveErr := volumeclaim.Resolve(ctx, reader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
+	if resolveErr != nil && claimName == "" {
+		return ctrl.Result{}, resolveErr
+	}
 	claim := new(corev1.PersistentVolumeClaim)
-	if err := reader.Get(ctx, client.ObjectKeyFromObject(worktree), claim); err == nil {
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: worktree.Namespace, Name: claimName}, claim); err == nil {
 		if !metav1.IsControlledBy(claim, worktree) || claim.DeletionTimestamp.IsZero() {
 			return ctrl.Result{}, r.setStorageDeletionStatus(ctx, worktree, "VolumeDeletionFenced", "Storage admission is permanently closed; inspect the Worktree before replacing it")
 		}

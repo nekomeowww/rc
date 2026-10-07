@@ -3,15 +3,15 @@
 <picture>
   <source
     width="100%"
-    srcset="./docs/images/cover-3x1-dark.webp"
+    srcset="./docs/images/cover-dark.webp"
     media="(prefers-color-scheme: dark)"
   />
   <source
     width="100%"
-    srcset="./docs/images/cover-3x1-light.webp"
+    srcset="./docs/images/cover-light.webp"
     media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)"
   />
-  <img width="100%" src="./docs/images/cover-3x1-light.webp" />
+  <img width="100%" src="./docs/images/cover-light.webp" />
 </picture>
 
 `rc` runs persistent, Kubernetes-backed development workspaces for coding agents.
@@ -40,15 +40,15 @@ A `Repository` is the synchronized, authoritative mirror of a Git remote. A `Wor
 <picture>
   <source
     width="100%"
-    srcset="./docs/images/resource-model-3x1-dark.webp"
+    srcset="./docs/images/resource-model-dark.webp"
     media="(prefers-color-scheme: dark)"
   />
   <source
     width="100%"
-    srcset="./docs/images/resource-model-3x1-light.webp"
+    srcset="./docs/images/resource-model-light.webp"
     media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)"
   />
-  <img width="100%" src="./docs/images/resource-model-3x1-light.webp" />
+  <img width="100%" src="./docs/images/resource-model-light.webp" />
 </picture>
 
 This gives each task an ordinary Git branch and working tree without repeatedly downloading the same remote. Worktrees remain inspectable after a process exits, and a disconnected terminal does not stop the process it started.
@@ -171,15 +171,15 @@ In most cases, it takes only a few steps to get started with rcctl:
 <picture>
   <source
     width="100%"
-    srcset="./docs/images/quick-start-3x1-dark.webp"
+    srcset="./docs/images/quick-start-dark.webp"
     media="(prefers-color-scheme: dark)"
   />
   <source
     width="100%"
-    srcset="./docs/images/quick-start-3x1-light.webp"
+    srcset="./docs/images/quick-start-light.webp"
     media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)"
   />
-  <img width="100%" src="./docs/images/quick-start-3x1-light.webp" />
+  <img width="100%" src="./docs/images/quick-start-light.webp" />
 </picture>
 
 <details>
@@ -453,13 +453,13 @@ Licensed under the
 <picture>
   <source
     width="100%"
-    srcset="./docs/images/overview-3x1-dark.webp"
+    srcset="./docs/images/overview-dark.webp"
     media="(prefers-color-scheme: dark)"
   />
   <source
     width="100%"
-    srcset="./docs/images/overview-3x1-light.webp"
+    srcset="./docs/images/overview-light.webp"
     media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)"
   />
-  <img width="100%" src="./docs/images/overview-3x1-light.webp" />
+  <img width="100%" src="./docs/images/overview-light.webp" />
 </picture>

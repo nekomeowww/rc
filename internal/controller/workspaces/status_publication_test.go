@@ -342,7 +342,7 @@ func TestEnvironmentStorageReadyReportsBoundAndLost(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "storage-env", Namespace: testNamespace, UID: "storage-env-uid"},
 		Spec:       workspacesv1alpha1.WorkspaceEnvironmentSpec{Image: testRuntimeImage, Storage: workspacesv1alpha1.PersistentStorageSpec{StorageClassName: testStorageClass, Size: resource.MustParse("1Gi")}},
 	}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(environment, &corev1.PersistentVolumeClaim{}).WithObjects(environment).Build()
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(environment, &corev1.PersistentVolumeClaim{}).WithObjects(environment).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	reconciler := &WorkspaceEnvironmentReconciler{Client: kube, Scheme: scheme}
 	key := client.ObjectKeyFromObject(environment)
 	reconcileEnvironment := func() *metav1.Condition {

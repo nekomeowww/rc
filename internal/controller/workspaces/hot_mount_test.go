@@ -76,7 +76,7 @@ func TestControllerUpgradeReplacesIdleWorkspaceRuntime(t *testing.T) {
 		},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(workspace, home, oldPod).WithObjects(workspace, home, oldPod).Build()
+		WithStatusSubresource(workspace, home, oldPod).WithObjects(workspace, home, oldPod).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	reconciler := &WorkspaceReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
 	key := client.ObjectKeyFromObject(workspace)
 	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
@@ -117,7 +117,7 @@ func TestHotWorktreeMountKeepsRuntimeAndActiveProcess(t *testing.T) {
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(workspace, home, &corev1.Pod{}, &workspacesv1alpha1.WorkspaceExec{}, &repositoriesv1alpha1.Worktree{}).
-		WithObjects(workspace, home).Build()
+		WithObjects(workspace, home).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	reconciler := &WorkspaceReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
 	key := client.ObjectKeyFromObject(workspace)
 	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
@@ -217,7 +217,7 @@ func TestFailedHotMountCreatesCleanupPodWithoutPVC(t *testing.T) {
 			}}},
 		},
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1.Pod{}).WithObjects(workspace).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1.Pod{}).WithObjects(workspace).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	reconciler := &WorkspaceReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, RunnerImage: testRunnerImage}
 	cleaned, message, err := reconciler.cleanFailedHotMount(ctx, workspace, helper)
 	require.NoError(t, err)

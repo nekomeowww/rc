@@ -54,7 +54,7 @@ func TestWorkspaceReleasesParentBeforeDependencyChecks(t *testing.T) {
 			home := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: workspace.Name, Namespace: workspace.Namespace}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
 			require.NoError(t, controllerutil.SetControllerReference(workspace, home, scheme))
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: workspace.Name, Namespace: workspace.Namespace}}
-			c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace).WithObjects(parent, workspace, home, pod).Build()
+			c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace).WithObjects(parent, workspace, home, pod).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 			gate := repositoryaccess.Gate{Client: c, Reader: c}
 			admission, err := gate.Acquire(ctx, parent, repositoryaccess.Holder(repositoryaccess.KindWorkspace, workspace, repositoryaccess.Mount), true)
 			require.NoError(t, err)

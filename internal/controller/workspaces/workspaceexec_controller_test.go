@@ -125,7 +125,7 @@ func TestWorkspaceExecReconcileStartsCommandAtReadyWorkspace(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "process-env", Namespace: testNamespace},
 		Data:       map[string][]byte{"CI": []byte(testTrueValue)},
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).
 		WithStatusSubresource(workspace, pod, process).
 		WithObjects(workspace, pod, process, processEnvironment).
 		Build()
@@ -194,7 +194,7 @@ func TestProcessCredentialProjectsFilesAndEnvsIndependently(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "tool-process", Namespace: testNamespace},
 		Spec:       workspacesv1alpha1.WorkspaceExecSpec{CredentialRefs: []workspacesv1alpha1.LocalReference{{Name: credentialName}}},
 	}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, credential, secret).Build()
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, credential, secret).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	reconciler := &WorkspaceExecReconciler{
 		Client:    kube,
 		APIReader: kube,
@@ -257,7 +257,7 @@ func TestSSHCredentialProjectsNativeConfiguration(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "ssh-process", Namespace: testNamespace},
 		Spec:       workspacesv1alpha1.WorkspaceExecSpec{CredentialRefs: []workspacesv1alpha1.LocalReference{{Name: credentialName}}},
 	}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(credential, secret).Build()
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(credential, secret).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	reconciler := &WorkspaceExecReconciler{
 		Client:    kube,
 		APIReader: kube,
@@ -303,7 +303,7 @@ func TestRunningWorkspaceExecBecomesLostWhenOriginalPodDisappears(t *testing.T) 
 		},
 		Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseRunning, RuntimePodName: testWorkspaceName, RuntimePodUID: "original-uid"},
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(process).WithObjects(process).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(process).WithObjects(process).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	reconciler := &WorkspaceExecReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, Runtime: &recordingProcessRuntime{}}
 	key := types.NamespacedName{Name: process.Name, Namespace: process.Namespace}
 	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
@@ -351,7 +351,7 @@ func TestRuntimePodEventEnqueuesBoundActiveWorkspaceExecs(t *testing.T) {
 			Phase: workspacesv1alpha1.WorkspaceExecPhaseRunning, RuntimePodName: "another-runtime", RuntimePodUID: "another-pod-uid",
 		},
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).
 		WithObjects(running, starting, terminal, unrelated).
 		WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionPodIndex, executionPodNames).
 		Build()
@@ -400,7 +400,7 @@ func TestDeletingActiveWorkspaceExecStopsOriginalRuntimeBeforeRemovingFinalizer(
 				},
 			}
 			requirements.NoError(controllerutil.SetControllerReference(workspace, process, scheme))
-			kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).
 				WithStatusSubresource(process, pod, workspace).
 				WithObjects(process, pod, workspace).
 				Build()

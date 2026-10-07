@@ -66,7 +66,7 @@ func TestReadyWorkspaceAdmitsCurrentMountsWithoutListingWorktrees(t *testing.T) 
 			}
 			return c.Patch(ctx, obj, patch, opts...)
 		},
-	}).Build()
+	}).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	r := WorkspaceReconciler{Client: kube, APIReader: kube, Scheme: scheme, RunnerImage: testRunnerImage}
 	req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)}
 	_, err := r.Reconcile(ctx, req)
@@ -143,7 +143,7 @@ func TestSuspendingWorkspaceReleasesClosedMount(t *testing.T) {
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: workspace.Name, Namespace: workspace.Namespace}}
 	require.NoError(t, controllerutil.SetControllerReference(workspace, home, scheme))
 	require.NoError(t, controllerutil.SetControllerReference(workspace, pod, scheme))
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(worktree, workspace, home).WithObjects(worktree, workspace, home, pod).Build()
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(worktree, workspace, home).WithObjects(worktree, workspace, home, pod).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	gate := worktreeownership.MountAccess{Client: kube, Reader: kube}
 	admitted, err := gate.Admit(ctx, worktree, workspace, worktreeownership.WorkspaceHolder(workspace, worktreeownership.Read))
 	require.NoError(t, err)

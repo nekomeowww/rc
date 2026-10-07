@@ -283,7 +283,9 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return result, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reason, message)
 	}
 
-	active, _, _, err := workspaceProcessState(ctx, r.APIReader, workspace)
+	// The cache is enough here: execution admission and pod-loss handling fence
+	// a process created after this snapshot.
+	active, _, _, err := workspaceProcessState(ctx, r.Client, workspace)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -1091,7 +1093,9 @@ type workspaceProcesses struct {
 
 func listWorkspaceProcesses(ctx context.Context, kubeClient client.Reader, workspace *workspacesv1alpha1.Workspace) (workspaceProcesses, error) {
 	processes := new(workspacesv1alpha1.WorkspaceExecList)
-	if err := kubeClient.List(ctx, processes, client.InNamespace(workspace.Namespace)); err != nil {
+	// The target index is a cache index and a CRD selectable field, so both the
+	// cache and an uncached reader avoid transferring the whole namespace.
+	if err := kubeClient.List(ctx, processes, client.InNamespace(workspace.Namespace), client.MatchingFields{executionTargetIndex: workspace.Name}); err != nil {
 		return workspaceProcesses{}, fmt.Errorf("list Workspace processes: %w", err)
 	}
 	summary := workspaceProcesses{any: workspace.Status.LastExecutionCompletedAt != nil, lastCompletion: workspace.Status.LastExecutionCompletedAt.DeepCopy()}

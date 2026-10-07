@@ -171,7 +171,7 @@ func TestSuspendedWorkspaceExpires(t *testing.T) {
 	workspace.ObjectMeta = metav1.ObjectMeta{Name: "suspended", Namespace: testNamespace, Finalizers: []string{workspaceFinalizer}}
 	workspace.Status.SuspendedAt = &metav1.Time{Time: time.Now().Add(-2 * time.Hour)}
 	workspace.Status.Conditions = []metav1.Condition{{Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionFalse, Reason: reasonSuspended, LastTransitionTime: metav1.NewTime(time.Now().Add(-2 * time.Hour))}}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace).WithObjects(workspace).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace).WithObjects(workspace).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	_, err := (&WorkspaceRetentionReconciler{Client: kubeClient, APIReader: kubeClient}).Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
 	require.NoError(t, err)
 	persisted := new(workspacesv1alpha1.Workspace)

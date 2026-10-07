@@ -55,7 +55,7 @@ func TestWorkspaceEnvironmentReconcileCreatesCurrentVolume(t *testing.T) {
 			},
 		},
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).
 		WithStatusSubresource(environment, &corev1.PersistentVolumeClaim{}).
 		WithObjects(environment).
 		Build()
@@ -147,7 +147,7 @@ func TestWorkspaceEnvironmentReplacesEditorAfterSpecChange(t *testing.T) {
 	editor, err := environmentEditorPod(environment, "editor-update-draft-1")
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(environment, editor, scheme))
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).
 		WithStatusSubresource(environment, editor).
 		WithObjects(environment, editor).
 		Build()
@@ -195,7 +195,7 @@ func TestWorkspaceEnvironmentReconcileCommitsIdleDraft(t *testing.T) {
 	requirements.NoError(controllerutil.SetControllerReference(environment, editor, scheme), "own editor Pod")
 	current.Status.Phase = corev1.ClaimBound
 	draft.Status.Phase = corev1.ClaimBound
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).
 		WithStatusSubresource(environment, current, draft, editor).
 		WithObjects(environment, current, draft, editor).
 		Build()
@@ -235,7 +235,7 @@ func TestWorkspaceEnvironmentImageOnlyAdvancesOnCommit(t *testing.T) {
 	claim := environmentVolumeClaim(environment, environment.Status.CurrentVolumeClaimName, "")
 	requirements.NoError(controllerutil.SetControllerReference(environment, claim, scheme), "own current PVC")
 	claim.Status.Phase = corev1.ClaimBound
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(environment, claim).WithObjects(environment, claim).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(environment, claim).WithObjects(environment, claim).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	reconciler := &WorkspaceEnvironmentReconciler{Client: kubeClient, Scheme: scheme}
 	key := types.NamespacedName{Name: environment.Name, Namespace: environment.Namespace}
 
@@ -259,7 +259,7 @@ func TestEnvironmentRejectsForeignDraftBeforeMountOrCommit(t *testing.T) {
 	draft := environmentVolumeClaim(environment, "foreign", "current")
 	draft.OwnerReferences = []metav1.OwnerReference{{Kind: "WorkspaceEnvironment", Name: environment.Name, UID: "previous-incarnation", Controller: boolPointer(true)}}
 	draft.Status.Phase = corev1.ClaimBound
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(environment).WithObjects(environment, draft).Build()
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(environment).WithObjects(environment, draft).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	// Matching clone metadata used to be enough to mount another owner's draft.
 	_, reason, message, err := (&WorkspaceExecReconciler{Client: kube, APIReader: kube, Scheme: scheme}).resolveEnvironmentProcessTarget(t.Context(), &workspacesv1alpha1.WorkspaceExec{
 		ObjectMeta: metav1.ObjectMeta{Namespace: environment.Namespace}, Spec: workspacesv1alpha1.WorkspaceExecSpec{TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Name: environment.Name}},

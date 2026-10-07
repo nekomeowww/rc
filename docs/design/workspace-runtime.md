@@ -2,6 +2,9 @@
 
 Status: Accepted design baseline
 
+Terminal runtime recovery and execution safety are documented in
+[Workspace runtime recovery](workspace-runtime-recovery.md).
+
 This document specifies the first Workspace runtime for rc. It records the
 resource boundaries, lifecycle rules, CLI behavior, and implementation order
 agreed before API scaffolding begins. The example resource shapes are

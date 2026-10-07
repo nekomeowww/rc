@@ -30,24 +30,34 @@ type Plan struct {
 	Remove []int
 }
 
+// PolicyFor resolves a target's history-pruning policy. ok is false for absent,
+// deleting, temporary, and unsupported targets: they have no history-pruning
+// policy and retain their whole-target deletion lifecycle. A nil policy with ok
+// true means the target keeps all history.
+func PolicyFor(target client.Object) (policy *workspacesv1alpha1.ExecutionRetentionPolicy, ok bool) {
+	if target == nil || !target.GetDeletionTimestamp().IsZero() {
+		return nil, false
+	}
+	switch target := target.(type) {
+	case *workspacesv1alpha1.Workspace:
+		if target.Spec.IsTemporary() {
+			return nil, false
+		}
+		return target.Spec.ExecutionRetention, true
+	case *workspacesv1alpha1.WorkspaceEnvironment:
+		return target.Spec.ExecutionRetention, true
+	default:
+		return nil, false
+	}
+}
+
 // BuildForTarget resolves a target's effective policy and applies it to a
 // complete target-scoped execution snapshot. Unsupported, deleting, and
 // temporary targets fail closed because they have no history-pruning policy.
 func BuildForTarget(executions []workspacesv1alpha1.WorkspaceExec, target client.Object, now time.Time) (Plan, error) {
-	if target == nil || !target.GetDeletionTimestamp().IsZero() {
-		return Plan{}, fmt.Errorf("execution target is absent or deleting")
-	}
-	var policy *workspacesv1alpha1.ExecutionRetentionPolicy
-	switch target := target.(type) {
-	case *workspacesv1alpha1.Workspace:
-		if target.Spec.IsTemporary() {
-			return Plan{}, fmt.Errorf("temporary Workspace uses whole-target retention")
-		}
-		policy = target.Spec.ExecutionRetention
-	case *workspacesv1alpha1.WorkspaceEnvironment:
-		policy = target.Spec.ExecutionRetention
-	default:
-		return Plan{}, fmt.Errorf("unsupported execution target %T", target)
+	policy, ok := PolicyFor(target)
+	if !ok {
+		return Plan{}, fmt.Errorf("execution target is absent, deleting, temporary, or unsupported (%T); it has no history-pruning policy", target)
 	}
 	return Build(executions, policy, now), nil
 }

@@ -27,7 +27,7 @@ func (r *WorkspaceEnvironmentRetentionReconciler) Reconcile(ctx context.Context,
 	if err := r.Get(ctx, req.NamespacedName, target); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	return (&executionRetentionService{Client: r.Client, APIReader: r.APIReader, Runtime: r.Runtime}).reconcileTarget(ctx, target, target.Spec.ExecutionRetention)
+	return (&executionRetentionService{Client: r.Client, APIReader: r.APIReader, Runtime: r.Runtime}).reconcileTarget(ctx, target)
 }
 
 // SetupWithManager registers kind-filtered execution events and owned workers.

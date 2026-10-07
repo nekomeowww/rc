@@ -34,6 +34,8 @@ func TestTranscriptResolverDoesNotFollowEnvironmentToNewDraft(t *testing.T) {
 	volume, err := ResolveTranscriptVolume(t.Context(), kube, process)
 	require.NoError(t, err)
 	require.Equal(t, "original", volume.Claim)
+	require.Equal(t, "original-uid", volume.ClaimUID, "resolution reports the PVC it already read")
+	require.False(t, volume.ClaimDeleting)
 	process.Status.TranscriptVolumeClaimUID = "deleted-uid"
 	_, err = ResolveTranscriptVolume(t.Context(), kube, process)
 	require.ErrorContains(t, err, "PVC was replaced")

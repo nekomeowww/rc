@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/conditions"
 	"github.com/nekomeowww/rc/internal/rcplatform"
 	"github.com/nekomeowww/rc/internal/volumeclaim"
 )
@@ -42,8 +43,7 @@ func (r *WorkspaceExecReconciler) resolveEnvironmentProcessTarget(ctx context.Co
 		}
 		return nil, "", "", fmt.Errorf("get target WorkspaceEnvironment: %w", err)
 	}
-	ready := meta.FindStatusCondition(environment.Status.Conditions, workspacesv1alpha1.WorkspaceEnvironmentConditionReady)
-	if environment.Status.ObservedGeneration < environment.Generation || ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration < environment.Generation || environment.Status.CurrentVolumeClaimName == "" {
+	if !conditions.ReadyAtGeneration(environment.Status.Conditions, workspacesv1alpha1.WorkspaceEnvironmentConditionReady, environment.Generation, environment.Status.ObservedGeneration) || environment.Status.CurrentVolumeClaimName == "" {
 		return nil, reasonTargetNotReady, "Target WorkspaceEnvironment current revision is not ready", nil
 	}
 
@@ -54,17 +54,14 @@ func (r *WorkspaceExecReconciler) resolveEnvironmentProcessTarget(ctx context.Co
 		reason, message := runtimePlatformCondition(platformErr)
 		return nil, reason, message, nil
 	}
-	draftName, err := volumeclaim.Resolve(ctx, r.Client, environment, volumeclaim.EnvironmentDraft, environment.Status.CurrentRevision+1, environment.Status.DraftVolumeClaimName)
+	draftName, draft, err := volumeclaim.Resolve(ctx, r.Client, environment, volumeclaim.EnvironmentDraft, environment.Status.CurrentRevision+1, environment.Status.DraftVolumeClaimName)
 	if volumeclaim.IsConflict(err) {
 		return nil, "VolumeClaimConflict", err.Error(), nil
 	}
 	if err != nil {
-		return nil, "", "", err
+		return nil, "", "", fmt.Errorf("get WorkspaceEnvironment draft PersistentVolumeClaim: %w", err)
 	}
-	draft := new(corev1.PersistentVolumeClaim)
-	draftKey := types.NamespacedName{Name: draftName, Namespace: environment.Namespace}
-	err = r.Get(ctx, draftKey, draft)
-	if apierrors.IsNotFound(err) {
+	if draft == nil {
 		draft = environmentVolumeClaim(environment, draftName, environment.Status.CurrentVolumeClaimName)
 		if err := controllerutil.SetControllerReference(environment, draft, r.Scheme); err != nil {
 			return nil, "", "", fmt.Errorf("set WorkspaceEnvironment owner on draft PersistentVolumeClaim: %w", err)
@@ -77,12 +74,6 @@ func (r *WorkspaceExecReconciler) resolveEnvironmentProcessTarget(ctx context.Co
 		}
 
 		return nil, reasonTargetNotReady, "Target WorkspaceEnvironment draft is provisioning", nil
-	}
-	if err != nil {
-		return nil, "", "", fmt.Errorf("get WorkspaceEnvironment draft PersistentVolumeClaim: %w", err)
-	}
-	if err := volumeclaim.CheckOwner(draft, environment); err != nil {
-		return nil, "VolumeClaimConflict", err.Error(), nil
 	}
 	if !environmentClaimMatches(draft, environment.Spec.Storage, environment.Status.CurrentVolumeClaimName) {
 		return nil, "DraftVolumeMismatch", "Environment draft volume does not clone current", nil

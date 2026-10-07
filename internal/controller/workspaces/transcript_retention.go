@@ -153,6 +153,13 @@ func (r *executionRetentionService) cleanupVolume(ctx context.Context, process *
 	if err != nil || volume.Claim == "" {
 		return volume, "", err
 	}
+	// A pinned claim was already read during resolution.
+	if volume.ClaimUID != "" {
+		if volume.ClaimDeleting {
+			return volume, "", errTranscriptStorageGone
+		}
+		return volume, volume.ClaimUID, nil
+	}
 	claim := new(corev1.PersistentVolumeClaim)
 	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: process.Namespace, Name: volume.Claim}, claim); err != nil {
 		return volume, "", err
@@ -166,27 +173,17 @@ func (r *executionRetentionService) cleanupVolume(ctx context.Context, process *
 // pruneLiveTranscript keeps unlinking under the supervisor lock whenever a
 // runtime still mounts the original home, avoiding races with active writers.
 func (r *executionRetentionService) pruneLiveTranscript(ctx context.Context, target client.Object, process *workspacesv1alpha1.WorkspaceExec, volume workspaceservice.TranscriptVolume) (bool, error) {
-	pods := new(corev1.PodList)
-	label := workspaceManagedByLabel
-	if process.Spec.TargetRef.Kind == workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment {
-		label = environmentManagedByLabel
-	}
-	if err := r.APIReader.List(ctx, pods, client.InNamespace(process.Namespace), client.MatchingLabels{label: target.GetName()}); err != nil {
+	pods, err := r.targetPods(ctx, target)
+	if err != nil {
 		return false, err
 	}
-	for i := range pods.Items {
-		pod := &pods.Items[i]
+	for i := range pods {
+		pod := &pods[i]
 		if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
 			continue
 		}
 		original := pod.Name == process.Status.RuntimePodName && string(pod.UID) == process.Status.RuntimePodUID
-		mounted := false
-		for _, mount := range pod.Spec.Volumes {
-			if mount.Name == transcriptHomeVolumeName && mount.PersistentVolumeClaim != nil && mount.PersistentVolumeClaim.ClaimName == volume.Claim {
-				mounted = true
-			}
-		}
-		if !original && (!metav1.IsControlledBy(pod, target) || !mounted) {
+		if !original && (!metav1.IsControlledBy(pod, target) || !podMountsClaim(pod, volume.Claim, transcriptHomeVolumeName)) {
 			continue
 		}
 		if pod.Status.Phase != corev1.PodRunning || !pod.DeletionTimestamp.IsZero() {

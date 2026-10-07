@@ -193,17 +193,15 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	if resolved.runtime.OS() != rcplatform.Darwin {
-		claimName, resolveErr := volumeclaim.Resolve(ctx, r.APIReader, workspace, volumeclaim.WorkspaceHome, 0, workspace.Status.HomeVolumeClaimName)
+		claimName, home, resolveErr := volumeclaim.Resolve(ctx, r.APIReader, workspace, volumeclaim.WorkspaceHome, 0, workspace.Status.HomeVolumeClaimName)
 		if volumeclaim.IsConflict(resolveErr) {
 			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "VolumeClaimConflict", resolveErr.Error())
 		}
 		if resolveErr != nil {
-			return ctrl.Result{}, resolveErr
+			return ctrl.Result{}, fmt.Errorf("get Workspace home PersistentVolumeClaim: %w", resolveErr)
 		}
 		resolved.homeClaimName = claimName
-		home := new(corev1.PersistentVolumeClaim)
-		err = r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: claimName}, home)
-		if errors.IsNotFound(err) {
+		if home == nil {
 			home = workspaceHomeVolumeClaim(workspace, resolved)
 			if err := controllerutil.SetControllerReference(workspace, home, r.Scheme); err != nil {
 				return ctrl.Result{}, fmt.Errorf("set Workspace owner on home PersistentVolumeClaim: %w", err)
@@ -214,12 +212,6 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			log.Info("Created Workspace home PersistentVolumeClaim", "name", home.Name)
 
 			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Provisioning", "Workspace home volume is provisioning")
-		}
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("get Workspace home PersistentVolumeClaim: %w", err)
-		}
-		if ownerErr := volumeclaim.CheckOwner(home, workspace); ownerErr != nil {
-			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "VolumeClaimConflict", ownerErr.Error())
 		}
 		if workspace.Status.RuntimeImage == "" && home.Annotations[workspaceImageAnnotation] != "" {
 			resolved.image = home.Annotations[workspaceImageAnnotation]

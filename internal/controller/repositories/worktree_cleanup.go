@@ -63,7 +63,7 @@ func (r *WorktreeReconciler) prepareWorktreeCleanup(ctx context.Context, worktre
 	if err != nil || len(blockers) > 0 {
 		return "", false, err
 	}
-	claimName, resolveErr := volumeclaim.Resolve(ctx, r.APIReader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
+	claimName, _, resolveErr := volumeclaim.Resolve(ctx, r.APIReader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
 	if resolveErr != nil && claimName == "" {
 		return "", false, resolveErr
 	}
@@ -115,7 +115,7 @@ func (r *WorktreeReconciler) reconcileStorageDeletion(ctx context.Context, workt
 	} else if !errors.IsNotFound(err) {
 		return ctrl.Result{}, err
 	}
-	if err := (repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}).Release(ctx, worktree.Namespace, repositoryaccess.Token("clone", worktree)); err != nil {
+	if err := r.releaseClone(ctx, worktree); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, r.setStorageDeletionStatus(ctx, worktree, "VolumeDeleted", "Storage was explicitly deleted; this Worktree will not recreate a checkout")
@@ -137,4 +137,19 @@ func (r *WorktreeReconciler) setStorageDeletionStatus(ctx context.Context, workt
 		}
 		return r.Status().Patch(ctx, current, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 	})
+}
+
+// cloneGate admits a Worktree clone against its source Repository.
+func (r *WorktreeReconciler) cloneGate() repositoryaccess.Gate {
+	return repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}
+}
+
+// cloneToken identifies a Worktree's clone reservation on its Repository.
+func cloneToken(worktree *repositoriesv1alpha1.Worktree) string {
+	return repositoryaccess.Token("clone", worktree)
+}
+
+// releaseClone drops a Worktree's clone reservation. It is idempotent.
+func (r *WorktreeReconciler) releaseClone(ctx context.Context, worktree *repositoriesv1alpha1.Worktree) error {
+	return r.cloneGate().Release(ctx, worktree.Namespace, cloneToken(worktree))
 }

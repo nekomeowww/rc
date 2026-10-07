@@ -104,32 +104,26 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	worktreePath := worktreePath(worktree)
-	claimName, err := volumeclaim.Resolve(ctx, r.APIReader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
-	if err != nil && claimName == "" {
-		return ctrl.Result{}, err
-	}
-	claim := new(corev1.PersistentVolumeClaim)
-	claimKey := types.NamespacedName{Name: claimName, Namespace: worktree.Namespace}
-
-	// Read directly before creation: a cached absence must not replan a child
-	// already created from an earlier source observation.
-	claimErr := r.APIReader.Get(ctx, claimKey, claim)
-	if claimErr != nil && !errors.IsNotFound(claimErr) {
-		return ctrl.Result{}, fmt.Errorf("get Worktree PersistentVolumeClaim: %w", claimErr)
+	// Resolve reads directly before creation: a cached absence must not replan a
+	// child already created from an earlier source observation. An ownership
+	// conflict still returns the claim so a terminating owned PVC reaches cleanup.
+	claimName, claim, err := volumeclaim.Resolve(ctx, r.APIReader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
+	if err != nil && !volumeclaim.IsConflict(err) {
+		return ctrl.Result{}, fmt.Errorf("get Worktree PersistentVolumeClaim: %w", err)
 	}
 	// Handle storage deletion before Repository readiness or checkout work. The
 	// parent may already be absent; that must not strand a PVC finalizer.
-	if worktreeownership.MountsClosed(worktree) || (errors.IsNotFound(claimErr) && worktree.Status.VolumeClaimName != "") || (claimErr == nil && metav1.IsControlledBy(claim, worktree) && !claim.DeletionTimestamp.IsZero()) {
+	if worktreeownership.MountsClosed(worktree) || (claim == nil && worktree.Status.VolumeClaimName != "") || (claim != nil && metav1.IsControlledBy(claim, worktree) && !claim.DeletionTimestamp.IsZero()) {
 		return r.reconcileStorageDeletion(ctx, worktree)
 	}
 	if volumeclaim.IsConflict(err) {
 		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimConflict", err.Error(), worktree.Status.VolumeClaimName, worktree.Status.SourceVolumeClaimName, worktreePath)
 	}
-	if errors.IsNotFound(claimErr) {
+	if claim == nil {
 		// A recorded child is durable creation evidence. Its loss must not silently
 		// authorize a new clone from today's Repository under the same Worktree.
 		if worktree.Status.VolumeClaimName != "" {
-			if err := (repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}).Release(ctx, worktree.Namespace, repositoryaccess.Token("clone", worktree)); err != nil {
+			if err := r.releaseClone(ctx, worktree); err != nil {
 				return ctrl.Result{}, err
 			}
 			return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimLost", "Previously created child PVC is missing; restore the child or recreate the Worktree explicitly", worktree.Status.VolumeClaimName, worktree.Status.SourceVolumeClaimName, worktreePath)
@@ -150,8 +144,7 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			return ctrl.Result{}, fmt.Errorf("get Repository: %w", err)
 		}
 
-		gate := repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}
-		admission, err := gate.Acquire(ctx, repository, repositoryaccess.Token("clone", worktree), repositoryaccess.Clone, true)
+		admission, err := r.cloneGate().Acquire(ctx, repository, cloneToken(worktree), repositoryaccess.Clone, true)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -172,7 +165,7 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if planErr != nil {
 			// No child was created: rejected planning must not retain a reservation
 			// that would prevent Repository sync or expansion from making progress.
-			if err := gate.Release(ctx, worktree.Namespace, repositoryaccess.Token("clone", worktree)); err != nil {
+			if err := r.releaseClone(ctx, worktree); err != nil {
 				return ctrl.Result{}, err
 			}
 			status := metav1.ConditionFalse
@@ -201,9 +194,6 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		// The successful PVC write, not a later status write, commits clone identity.
 	}
 
-	if ownerErr := volumeclaim.CheckOwner(claim, worktree); ownerErr != nil {
-		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimConflict", ownerErr.Error(), worktree.Status.VolumeClaimName, worktree.Status.SourceVolumeClaimName, worktreePath)
-	}
 	// Existing child storage records its creation-time defaults. Do not compare
 	// it to a fresh plan: parent expansion and default changes cannot alter a clone.
 	// Worktree status is a repairable projection: creation may have committed
@@ -224,7 +214,7 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	// A Bound CSI clone is an independent volume. Pending claims retain admission
 	// through source capture. See https://kubernetes.io/docs/concepts/storage/volume-pvc-datasource/
-	if err := (repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}).Release(ctx, worktree.Namespace, repositoryaccess.Token("clone", worktree)); err != nil {
+	if err := r.releaseClone(ctx, worktree); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.setWorktreeVolumeReady(ctx, worktree, claim.Name, sourceClaimName, worktreePath); err != nil {
@@ -330,7 +320,7 @@ func (r *WorktreeReconciler) reconcileDelete(ctx context.Context, worktree *repo
 		return ctrl.Result{}, err
 	}
 
-	if err := (repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}).Release(ctx, worktree.Namespace, repositoryaccess.Token("clone", worktree)); err != nil {
+	if err := r.releaseClone(ctx, worktree); err != nil {
 		return ctrl.Result{}, err
 	}
 	key := client.ObjectKeyFromObject(worktree)

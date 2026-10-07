@@ -34,6 +34,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	"github.com/nekomeowww/rc/internal/conditions"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
 	"github.com/nekomeowww/rc/internal/runtimepolicy"
 )
@@ -129,8 +130,7 @@ func (r *RepositoryExecReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, fmt.Errorf("get Repository: %w", err)
 	}
 
-	ready := meta.FindStatusCondition(repository.Status.Conditions, repositoriesv1alpha1.RepositoryConditionStorageReady)
-	if repository.Status.ObservedGeneration < repository.Generation || ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration < repository.Generation || repository.Status.VolumeClaimName == "" {
+	if !conditions.ReadyAtGeneration(repository.Status.Conditions, repositoriesv1alpha1.RepositoryConditionStorageReady, repository.Generation, repository.Status.ObservedGeneration) || repository.Status.VolumeClaimName == "" {
 		err := r.setSucceeded(ctx, exec, metav1.ConditionUnknown, "RepositoryNotReady", "Referenced Repository parent volume is not ready", "")
 		if err != nil {
 			return ctrl.Result{}, err

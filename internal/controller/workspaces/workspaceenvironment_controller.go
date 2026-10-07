@@ -85,22 +85,19 @@ func (r *WorkspaceEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl
 	if revision == 0 {
 		revision = 1
 	}
-	claimName, err := volumeclaim.Resolve(ctx, r.Client, environment, volumeclaim.EnvironmentCurrent, revision, environment.Status.CurrentVolumeClaimName)
+	claimName, claim, err := volumeclaim.Resolve(ctx, r.Client, environment, volumeclaim.EnvironmentCurrent, revision, environment.Status.CurrentVolumeClaimName)
 	if volumeclaim.IsConflict(err) {
 		return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, environment.Status.CurrentImage, environment.Status.CurrentVolumeClaimName, metav1.ConditionFalse, "VolumeClaimConflict", err.Error())
 	}
 	if err != nil {
-		return ctrl.Result{}, err
+		return ctrl.Result{}, fmt.Errorf("get WorkspaceEnvironment current PersistentVolumeClaim: %w", err)
 	}
 	committedImage := environment.Status.CurrentImage
 	if committedImage == "" {
 		committedImage = environment.Spec.Image
 	}
 
-	claim := new(corev1.PersistentVolumeClaim)
-	claimKey := types.NamespacedName{Name: claimName, Namespace: environment.Namespace}
-	err = r.Get(ctx, claimKey, claim)
-	if errors.IsNotFound(err) {
+	if claim == nil {
 		claim = environmentVolumeClaim(environment, claimName, "")
 		if err := controllerutil.SetControllerReference(environment, claim, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("set WorkspaceEnvironment owner on PersistentVolumeClaim: %w", err)
@@ -111,12 +108,6 @@ func (r *WorkspaceEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl
 		log.Info("Created WorkspaceEnvironment current PersistentVolumeClaim", "name", claim.Name)
 
 		return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, committedImage, claim.Name, metav1.ConditionFalse, "Provisioning", "Current volume is provisioning")
-	}
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("get WorkspaceEnvironment current PersistentVolumeClaim: %w", err)
-	}
-	if ownerErr := volumeclaim.CheckOwner(claim, environment); ownerErr != nil {
-		return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, committedImage, environment.Status.CurrentVolumeClaimName, metav1.ConditionFalse, "VolumeClaimConflict", ownerErr.Error())
 	}
 	if !environmentStorageMatches(claim, environment.Spec.Storage) {
 		return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, committedImage, claim.Name, metav1.ConditionFalse, "VolumeClaimSpecChanged", "Changing committed Environment storage is not supported")

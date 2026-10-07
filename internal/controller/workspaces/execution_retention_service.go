@@ -6,6 +6,7 @@ import (
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	processruntime "github.com/nekomeowww/rc/internal/execution"
+	"github.com/nekomeowww/rc/internal/executionretention"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -22,10 +23,15 @@ type executionRetentionService struct {
 	Runtime   processruntime.TranscriptPruner
 }
 
-func (r *executionRetentionService) reconcileTarget(ctx context.Context, target client.Object, policy *workspacesv1alpha1.ExecutionRetentionPolicy) (ctrl.Result, error) {
+// reconcileTarget prunes a live target's execution history under its policy
+// and progresses transcript cleanup. A deleting target is left to its
+// whole-target lifecycle. A temporary Workspace has no history-pruning policy
+// but still discharges explicit transcript deletions.
+func (r *executionRetentionService) reconcileTarget(ctx context.Context, target client.Object) (ctrl.Result, error) {
 	if !target.GetDeletionTimestamp().IsZero() {
 		return ctrl.Result{}, nil
 	}
+	policy, _ := executionretention.PolicyFor(target)
 	historyErr := r.reconcileExecutionHistory(ctx, target.GetNamespace(), executionTargetReference(target), target.GetUID(), policy)
 	cleanupErr := r.reconcileTranscripts(ctx, target, policy)
 	// Explicit deletion obligations must progress even after policy is disabled.

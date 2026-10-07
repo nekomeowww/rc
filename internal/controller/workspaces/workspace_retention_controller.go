@@ -33,6 +33,7 @@ import (
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	processruntime "github.com/nekomeowww/rc/internal/execution"
+	"github.com/nekomeowww/rc/internal/executionretention"
 	"github.com/nekomeowww/rc/internal/workspaceadmission"
 )
 
@@ -87,36 +88,33 @@ func (r *WorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if err := r.recordActivity(ctx, workspace, lastCompletion, active, now); err != nil {
 		return ctrl.Result{}, err
 	}
-	if active {
-		return r.reconcileExecutions(ctx, workspace)
+	var lifecycleResult ctrl.Result
+	var lifecycleErr error
+	switch {
+	case active:
+	case workspace.Spec.IsTemporary():
+		lifecycleResult, lifecycleErr = r.reconcileTemporary(ctx, workspace, hasProcesses, lastCompletion, now)
+	case workspace.Spec.DesiredState == workspacesv1alpha1.WorkspaceDesiredStateSuspended:
+		lifecycleResult, lifecycleErr = r.reconcileSuspended(ctx, workspace, now)
+	case workspace.Spec.IdleTimeout == nil || workspace.Spec.IdleTimeout.Duration <= 0:
+	default:
+		deadline := workspace.Status.LastActivityTime.Add(workspace.Spec.IdleTimeout.Duration)
+		remaining := deadline.Sub(now)
+		if remaining <= 0 {
+			// Updating the version we read prevents a concurrent resume or policy
+			// edit from being overwritten. The runtime controller rechecks active
+			// executions before stopping compute.
+			workspace.Spec.DesiredState = workspacesv1alpha1.WorkspaceDesiredStateSuspended
+			if err := r.Update(ctx, workspace); err != nil {
+				return ctrl.Result{}, fmt.Errorf("suspend idle Workspace: %w", err)
+			}
+			logf.FromContext(ctx).Info("Requested idle Workspace suspension", "name", workspace.Name)
+			return ctrl.Result{}, nil
+		}
+		lifecycleResult = ctrl.Result{RequeueAfter: remaining}
 	}
-	if workspace.Spec.IsTemporary() {
-		lifecycleResult, lifecycleErr := r.reconcileTemporary(ctx, workspace, hasProcesses, lastCompletion, now)
-		executionResult, executionErr := r.reconcileExecutions(ctx, workspace)
-		return earlierResult(lifecycleResult, executionResult), errors.Join(lifecycleErr, executionErr)
-	}
-	if workspace.Spec.DesiredState == workspacesv1alpha1.WorkspaceDesiredStateSuspended {
-		lifecycleResult, lifecycleErr := r.reconcileSuspended(ctx, workspace, now)
-		executionResult, executionErr := r.reconcileExecutions(ctx, workspace)
-		return earlierResult(lifecycleResult, executionResult), errors.Join(lifecycleErr, executionErr)
-	}
-	if workspace.Spec.IdleTimeout == nil || workspace.Spec.IdleTimeout.Duration <= 0 {
-		return r.reconcileExecutions(ctx, workspace)
-	}
-	deadline := workspace.Status.LastActivityTime.Add(workspace.Spec.IdleTimeout.Duration)
-	if remaining := deadline.Sub(now); remaining > 0 {
-		executionResult, executionErr := r.reconcileExecutions(ctx, workspace)
-		return earlierResult(ctrl.Result{RequeueAfter: remaining}, executionResult), executionErr
-	}
-	// Updating the version we read prevents a concurrent resume or policy edit
-	// from being overwritten. The runtime controller rechecks active executions
-	// before stopping compute.
-	workspace.Spec.DesiredState = workspacesv1alpha1.WorkspaceDesiredStateSuspended
-	if err := r.Update(ctx, workspace); err != nil {
-		return ctrl.Result{}, fmt.Errorf("suspend idle Workspace: %w", err)
-	}
-	logf.FromContext(ctx).Info("Requested idle Workspace suspension", "name", workspace.Name)
-	return ctrl.Result{}, nil
+	executionResult, executionErr := r.reconcileExecutions(ctx, workspace)
+	return earlierResult(lifecycleResult, executionResult), errors.Join(lifecycleErr, executionErr)
 }
 
 // recordActivity advances the durable clock, including when execution history
@@ -160,10 +158,7 @@ func (r *WorkspaceRetentionReconciler) reconcileTemporary(ctx context.Context, w
 		}
 		deadline = completion.Add(temporaryWorkspaceCleanupDelay)
 	}
-	if remaining := deadline.Sub(now); remaining > 0 {
-		return ctrl.Result{RequeueAfter: remaining}, nil
-	}
-	return ctrl.Result{}, r.deleteExpired(ctx, workspace)
+	return r.deleteAt(ctx, workspace, deadline, now)
 }
 
 func (r *WorkspaceRetentionReconciler) reconcileSuspended(ctx context.Context, workspace *workspacesv1alpha1.Workspace, now time.Time) (ctrl.Result, error) {
@@ -185,6 +180,11 @@ func (r *WorkspaceRetentionReconciler) reconcileSuspended(ctx context.Context, w
 		}
 	}
 	deadline := workspace.Status.SuspendedAt.Add(workspace.Spec.DeleteAfterSuspended.Duration)
+	return r.deleteAt(ctx, workspace, deadline, now)
+}
+
+// deleteAt waits until deadline, then deletes the expired Workspace.
+func (r *WorkspaceRetentionReconciler) deleteAt(ctx context.Context, workspace *workspacesv1alpha1.Workspace, deadline, now time.Time) (ctrl.Result, error) {
 	if remaining := deadline.Sub(now); remaining > 0 {
 		return ctrl.Result{RequeueAfter: remaining}, nil
 	}
@@ -192,12 +192,10 @@ func (r *WorkspaceRetentionReconciler) reconcileSuspended(ctx context.Context, w
 }
 
 func (r *WorkspaceRetentionReconciler) reconcileExecutions(ctx context.Context, workspace *workspacesv1alpha1.Workspace) (ctrl.Result, error) {
-	policy := workspace.Spec.ExecutionRetention
-	if workspace.Spec.IsTemporary() {
-		policy = nil
-	}
-	result, err := (&executionRetentionService{Client: r.Client, APIReader: r.APIReader, Runtime: r.Runtime}).reconcileTarget(ctx, workspace, policy)
-	if policy == nil && !workspace.Spec.IsTemporary() {
+	result, err := (&executionRetentionService{Client: r.Client, APIReader: r.APIReader, Runtime: r.Runtime}).reconcileTarget(ctx, workspace)
+	// Reconcile has already returned for a deleting Workspace, so ok is false
+	// only for a temporary Workspace, which keeps the periodic requeue.
+	if policy, ok := executionretention.PolicyFor(workspace); ok && policy == nil {
 		// Without a policy nothing expires by time: explicitly deleted executions
 		// are discharged through WorkspaceExec and worker Pod events instead.
 		result = ctrl.Result{}

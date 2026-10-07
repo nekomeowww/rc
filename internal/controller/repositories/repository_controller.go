@@ -101,17 +101,14 @@ func (r *RepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 	}
 
-	claimName, err := volumeclaim.Resolve(ctx, r.APIReader, repository, volumeclaim.Repository, 0, repository.Status.VolumeClaimName)
+	claimName, claim, err := volumeclaim.Resolve(ctx, r.APIReader, repository, volumeclaim.Repository, 0, repository.Status.VolumeClaimName)
 	if volumeclaim.IsConflict(err) {
 		return ctrl.Result{}, setRepositoryStorageReady(ctx, r.Client, repository, metav1.ConditionFalse, "VolumeClaimConflict", err.Error(), repository.Status.VolumeClaimName, nil)
 	}
 	if err != nil {
-		return ctrl.Result{}, err
+		return ctrl.Result{}, fmt.Errorf("get parent PersistentVolumeClaim: %w", err)
 	}
-	claim := new(corev1.PersistentVolumeClaim)
-	claimKey := types.NamespacedName{Name: claimName, Namespace: repository.Namespace}
-	err = r.Get(ctx, claimKey, claim)
-	if errors.IsNotFound(err) {
+	if claim == nil {
 		claim = parentVolumeClaim(repository, claimName)
 
 		err := controllerutil.SetControllerReference(repository, claim, r.Scheme)
@@ -126,12 +123,6 @@ func (r *RepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 		log.Info("Created parent PersistentVolumeClaim", "name", claim.Name)
 		return ctrl.Result{}, setRepositoryStorageReady(ctx, r.Client, repository, metav1.ConditionFalse, "Provisioning", "Parent volume is provisioning", claim.Name, nil)
-	}
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("get parent PersistentVolumeClaim: %w", err)
-	}
-	if ownerErr := volumeclaim.CheckOwner(claim, repository); ownerErr != nil {
-		return ctrl.Result{}, setRepositoryStorageReady(ctx, r.Client, repository, metav1.ConditionFalse, "VolumeClaimConflict", ownerErr.Error(), repository.Status.VolumeClaimName, nil)
 	}
 
 	// Persist recovery before admission: the Repository gate compares the

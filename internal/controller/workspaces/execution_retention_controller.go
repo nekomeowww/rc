@@ -97,20 +97,8 @@ func (r *executionRetentionService) currentExecutionPolicy(ctx context.Context, 
 	if err != nil || target == nil {
 		return nil, err
 	}
-	if !target.GetDeletionTimestamp().IsZero() {
-		return nil, nil
-	}
-	switch target := target.(type) {
-	case *workspacesv1alpha1.Workspace:
-		if target.Spec.IsTemporary() {
-			return nil, nil
-		}
-		return target.Spec.ExecutionRetention, nil
-	case *workspacesv1alpha1.WorkspaceEnvironment:
-		return target.Spec.ExecutionRetention, nil
-	default:
-		return nil, nil
-	}
+	policy, _ := executionretention.PolicyFor(target)
+	return policy, nil
 }
 
 // executionCleanupCandidate validates an API-fresh object, including identity,

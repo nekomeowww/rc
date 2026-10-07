@@ -8,7 +8,6 @@ import (
 	"slices"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -16,6 +15,7 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/conditions"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
 )
 
@@ -47,8 +47,7 @@ func InitializeGenerated(workspace *workspacesv1alpha1.Workspace, worktree *repo
 // ReadyAtCurrentGeneration reports whether the Worktree's status and Ready
 // condition are True and observed at or after its current generation.
 func ReadyAtCurrentGeneration(worktree *repositoriesv1alpha1.Worktree) bool {
-	ready := meta.FindStatusCondition(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady)
-	return worktree.Status.ObservedGeneration >= worktree.Generation && ready != nil && ready.Status == metav1.ConditionTrue && ready.ObservedGeneration >= worktree.Generation
+	return conditions.ReadyAtGeneration(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady, worktree.Generation, worktree.Status.ObservedGeneration)
 }
 
 // WorkspaceOwner returns a Workspace controller reference, without interpreting

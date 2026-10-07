@@ -28,6 +28,31 @@ func transcriptCleanupName(target client.Object) string {
 	return fmt.Sprintf("transcript-cleanup-%x", sum[:12])
 }
 
+// targetPods lists the target's runtime and worker Pods by its managed-by
+// label, read directly so transcript decisions never use a stale cache.
+func (r *executionRetentionService) targetPods(ctx context.Context, target client.Object) ([]corev1.Pod, error) {
+	label := workspaceManagedByLabel
+	if executionTargetReference(target).Kind == workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment {
+		label = environmentManagedByLabel
+	}
+	pods := new(corev1.PodList)
+	if err := r.APIReader.List(ctx, pods, client.InNamespace(target.GetNamespace()), client.MatchingLabels{label: target.GetName()}); err != nil {
+		return nil, err
+	}
+	return pods.Items, nil
+}
+
+// podMountsClaim reports whether pod mounts claimName. A non-empty volumeName
+// also requires the mount to use that Pod volume name.
+func podMountsClaim(pod *corev1.Pod, claimName, volumeName string) bool {
+	for _, volume := range pod.Spec.Volumes {
+		if volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == claimName && (volumeName == "" || volume.Name == volumeName) {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *executionRetentionService) createTranscriptWorker(ctx context.Context, target client.Object, volume workspaceservice.TranscriptVolume, claimUID string, batch []processruntime.TranscriptIdentity) error {
 	// Recheck whole-target/volume lifecycle at the dispatch boundary. GC owns
 	// cancellation if deletion races after this read and before Pod creation.
@@ -80,27 +105,19 @@ func (r *executionRetentionService) createTranscriptWorker(ctx context.Context, 
 	}
 	// A stopped Pod may retain an RWO attachment. Reuse its node until detach
 	// completes, preserving OS/placement from the ordinary platform builder.
-	pods := new(corev1.PodList)
-	label := workspaceManagedByLabel
-	if executionTargetReference(target).Kind == workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment {
-		label = environmentManagedByLabel
-	}
-	if err := r.APIReader.List(ctx, pods, client.InNamespace(target.GetNamespace()), client.MatchingLabels{label: target.GetName()}); err != nil {
+	pods, err := r.targetPods(ctx, target)
+	if err != nil {
 		return err
 	}
-	for _, existing := range pods.Items {
-		if !metav1.IsControlledBy(&existing, target) {
+	for i := range pods {
+		existing := &pods[i]
+		if !metav1.IsControlledBy(existing, target) || !podMountsClaim(existing, volume.Claim, "") {
 			continue
 		}
-		for _, mount := range existing.Spec.Volumes {
-			if mount.PersistentVolumeClaim == nil || mount.PersistentVolumeClaim.ClaimName != volume.Claim {
-				continue
-			}
-			if existing.Status.Phase != corev1.PodFailed && existing.Status.Phase != corev1.PodSucceeded {
-				return fmt.Errorf("waiting for mounted runtime %s before offline cleanup", existing.Name)
-			}
-			pod.Spec.NodeName = existing.Spec.NodeName
+		if existing.Status.Phase != corev1.PodFailed && existing.Status.Phase != corev1.PodSucceeded {
+			return fmt.Errorf("waiting for mounted runtime %s before offline cleanup", existing.Name)
 		}
+		pod.Spec.NodeName = existing.Spec.NodeName
 	}
 	if err := r.Create(ctx, pod); err != nil && !apierrors.IsAlreadyExists(err) {
 		return err

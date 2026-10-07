@@ -50,6 +50,7 @@ import (
 	"github.com/nekomeowww/rc/internal/cli/rcctl/cluster"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/command"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/progress"
+	"github.com/nekomeowww/rc/internal/conditions"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	repositoryservice "github.com/nekomeowww/rc/internal/repositories"
 	"github.com/nekomeowww/rc/internal/volumeclaim"
@@ -619,8 +620,7 @@ func validateWorkspaceMountSource(ctx context.Context, kubeClient client.Client,
 		if err := kubeClient.Get(ctx, key, repository); err != nil {
 			return fmt.Errorf("get mounted Repository %q: %w", mount.RepositoryRef.Name, err)
 		}
-		ready := meta.FindStatusCondition(repository.Status.Conditions, repositoriesv1alpha1.RepositoryConditionStorageReady)
-		if repository.Status.ObservedGeneration < repository.Generation || ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration < repository.Generation || repository.Status.VolumeClaimName == "" {
+		if !conditions.ReadyAtGeneration(repository.Status.Conditions, repositoriesv1alpha1.RepositoryConditionStorageReady, repository.Generation, repository.Status.ObservedGeneration) || repository.Status.VolumeClaimName == "" {
 			return fmt.Errorf("repository %q is not Ready", repository.Name)
 		}
 		return nil
@@ -1195,11 +1195,7 @@ func workspaceReadinessTransient(reason string) bool {
 }
 
 func workspaceReadyForGeneration(workspace *workspacesv1alpha1.Workspace, generation int64) bool {
-	if workspace.Status.ObservedGeneration < generation {
-		return false
-	}
-	condition := meta.FindStatusCondition(workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady)
-	return condition != nil && condition.Status == metav1.ConditionTrue && condition.ObservedGeneration >= generation
+	return conditions.ReadyAtGeneration(workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady, generation, workspace.Status.ObservedGeneration)
 }
 
 func finishTopologyChange(cmd *cobra.Command, kubeClient client.Client, result workspaceMountResult, noWait bool) error {

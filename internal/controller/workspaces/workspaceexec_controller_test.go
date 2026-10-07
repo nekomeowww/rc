@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
@@ -378,6 +379,7 @@ func TestDeletingActiveWorkspaceExecStopsOriginalRuntimeBeforeRemovingFinalizer(
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 				Name: testWorkspaceName, Namespace: testNamespace, UID: types.UID("runtime-pod-uid"),
 			}}
+			workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testNamespace, UID: "deleting-workspace-uid"}}
 			process := &workspacesv1alpha1.WorkspaceExec{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "codex-delete-" + strings.ToLower(string(phase)), Namespace: testNamespace,
@@ -393,7 +395,7 @@ func TestDeletingActiveWorkspaceExecStopsOriginalRuntimeBeforeRemovingFinalizer(
 					Phase: phase, RuntimePodName: pod.Name, RuntimePodUID: string(pod.UID),
 				},
 			}
-			workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testNamespace}}
+			requirements.NoError(controllerutil.SetControllerReference(workspace, process, scheme))
 			kubeClient := fake.NewClientBuilder().WithScheme(scheme).
 				WithStatusSubresource(process, pod, workspace).
 				WithObjects(process, pod, workspace).

@@ -62,12 +62,13 @@ func reconcileLifecycle(t *testing.T, kubeClient client.Client, now time.Time) (
 
 func TestLifecycleIdleOrigins(t *testing.T) {
 	t.Parallel()
+	const missingEnvironment = "missing"
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
 	t.Run("never executed or ready", func(t *testing.T) {
 		workspace := lifecycleWorkspace(now)
 		// ROOT CAUSE: hasProcesses and topology resolution previously excluded
 		// zero-execution and unhealthy Workspaces from the idle decision entirely.
-		workspace.Spec.EnvironmentRef = &workspacesv1alpha1.LocalReference{Name: "missing"}
+		workspace.Spec.EnvironmentRef = &workspacesv1alpha1.LocalReference{Name: missingEnvironment}
 		persisted, _ := reconcileLifecycle(t, lifecycleClient(t, workspace), now)
 		assert.Equal(t, workspacesv1alpha1.WorkspaceDesiredStateSuspended, persisted.Spec.DesiredState)
 	})

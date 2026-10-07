@@ -13,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	"github.com/nekomeowww/rc/internal/volumeclaim"
 )
 
 const bootstrapFailedReason = "BootstrapFailed"
@@ -78,6 +79,9 @@ func (c *RepositoryClient) Clone(ctx context.Context, request CloneRequest) (*re
 		}
 	}
 
+	if err := volumeclaim.Preflight(ctx, c.Client, repository, volumeclaim.Repository, 0); err != nil {
+		return nil, err
+	}
 	if err := c.Create(ctx, repository); err != nil {
 		return nil, fmt.Errorf("create Repository: %w", err)
 	}

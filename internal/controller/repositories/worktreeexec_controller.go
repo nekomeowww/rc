@@ -41,6 +41,7 @@ import (
 	"github.com/nekomeowww/rc/internal/runtimepolicy"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
+	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
 const worktreeExecDependencyRequeue = 2 * time.Second
@@ -61,6 +62,7 @@ var worktreeExecStatus = oneShotStatusAdapter[*repositoriesv1alpha1.WorktreeExec
 // WorktreeExecReconciler reconciles a WorktreeExec object.
 type WorktreeExecReconciler struct {
 	client.Client
+	APIReader   client.Reader
 	Scheme      *runtime.Scheme
 	RunnerImage string
 }
@@ -76,7 +78,6 @@ type WorktreeExecReconciler struct {
 // Reconcile runs one exact argv while holding the Worktree's exclusive-write
 // Lease. The same Lease is used by Workspace runtimes.
 func (r *WorktreeExecReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
 	exec := new(repositoriesv1alpha1.WorktreeExec)
 	if err := r.Get(ctx, req.NamespacedName, exec); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -160,7 +161,22 @@ func (r *WorktreeExecReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{RequeueAfter: worktreeExecDependencyRequeue}, nil
 	}
 
-	job = worktreeExecJob(exec, worktree, r.RunnerImage)
+	return r.createClaimedJob(ctx, exec, worktree)
+}
+
+// createClaimedJob checks the persistent deletion fence after claiming the
+// writer Lease. Foreground GC may remove a deletion Lease, but cannot reopen
+// the Worktree itself. An existing exec-owned Lease keeps cleanup waiting.
+func (r *WorktreeExecReconciler) createClaimedJob(ctx context.Context, exec *repositoriesv1alpha1.WorktreeExec, worktree *repositoriesv1alpha1.Worktree) (ctrl.Result, error) {
+	current, err := r.readyWorktree(ctx, exec)
+	if err != nil || current.UID != worktree.UID {
+		if releaseErr := r.releaseClaim(ctx, exec); releaseErr != nil {
+			return ctrl.Result{}, releaseErr
+		}
+		return ctrl.Result{RequeueAfter: worktreeExecDependencyRequeue}, r.setSucceeded(ctx, exec, metav1.ConditionFalse, "WorktreeUnavailable", "Worktree changed or closed after acquiring its writer Lease", "")
+	}
+
+	job := worktreeExecJob(exec, worktree, r.RunnerImage)
 	if err := controllerutil.SetControllerReference(exec, job, r.Scheme); err != nil {
 		_ = r.releaseClaim(ctx, exec)
 		return ctrl.Result{}, fmt.Errorf("set WorktreeExec owner on Job: %w", err)
@@ -174,7 +190,7 @@ func (r *WorktreeExecReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		// the Lease until the next observation proves whether the Job exists.
 		return ctrl.Result{}, fmt.Errorf("create Worktree Exec Job: %w", err)
 	}
-	log.Info("Created Worktree Exec Job", "name", job.Name, "worktree", worktree.Name)
+	logf.FromContext(ctx).Info("Created Worktree Exec Job", "name", job.Name, "worktree", worktree.Name)
 	return ctrl.Result{}, r.setSucceeded(ctx, exec, metav1.ConditionUnknown, "JobCreated", "Command Job was created", job.Name)
 }
 
@@ -233,13 +249,17 @@ var errWorktreeNotReady = errors.New("referenced Worktree is not ready")
 func (r *WorktreeExecReconciler) readyWorktree(ctx context.Context, exec *repositoriesv1alpha1.WorktreeExec) (*repositoriesv1alpha1.Worktree, error) {
 	worktree := new(repositoriesv1alpha1.Worktree)
 	key := types.NamespacedName{Name: exec.Spec.WorktreeRef.Name, Namespace: exec.Namespace}
-	if err := r.Get(ctx, key, worktree); err != nil {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	if err := reader.Get(ctx, key, worktree); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, fmt.Errorf("referenced Worktree does not exist")
 		}
 		return nil, fmt.Errorf("get Worktree: %w", err)
 	}
-	if !worktree.DeletionTimestamp.IsZero() {
+	if worktreeownership.MountsClosed(worktree) {
 		return nil, fmt.Errorf("referenced Worktree is being deleted")
 	}
 	ready := meta.FindStatusCondition(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady)
@@ -387,6 +407,7 @@ func (r *WorktreeExecReconciler) execsForJobPod(ctx context.Context, object clie
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *WorktreeExecReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.APIReader = mgr.GetAPIReader()
 	if r.RunnerImage == "" {
 		return fmt.Errorf("worktree exec runner image must not be empty")
 	}

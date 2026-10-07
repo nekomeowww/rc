@@ -17,6 +17,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	"github.com/nekomeowww/rc/internal/volumeclaim"
+	"github.com/nekomeowww/rc/internal/worktreestorage"
 )
 
 // WorktreeAddRequest describes one independent child volume and Git checkout
@@ -79,6 +81,9 @@ func (c *WorktreeClient) Start(ctx context.Context, request WorktreeAddRequest) 
 		}
 	}
 
+	if err := volumeclaim.Preflight(ctx, c.Client, worktree, volumeclaim.Worktree, 0); err != nil {
+		return nil, err
+	}
 	err = c.Create(ctx, worktree)
 	if err != nil {
 		return nil, fmt.Errorf("create Worktree: %w", err)
@@ -102,8 +107,12 @@ func (c *WorktreeClient) Wait(ctx context.Context, worktree *repositoriesv1alpha
 			return false, nil
 		}
 		if condition.Status == metav1.ConditionFalse {
+			if worktreestorage.IsTerminalReason(condition.Reason) {
+				result = current
+				return true, nil
+			}
 			switch condition.Reason {
-			case "RepositoryNotFound", "VolumeClaimConflict", "VolumeClaimSpecChanged", bootstrapFailedReason, "BootstrapJobConflict":
+			case "RepositoryNotFound", "VolumeClaimConflict", "VolumeClaimSpecChanged", "VolumeClaimLost", bootstrapFailedReason, "BootstrapJobConflict":
 				result = current
 				return true, nil
 			}

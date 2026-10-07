@@ -66,7 +66,7 @@ func TestWorkspaceEnvironmentReconcileCreatesCurrentVolume(t *testing.T) {
 	requirements.NoError(err, "reconcile a new WorkspaceEnvironment")
 
 	claim := new(corev1.PersistentVolumeClaim)
-	requirements.NoError(kubeClient.Get(context.Background(), types.NamespacedName{Name: "node-rust-current-1", Namespace: environment.Namespace}, claim), "get current PVC")
+	requirements.NoError(kubeClient.Get(context.Background(), types.NamespacedName{Name: "environment-node-rust-current-1", Namespace: environment.Namespace}, claim), "get current PVC")
 	assertions.Nil(claim.Spec.DataSource, "initial current volume is blank")
 	assertions.Equal(testStorageClass, *claim.Spec.StorageClassName, "preserve requested StorageClass")
 	assertions.Equal(corev1.PersistentVolumeFilesystem, *claim.Spec.VolumeMode, "home is a filesystem")
@@ -244,4 +244,39 @@ func TestWorkspaceEnvironmentImageOnlyAdvancesOnCommit(t *testing.T) {
 	persisted := new(workspacesv1alpha1.WorkspaceEnvironment)
 	requirements.NoError(kubeClient.Get(context.Background(), key, persisted), "get reconciled Environment")
 	requirements.Equal("workspace:committed", persisted.Status.CurrentImage, "retain committed image until commit")
+}
+
+func TestEnvironmentRejectsForeignDraftBeforeMountOrCommit(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
+	environment := &workspacesv1alpha1.WorkspaceEnvironment{
+		ObjectMeta: metav1.ObjectMeta{Name: "owner-check", Namespace: testNamespace, UID: "environment", Generation: 1},
+		Spec:       workspacesv1alpha1.WorkspaceEnvironmentSpec{Image: testRuntimeImage, Commit: 1, Storage: workspacesv1alpha1.PersistentStorageSpec{StorageClassName: testStorageClass, Size: resource.MustParse("1Gi")}},
+		Status:     workspacesv1alpha1.WorkspaceEnvironmentStatus{ObservedGeneration: 1, CurrentRevision: 1, CurrentImage: testRuntimeImage, CurrentVolumeClaimName: "current", DraftVolumeClaimName: "foreign", Conditions: []metav1.Condition{{Type: workspacesv1alpha1.WorkspaceEnvironmentConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1}}},
+	}
+	draft := environmentVolumeClaim(environment, "foreign", "current")
+	draft.OwnerReferences = []metav1.OwnerReference{{Kind: "WorkspaceEnvironment", Name: environment.Name, UID: "previous-incarnation", Controller: boolPointer(true)}}
+	draft.Status.Phase = corev1.ClaimBound
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(environment).WithObjects(environment, draft).Build()
+	// Matching clone metadata used to be enough to mount another owner's draft.
+	_, reason, message, err := (&WorkspaceExecReconciler{Client: kube, Scheme: scheme}).resolveEnvironmentProcessTarget(t.Context(), &workspacesv1alpha1.WorkspaceExec{
+		ObjectMeta: metav1.ObjectMeta{Namespace: environment.Namespace}, Spec: workspacesv1alpha1.WorkspaceExecSpec{TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Name: environment.Name}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "VolumeClaimConflict", reason)
+	require.Contains(t, message, "previous-incarnation")
+	_, err = (&WorkspaceEnvironmentReconciler{Client: kube, Scheme: scheme}).Reconcile(t.Context(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(environment)})
+	require.NoError(t, err)
+	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(environment), environment))
+	require.Equal(t, "current", environment.Status.CurrentVolumeClaimName, "foreign draft must not be promoted")
+	require.Equal(t, "foreign", environment.Status.DraftVolumeClaimName, "retain diagnostic reference")
+	condition := meta.FindStatusCondition(environment.Status.Conditions, workspacesv1alpha1.WorkspaceEnvironmentConditionDraftReady)
+	require.NotNil(t, condition)
+	require.Equal(t, "VolumeClaimConflict", condition.Reason)
+	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(draft), draft), "do not delete foreign data")
+	pods := new(corev1.PodList)
+	require.NoError(t, kube.List(t.Context(), pods))
+	require.Empty(t, pods.Items, "do not mount foreign data")
 }

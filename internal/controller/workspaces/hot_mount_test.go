@@ -57,6 +57,7 @@ func TestControllerUpgradeReplacesIdleWorkspaceRuntime(t *testing.T) {
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, coordinationv1.AddToScheme(scheme))
 	require.NoError(t, rbacv1.AddToScheme(scheme))
+	require.NoError(t, repositoriesv1alpha1.AddToScheme(scheme))
 	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
 	workspace := &workspacesv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{Name: "upgrade", Namespace: testNamespace, UID: types.UID("upgrade-uid")},

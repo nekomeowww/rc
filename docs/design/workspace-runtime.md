@@ -2,6 +2,9 @@
 
 Status: Accepted design baseline
 
+Terminal runtime recovery and execution safety are documented in
+[Workspace runtime recovery](workspace-runtime-recovery.md).
+
 This document specifies the first Workspace runtime for rc. It records the
 resource boundaries, lifecycle rules, CLI behavior, and implementation order
 agreed before API scaffolding begins. The example resource shapes are
@@ -690,6 +693,8 @@ rcctl worktree list [-o table|wide|json|yaml]
 rcctl worktree get <name> [-o table|json|yaml]
 rcctl worktree exec <name> -- <command> [args...]
 rcctl worktree delete <name>
+rcctl worktree detach <name> --workspace <owner>
+rcctl worktree adopt <name> --workspace <owner>
 
 rcctl workspace create <name>
 rcctl workspace list [-o table|wide|json|yaml]
@@ -699,7 +704,7 @@ rcctl workspace mount worktree <repository>/<worktree> [mount options]
 rcctl workspace unmount <workspace> <mount> [--force] [--no-wait]
 rcctl workspace start <name>
 rcctl workspace stop <name> [--force]
-rcctl workspace delete <name> [--force] [--cascade-created-worktrees]
+rcctl workspace delete <name> [--force]
 rcctl workspace port-forward <name> <local-port>[:<remote-port>]
 
 rcctl run [options] [--rm | --retain] [--name <name>] [-it] [-d] -- <command> [args...]
@@ -738,8 +743,9 @@ rcctl -n default workspace mount repo rc \
   --access-mode ReadWriteOnce
 ```
 
-When `--access-mode` is omitted, generated Worktrees retain the existing
-`ReadWriteMany` default.
+When `--access-mode` is omitted, generated Worktrees inherit the actual source
+PVC access modes (normally `ReadWriteOnce`). Explicit `ReadWriteMany` remains
+available for a driver that supports it. See [clone storage planning](worktree-storage.md).
 Mount and unmount validate the requested topology before stopping processes,
 then wait for `status.observedGeneration` and the Ready condition to observe
 the updated generation unless `--no-wait` is set. An explicitly selected
@@ -827,18 +833,35 @@ Deleting a Workspace:
 
 - terminates its active processes;
 - deletes its runtime Pod, home volume, process records, and transcripts; and
-- deletes generated Worktrees owned by the Workspace, but never deletes
-  an existing Worktree selected with `--worktree`.
+- deletes generated Worktrees owned by the Workspace, while retaining
+  independent Worktrees selected with `--worktree`.
 
 The CLI rejects deletion with active processes unless `--force` is present.
 Direct Kubernetes deletion is treated as an explicit forced deletion and uses
 a finalizer to ask the supervisor to terminate processes before storage
 cleanup.
 
-`rcctl workspace delete --cascade-created-worktrees` previews and deletes
-Worktrees labelled as created for that Workspace. A regular Workspace deletion
-never performs this cascade, and the cascade never includes Worktrees that
-predated and were merely referenced by the Workspace.
+Both `run --repo` and `workspace mount repo` create Workspace-owned Worktrees
+that cascade by default. `--cascade-created-worktrees` is a deprecated compatibility
+flag: it reports the default behavior and never deletes label-only legacy resources.
+Independent Worktrees are retained. The CLI prints which Worktrees will cascade
+or remain, and rejects deletion if another live Workspace mounts an owned Worktree.
+
+Use `rcctl worktree detach NAME --workspace OWNER` before owner deletion to keep a
+Ready checkout independently. Use `rcctl worktree adopt NAME --workspace OWNER`
+to explicitly migrate a reviewed independent or legacy checkout to Workspace
+ownership. `worktree get` shows ownership separately from the generated-for hint.
+No resources are automatically adopted based on labels or reused Workspace names.
+
+Runtime creation reserves every Worktree mount, including read-only mounts, on
+the Worktree with an optimistic metadata patch. Cleanup closes that same gate
+and waits for admitted consumers before releasing storage protection. Direct
+Workspace API writes cannot grant runtime access to a deleting Worktree. Direct
+PVC deletion follows the same fence and cleanup path; after storage disappears,
+the live Worktree reports `VolumeDeleted` and never silently reclones data.
+
+See [the ownership decision](../adr/0005-workspace-worktree-ownership.md) for
+foreground GC ordering, the admission protocol, shared mounts, and migration details.
 
 The shared namespace `rc-workspace` Service Account and RoleBinding outlive
 individual Workspaces.

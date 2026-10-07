@@ -36,6 +36,7 @@ import (
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/rcplatform"
+	"github.com/nekomeowww/rc/internal/volumeclaim"
 )
 
 const environmentManagedByLabel = "workspaces.rc.ayaka.io/environment"
@@ -84,9 +85,12 @@ func (r *WorkspaceEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl
 	if revision == 0 {
 		revision = 1
 	}
-	claimName := environment.Status.CurrentVolumeClaimName
-	if claimName == "" {
-		claimName = environmentCurrentClaimName(environment.Name, revision)
+	claimName, err := volumeclaim.Resolve(ctx, r.Client, environment, volumeclaim.EnvironmentCurrent, revision, environment.Status.CurrentVolumeClaimName)
+	if volumeclaim.IsConflict(err) {
+		return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, environment.Status.CurrentImage, environment.Status.CurrentVolumeClaimName, metav1.ConditionFalse, "VolumeClaimConflict", err.Error())
+	}
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 	committedImage := environment.Status.CurrentImage
 	if committedImage == "" {
@@ -111,8 +115,8 @@ func (r *WorkspaceEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("get WorkspaceEnvironment current PersistentVolumeClaim: %w", err)
 	}
-	if !metav1.IsControlledBy(claim, environment) {
-		return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, committedImage, "", metav1.ConditionFalse, "VolumeClaimConflict", "Current PersistentVolumeClaim is not owned by this WorkspaceEnvironment")
+	if ownerErr := volumeclaim.CheckOwner(claim, environment); ownerErr != nil {
+		return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, committedImage, environment.Status.CurrentVolumeClaimName, metav1.ConditionFalse, "VolumeClaimConflict", ownerErr.Error())
 	}
 	if !environmentStorageMatches(claim, environment.Spec.Storage) {
 		return ctrl.Result{}, r.setEnvironmentStatus(ctx, req.NamespacedName, revision, committedImage, claim.Name, metav1.ConditionFalse, "VolumeClaimSpecChanged", "Changing committed Environment storage is not supported")
@@ -252,6 +256,9 @@ func (r *WorkspaceEnvironmentReconciler) reconcileEnvironmentCommit(ctx context.
 		}
 		return true, fmt.Errorf("get Environment draft PersistentVolumeClaim: %w", err)
 	}
+	if err := volumeclaim.CheckOwner(draft, environment); err != nil {
+		return true, r.setEnvironmentDraftCondition(ctx, client.ObjectKeyFromObject(environment), "VolumeClaimConflict", err.Error())
+	}
 	if draft.Status.Phase != corev1.ClaimBound {
 		return true, r.setEnvironmentDraftCondition(ctx, client.ObjectKeyFromObject(environment), "DraftNotReady", "Environment draft volume is not bound")
 	}
@@ -285,6 +292,9 @@ func (r *WorkspaceEnvironmentReconciler) reconcileEnvironmentCommit(ctx context.
 		oldCurrent := new(corev1.PersistentVolumeClaim)
 		oldKey := types.NamespacedName{Name: oldCurrentName, Namespace: environment.Namespace}
 		if err := r.Get(ctx, oldKey, oldCurrent); err == nil {
+			if err := volumeclaim.CheckOwner(oldCurrent, environment); err != nil {
+				return true, err
+			}
 			if err := r.Delete(ctx, oldCurrent); err != nil {
 				return true, fmt.Errorf("delete previous Environment current PersistentVolumeClaim: %w", err)
 			}
@@ -310,10 +320,6 @@ func (r *WorkspaceEnvironmentReconciler) setEnvironmentDraftCondition(ctx contex
 	}
 
 	return nil
-}
-
-func environmentCurrentClaimName(name string, revision int64) string {
-	return fmt.Sprintf("%s-current-%d", name, revision)
 }
 
 func environmentVolumeClaim(environment *workspacesv1alpha1.WorkspaceEnvironment, name string, source string) *corev1.PersistentVolumeClaim {

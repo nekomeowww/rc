@@ -55,7 +55,8 @@ func readExecutionTarget(ctx context.Context, reader client.Reader, process *wor
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: process.Namespace, Name: process.Spec.TargetRef.Name}, target); err != nil {
 		return nil, client.IgnoreNotFound(err)
 	}
-	if owner := metav1.GetControllerOf(process); owner != nil && owner.UID != target.GetUID() {
+	owner := metav1.GetControllerOf(process)
+	if owner == nil || owner.APIVersion != workspacesv1alpha1.GroupVersion.String() || owner.Kind != string(process.Spec.TargetRef.Kind) || owner.Name != process.Spec.TargetRef.Name || owner.UID == "" || target.GetUID() == "" || owner.UID != target.GetUID() {
 		return nil, nil
 	}
 	return target, nil

@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
@@ -26,7 +27,7 @@ func TestRetainedWorkspaceExecHistoryExpires(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
-	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "retained", Namespace: testNamespace}}
+	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "retained", Namespace: testNamespace, UID: "retained-uid"}}
 	// Decode the intended policy through the API seam so the pre-fix test compiles.
 	require.NoError(t, json.Unmarshal([]byte(`{"retentionPolicy":"Retain","executionRetention":{"ttlAfterFinished":"24h","maxEntries":200}}`), &workspace.Spec))
 	completed := metav1.NewTime(time.Now().Add(-72 * time.Hour))
@@ -35,6 +36,7 @@ func TestRetainedWorkspaceExecHistoryExpires(t *testing.T) {
 		Spec:       workspacesv1alpha1.WorkspaceExecSpec{TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: workspace.Name}, Command: []string{"true"}},
 		Status:     workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, CompletedAt: &completed},
 	}
+	require.NoError(t, controllerutil.SetControllerReference(workspace, process, scheme))
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, process).WithObjects(workspace, process).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	r := &WorkspaceExecReconciler{Client: kube, Scheme: scheme}
 	key := client.ObjectKeyFromObject(process)
@@ -105,8 +107,9 @@ func TestDeletingLastExecutionPreservesWorkspaceIdleClock(t *testing.T) {
 	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 	completed := metav1.NewTime(time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC))
-	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "idle-clock", Namespace: testNamespace}}
+	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "idle-clock", Namespace: testNamespace, UID: "idle-clock-uid"}}
 	process := &workspacesv1alpha1.WorkspaceExec{ObjectMeta: metav1.ObjectMeta{Name: "last-result", Namespace: testNamespace, Finalizers: []string{executionFinalizer}}, Spec: workspacesv1alpha1.WorkspaceExecSpec{TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: workspace.Name}}, Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, CompletedAt: &completed}}
+	require.NoError(t, controllerutil.SetControllerReference(workspace, process, scheme))
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, process).WithStatusSubresource(workspace, process).Build()
 	require.NoError(t, kube.Delete(ctx, process))
 	_, err := (&WorkspaceExecReconciler{Client: kube, Scheme: scheme}).Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(process)})

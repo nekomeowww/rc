@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 const (
@@ -27,6 +28,7 @@ const (
 	raceChangeAnnotations     = "metadata"
 	testRetentionRaceTarget   = "retention-race-target"
 	testRetentionExecResource = "workspaceexecs"
+	testPreviousTargetUID     = "previous-target"
 )
 
 // retentionFixture supplies fresh API identities without a running runtime.
@@ -38,6 +40,7 @@ func retentionFixture(t *testing.T) (client.WithWatch, *workspacesv1alpha1.Works
 	ws := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testRetentionRaceTarget, Namespace: testNamespace, UID: "target-uid"}, Spec: workspacesv1alpha1.WorkspaceSpec{ExecutionRetention: &workspacesv1alpha1.ExecutionRetentionPolicy{}}}
 	done := metav1.NewTime(time.Now().Add(-30 * 24 * time.Hour))
 	process := &workspacesv1alpha1.WorkspaceExec{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: testNamespace, UID: "a-uid"}, Spec: workspacesv1alpha1.WorkspaceExecSpec{TargetRef: executionTargetReference(ws)}, Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseFailed, CompletedAt: &done}}
+	require.NoError(t, controllerutil.SetControllerReference(ws, process, scheme))
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ws, process).WithStatusSubresource(ws, process, &corev1.Pod{}, &workspacesv1alpha1.WorkspaceEnvironment{}).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
 	return kube, ws, process
 }
@@ -128,9 +131,10 @@ func TestRetentionRechecksAfterFinalizerAndCountChanges(t *testing.T) {
 			scheme := runtime.NewScheme()
 			require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
 			policy := &workspacesv1alpha1.ExecutionRetentionPolicy{MaxEntries: 1}
-			ws := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testRetentionRaceTarget, Namespace: testNamespace}, Spec: workspacesv1alpha1.WorkspaceSpec{ExecutionRetention: policy}}
+			ws := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testRetentionRaceTarget, Namespace: testNamespace, UID: "target-uid"}, Spec: workspacesv1alpha1.WorkspaceSpec{ExecutionRetention: policy}}
 			done := metav1.NewTime(time.Now().Add(-time.Hour))
 			a := &workspacesv1alpha1.WorkspaceExec{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: testNamespace, UID: "a"}, Spec: workspacesv1alpha1.WorkspaceExecSpec{TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: ws.Name}}, Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseFailed, CompletedAt: &done}}
+			require.NoError(t, controllerutil.SetControllerReference(ws, a, scheme))
 			b := a.DeepCopy()
 			b.Name = "b"
 			b.UID = "b"
@@ -218,7 +222,7 @@ func TestRetentionCountIgnoresPreviousTargetIdentity(t *testing.T) {
 	require.NoError(t, kube.Update(ctx, current))
 	previous := current.DeepCopy()
 	previous.Name, previous.UID, previous.ResourceVersion = "previous", "previous-uid", ""
-	previous.OwnerReferences[0].UID = "previous-target"
+	previous.OwnerReferences[0].UID = testPreviousTargetUID
 	newer := metav1.NewTime(now.Add(time.Minute))
 	previous.Status.CompletedAt = &newer
 	require.NoError(t, kube.Create(ctx, previous))
@@ -240,7 +244,7 @@ func TestRetentionBatchIgnoresDeletingPreviousTargetIdentity(t *testing.T) {
 		previous.Name = fmt.Sprintf("previous-%02d", i)
 		previous.UID, previous.ResourceVersion = "", ""
 		previous.Finalizers = []string{"test/hold"}
-		previous.OwnerReferences[0].UID = "previous-target"
+		previous.OwnerReferences[0].UID = testPreviousTargetUID
 		require.NoError(t, kube.Create(ctx, previous))
 		require.NoError(t, kube.Delete(ctx, previous))
 	}
@@ -249,4 +253,22 @@ func TestRetentionBatchIgnoresDeletingPreviousTargetIdentity(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, kube.Get(ctx, client.ObjectKeyFromObject(current), current))
 	require.False(t, current.DeletionTimestamp.IsZero(), "old target cleanup must not exhaust the current target's batch")
+}
+
+func TestRetentionRejectsUnprovenTargetIdentity(t *testing.T) {
+	t.Parallel()
+	for _, owner := range []string{"missing", "stale"} {
+		t.Run(owner, func(t *testing.T) {
+			kube, _, current := retentionFixture(t)
+			if owner == "missing" {
+				current.OwnerReferences = nil
+			} else {
+				current.OwnerReferences[0].UID = testPreviousTargetUID
+			}
+			require.NoError(t, kube.Update(t.Context(), current))
+			candidate, err := (&executionRetentionService{Client: kube}).executionCleanupCandidate(t.Context(), current)
+			require.NoError(t, err)
+			require.Nil(t, candidate, "same-name targets must not adopt history without matching owner identity")
+		})
+	}
 }

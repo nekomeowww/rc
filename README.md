@@ -299,7 +299,7 @@ Worktrees selected with `--worktree` are never deleted by this cleanup.
 into `--idle-timeout=1h --delete-after-suspended=168h`: the first stage
 stops compute; the second deletes owned storage after a full suspended grace
 period. Both stages default to disabled for CLI and direct API creation.
-See [Workspace lifetime decisions and migration](docs/adr/0005-workspace-lifetimes.md)
+See [Workspace lifetime decisions and migration](docs/adr/0007-workspace-lifetimes.md)
 for the behavior matrix, timer rules, and script migration.
 
 For a named development machine, create the Workspace first and mount the Worktree explicitly:

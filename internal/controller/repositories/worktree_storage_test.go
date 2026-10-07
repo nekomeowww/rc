@@ -188,7 +188,7 @@ func TestWorktreeCloneRecoveryUsesCommittedClaim(t *testing.T) {
 			require.NoError(t, c.Update(ctx, worktree))
 			// Legacy children keep their creation-time RWX default even on an RWO
 			// source. Only explicit Worktree storage constrains an existing child.
-			plan := worktreestorage.Plan{StorageClassName: cloneStorageTestClass, Size: resource.MustParse("60Gi"), AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, VolumeMode: corev1.PersistentVolumeFilesystem}
+			plan := worktreestorage.Plan{StorageClassName: cloneStorageTestClass, Size: resource.MustParse("60Gi"), AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}}
 			claimName := volumeclaim.Name(volumeclaim.Worktree, worktree.Name, 0)
 			claim := worktreeVolumeClaim(worktree, claimName, source.Name, plan)
 			require.NoError(t, controllerutil.SetControllerReference(worktree, claim, c.Scheme()))

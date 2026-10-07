@@ -3,6 +3,7 @@ package repositories
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -25,33 +26,34 @@ import (
 // The mount list remains a conservative legacy/reference check, not a lock.
 // Read-only consumers and in-flight creators are covered by durable holders;
 // the ordinary writer Lease continues to serialize Workspace/WorktreeExec use.
-func (r *WorktreeReconciler) prepareWorktreeCleanup(ctx context.Context, worktree *repositoriesv1alpha1.Worktree) (bool, error) {
+// When ready, it returns the resolved PVC name that cleanup must act on.
+func (r *WorktreeReconciler) prepareWorktreeCleanup(ctx context.Context, worktree *repositoriesv1alpha1.Worktree) (string, bool, error) {
 	log := logf.FromContext(ctx)
 	drained, err := (worktreeownership.MountAccess{Client: r.Client, Reader: r.APIReader}).Close(ctx, worktree)
 	if err != nil || !drained {
-		return false, err
+		return "", false, err
 	}
 	blockers, err := r.cleanupReferenceBlockers(ctx, worktree)
 	if err != nil || len(blockers) > 0 {
-		return false, err
+		return "", false, err
 	}
 	deletionLease := worktreeclaim.DeletionLease(worktree)
 	if err := r.Create(ctx, deletionLease); err != nil {
 		if !errors.IsAlreadyExists(err) {
-			return false, fmt.Errorf("acquire Worktree deletion Lease: %w", err)
+			return "", false, fmt.Errorf("acquire Worktree deletion Lease: %w", err)
 		}
 		current := new(coordinationv1.Lease)
 		if err := r.Get(ctx, client.ObjectKeyFromObject(deletionLease), current); err != nil {
 			// Foreground GC can remove the Lease between Create and Get. Requeue
 			// to acquire it again; disappearance does not authorize cleanup.
 			if errors.IsNotFound(err) {
-				return false, nil
+				return "", false, nil
 			}
-			return false, fmt.Errorf("get Worktree deletion Lease: %w", err)
+			return "", false, fmt.Errorf("get Worktree deletion Lease: %w", err)
 		}
 		if !worktreeclaim.IsDeletionHolder(worktree, current) {
 			log.Info("Worktree deletion is waiting for active writer", "worktree", worktree.Name, "holder", current.Labels[worktreeclaim.HolderLabel])
-			return false, nil
+			return "", false, nil
 		}
 	}
 
@@ -59,22 +61,22 @@ func (r *WorktreeReconciler) prepareWorktreeCleanup(ctx context.Context, worktre
 	// admissions are fenced atomically, including after this final list.
 	blockers, err = r.cleanupReferenceBlockers(ctx, worktree)
 	if err != nil || len(blockers) > 0 {
-		return false, err
+		return "", false, err
 	}
 	claimName, resolveErr := volumeclaim.Resolve(ctx, r.APIReader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
 	if resolveErr != nil && claimName == "" {
-		return false, resolveErr
+		return "", false, resolveErr
 	}
 	pods := new(corev1.PodList)
 	if err := r.APIReader.List(ctx, pods, client.InNamespace(worktree.Namespace)); err != nil {
-		return false, err
+		return "", false, err
 	}
 	for _, pod := range pods.Items {
 		if pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed && podUsesPersistentVolumeClaim(&pod, claimName) {
-			return false, nil
+			return "", false, nil
 		}
 	}
-	return true, nil
+	return claimName, true, nil
 }
 
 // cleanupReferenceBlockers preserves references when deleting a Worktree. An
@@ -84,23 +86,19 @@ func (r *WorktreeReconciler) cleanupReferenceBlockers(ctx context.Context, workt
 	if worktree.DeletionTimestamp.IsZero() {
 		return nil, nil
 	}
-	return r.worktreeReferenceBlockers(ctx, worktree)
+	return worktreeownership.ReferenceBlockers(ctx, r.APIReader, worktree.Namespace, worktree.Name)
 }
 
 // reconcileStorageDeletion handles a direct PVC DELETE without deleting its
 // live Worktree or silently cloning replacement data. The durable fence remains
 // after the PVC disappears, and other Kubernetes storage finalizers stay intact.
 func (r *WorktreeReconciler) reconcileStorageDeletion(ctx context.Context, worktree *repositoriesv1alpha1.Worktree) (ctrl.Result, error) {
-	ready, err := r.prepareWorktreeCleanup(ctx, worktree)
+	claimName, ready, err := r.prepareWorktreeCleanup(ctx, worktree)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if !ready {
 		return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, r.setStorageDeletionStatus(ctx, worktree, "VolumeDeleting", "Storage deletion requested; waiting for mounts, writers and Pods to stop")
-	}
-	claimName, resolveErr := volumeclaim.Resolve(ctx, r.APIReader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
-	if resolveErr != nil && claimName == "" {
-		return ctrl.Result{}, resolveErr
 	}
 	claim := new(corev1.PersistentVolumeClaim)
 	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: worktree.Namespace, Name: claimName}, claim); err == nil {
@@ -134,7 +132,7 @@ func (r *WorktreeReconciler) setStorageDeletionStatus(ctx context.Context, workt
 		for _, condition := range []string{repositoriesv1alpha1.WorktreeConditionReady, repositoriesv1alpha1.WorktreeConditionVolumeReady} {
 			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{Type: condition, Status: metav1.ConditionFalse, ObservedGeneration: current.Generation, Reason: reason, Message: message})
 		}
-		if conditionsEqual(current.Status.Conditions, before.Status.Conditions) {
+		if slices.Equal(current.Status.Conditions, before.Status.Conditions) {
 			return nil
 		}
 		return r.Status().Patch(ctx, current, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))

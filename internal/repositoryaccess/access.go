@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	repositories "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -15,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -38,11 +40,12 @@ const (
 )
 
 const (
-	Write           Mode = "write"
-	Mount           Mode = "mount"
-	Clone           Mode = "clone"
-	stateAnnotation      = "repositories.rc.ayaka.io/access"
-	gateLabel            = "repositories.rc.ayaka.io/access-gate"
+	Write Mode = "write"
+	Mount Mode = "mount"
+	Clone Mode = "clone"
+	// StateAnnotation stores the JSON reservation on a Repository access Lease.
+	StateAnnotation = "repositories.rc.ayaka.io/access"
+	gateLabel       = "repositories.rc.ayaka.io/access-gate"
 )
 
 // Gate persists reservations before their Job, Pod, or PVC is created. Updates
@@ -65,6 +68,25 @@ func Token(kind string, owner client.Object) string {
 	return kind + "/" + string(owner.GetUID()) + "/" + owner.GetName()
 }
 
+// HeldBy reports whether the lease's reservation holds any Token, whatever its
+// role, for the resource incarnation with uid. A malformed reservation returns
+// an error; callers that must fail closed treat that as held.
+func HeldBy(lease *coordinationv1.Lease, uid types.UID) (bool, error) {
+	if uid == "" {
+		return false, nil
+	}
+	current, err := state(lease)
+	if err != nil {
+		return false, err
+	}
+	for token, held := range current.Holders {
+		if _, rest, ok := strings.Cut(token, "/"); held && ok && strings.HasPrefix(rest, string(uid)+"/") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func leaseKey(repository *repositories.Repository) client.ObjectKey {
 	sum := sha256.Sum256([]byte(string(repository.UID) + "/" + repository.Name))
 	return client.ObjectKey{Namespace: repository.Namespace, Name: "rc-repository-" + hex.EncodeToString(sum[:10])}
@@ -72,7 +94,7 @@ func leaseKey(repository *repositories.Repository) client.ObjectKey {
 
 func state(lease *coordinationv1.Lease) (reservation, error) {
 	result := reservation{Holders: map[string]bool{}}
-	if value := lease.Annotations[stateAnnotation]; value != "" {
+	if value := lease.Annotations[StateAnnotation]; value != "" {
 		if err := json.Unmarshal([]byte(value), &result); err != nil {
 			return result, fmt.Errorf("decode Repository reservation: %w", err)
 		}
@@ -128,7 +150,7 @@ func (g Gate) Acquire(ctx context.Context, repository *repositories.Repository, 
 		if lease.Annotations == nil {
 			lease.Annotations = map[string]string{}
 		}
-		lease.Annotations[stateAnnotation] = string(encoded)
+		lease.Annotations[StateAnnotation] = string(encoded)
 		if err := g.Client.Update(ctx, lease); err != nil {
 			return err
 		}
@@ -216,7 +238,7 @@ func (g Gate) Release(ctx context.Context, namespace, token string) error {
 			if err != nil {
 				return err
 			}
-			lease.Annotations[stateAnnotation] = string(encoded)
+			lease.Annotations[StateAnnotation] = string(encoded)
 			return g.Client.Update(ctx, lease)
 		}); err != nil {
 			return err

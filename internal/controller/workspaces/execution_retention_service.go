@@ -26,11 +26,10 @@ func (r *executionRetentionService) reconcileTarget(ctx context.Context, target 
 	if !target.GetDeletionTimestamp().IsZero() {
 		return ctrl.Result{}, nil
 	}
-	result, historyErr := r.reconcileExecutionHistory(ctx, target.GetNamespace(), executionTargetReference(target), target.GetUID(), policy)
+	historyErr := r.reconcileExecutionHistory(ctx, target.GetNamespace(), executionTargetReference(target), target.GetUID(), policy)
 	cleanupErr := r.reconcileTranscripts(ctx, target, policy)
 	// Explicit deletion obligations must progress even after policy is disabled.
-	result.RequeueAfter = executionRetentionInterval
-	return result, errors.Join(historyErr, cleanupErr)
+	return ctrl.Result{RequeueAfter: executionRetentionInterval}, errors.Join(historyErr, cleanupErr)
 }
 
 func executionTargetReference(target client.Object) workspacesv1alpha1.WorkspaceExecTargetReference {

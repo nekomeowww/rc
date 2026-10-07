@@ -207,7 +207,7 @@ func (r *WorkspaceExecReconciler) startProcess(ctx context.Context, key types.Na
 	if err := r.APIReader.Get(ctx, key, current); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	if !current.DeletionTimestamp.IsZero() || executionTerminal(current.Status.Phase) {
+	if !current.DeletionTimestamp.IsZero() || current.Status.Phase.Terminal() {
 		return ctrl.Result{Requeue: true}, nil
 	}
 	if target.workspace != nil {
@@ -254,7 +254,7 @@ func (r *WorkspaceExecReconciler) handleWorkspaceExecLifecycle(ctx context.Conte
 		return result, true, err
 	}
 	if controllerutil.ContainsFinalizer(process, executionFinalizer) {
-		if executionTerminal(process.Status.Phase) {
+		if process.Status.Phase.Terminal() {
 			return ctrl.Result{}, true, r.ensureExecutionCompletedAt(ctx, process)
 		}
 		return ctrl.Result{}, false, nil
@@ -275,7 +275,7 @@ func (r *WorkspaceExecReconciler) finalizeWorkspaceExec(ctx context.Context, pro
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if owner != nil && owner.GetDeletionTimestamp().IsZero() && !executionTerminal(process.Status.Phase) && process.Status.RuntimePodName != "" && process.Status.RuntimePodUID != "" {
+	if owner != nil && owner.GetDeletionTimestamp().IsZero() && !process.Status.Phase.Terminal() && process.Status.RuntimePodName != "" && process.Status.RuntimePodUID != "" {
 		if r.Runtime == nil {
 			return ctrl.Result{}, errors.New("WorkspaceExec runtime client is not configured")
 		}
@@ -289,7 +289,7 @@ func (r *WorkspaceExecReconciler) finalizeWorkspaceExec(ctx context.Context, pro
 			if err != nil && !errors.Is(err, processruntime.ErrNotFound) {
 				return ctrl.Result{}, fmt.Errorf("stop deleting process through rc-kube: %w", err)
 			}
-			if err == nil && !executionTerminal(runtimePhase(state.Phase, state.ExitCode)) {
+			if err == nil && !runtimePhase(state.Phase, state.ExitCode).Terminal() {
 				return ctrl.Result{RequeueAfter: processTargetRequeueDelay}, nil
 			}
 			if err == nil {
@@ -692,7 +692,7 @@ func (r *WorkspaceExecReconciler) claimProcessRuntime(ctx context.Context, key t
 	if err := r.Get(ctx, key, current); err != nil {
 		return fmt.Errorf("re-fetch WorkspaceExec before runtime claim: %w", err)
 	}
-	if executionTerminal(current.Status.Phase) || (current.Status.RuntimePodUID != "" && current.Status.RuntimePodUID != target.podUID) {
+	if current.Status.Phase.Terminal() || (current.Status.RuntimePodUID != "" && current.Status.RuntimePodUID != target.podUID) {
 		return fmt.Errorf("WorkspaceExec runtime claim changed before start")
 	}
 	if err := r.bindTranscriptVolume(ctx, current, target); err != nil {
@@ -716,14 +716,14 @@ func (r *WorkspaceExecReconciler) claimProcessRuntime(ctx context.Context, key t
 
 func (r *WorkspaceExecReconciler) applyRuntimeState(ctx context.Context, key types.NamespacedName, target *resolvedProcessTarget, state processruntime.State) error {
 	phase := runtimePhase(state.Phase, state.ExitCode)
-	if executionTerminal(phase) {
+	if phase.Terminal() {
 		return r.setTerminalProcessStatus(ctx, key, phase, state.ExitCode, state.Reason, runtimeMessage(phase), state.AttachedClients)
 	}
 	current := new(workspacesv1alpha1.WorkspaceExec)
 	if err := r.Get(ctx, key, current); err != nil {
 		return fmt.Errorf("re-fetch WorkspaceExec before status update: %w", err)
 	}
-	if executionTerminal(current.Status.Phase) {
+	if current.Status.Phase.Terminal() {
 		return nil
 	}
 	now := metav1.Now()
@@ -799,7 +799,7 @@ func (r *WorkspaceExecReconciler) setTerminalProcessStatus(ctx context.Context, 
 	if err := r.Get(ctx, key, current); err != nil {
 		return fmt.Errorf("re-fetch WorkspaceExec before terminal status update: %w", err)
 	}
-	if executionTerminal(current.Status.Phase) {
+	if current.Status.Phase.Terminal() {
 		return nil
 	}
 	now := metav1.Now()
@@ -851,7 +851,7 @@ func (r *WorkspaceExecReconciler) executionsForRuntimePod(ctx context.Context, o
 	requests := make([]reconcile.Request, 0)
 	for index := range processes.Items {
 		process := &processes.Items[index]
-		if executionTerminal(process.Status.Phase) || process.Status.RuntimePodName != object.GetName() {
+		if process.Status.Phase.Terminal() || process.Status.RuntimePodName != object.GetName() {
 			continue
 		}
 		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(process)})

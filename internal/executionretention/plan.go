@@ -13,6 +13,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const (
+	// DefaultTTL applies when TTLAfterFinished is unset or not positive.
+	DefaultTTL = 90 * 24 * time.Hour
+	// DefaultMaxEntries applies when MaxEntries is not positive.
+	DefaultMaxEntries = 15000
+	// DefaultTranscriptTTL applies when TranscriptTTL is unset. An explicit
+	// zero TranscriptTTL expires transcripts immediately.
+	DefaultTranscriptTTL = 14 * 24 * time.Hour
+)
+
 // Plan identifies retained and removable entries by index. The input order is
 // never changed.
 type Plan struct {
@@ -49,7 +59,7 @@ func Build(executions []workspacesv1alpha1.WorkspaceExec, policy *workspacesv1al
 	eligible := make([]int, 0, len(executions))
 	for i := range executions {
 		process := &executions[i]
-		if policy == nil || process.Spec.Retain || !Terminal(process.Status.Phase) || process.Status.CompletedAt == nil || !process.DeletionTimestamp.IsZero() {
+		if policy == nil || process.Spec.Retain || !process.Status.Phase.Terminal() || process.Status.CompletedAt == nil || !process.DeletionTimestamp.IsZero() {
 			plan.Keep = append(plan.Keep, i)
 			continue
 		}
@@ -58,15 +68,12 @@ func Build(executions []workspacesv1alpha1.WorkspaceExec, policy *workspacesv1al
 	if policy == nil {
 		return plan
 	}
-	ttl, maximum := 90*24*time.Hour, policy.MaxEntries
-	if policy.TTLAfterFinished != nil {
+	ttl, maximum := DefaultTTL, policy.MaxEntries
+	if policy.TTLAfterFinished != nil && policy.TTLAfterFinished.Duration > 0 {
 		ttl = policy.TTLAfterFinished.Duration
 	}
-	if ttl <= 0 {
-		ttl = 90 * 24 * time.Hour
-	}
 	if maximum <= 0 {
-		maximum = 15000
+		maximum = DefaultMaxEntries
 	}
 	slices.SortFunc(eligible, func(a, b int) int {
 		if order := executions[b].Status.CompletedAt.Compare(executions[a].Status.CompletedAt.Time); order != 0 {
@@ -85,14 +92,4 @@ func Build(executions []workspacesv1alpha1.WorkspaceExec, policy *workspacesv1al
 	// Delete oldest first, including when reducing an existing target's limit.
 	slices.Reverse(plan.Remove)
 	return plan
-}
-
-// Terminal reports whether an execution phase can no longer make progress.
-func Terminal(phase workspacesv1alpha1.WorkspaceExecPhase) bool {
-	switch phase {
-	case workspacesv1alpha1.WorkspaceExecPhaseSucceeded, workspacesv1alpha1.WorkspaceExecPhaseFailed, workspacesv1alpha1.WorkspaceExecPhaseStopped, workspacesv1alpha1.WorkspaceExecPhaseLost:
-		return true
-	default:
-		return false
-	}
 }

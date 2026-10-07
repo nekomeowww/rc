@@ -129,7 +129,7 @@ func TestExistingWorktreeRemainsReadyDuringSync(t *testing.T) {
 	c, repository, request := syncFixture(t)
 	worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: "existing", Namespace: repository.Namespace, UID: "worktree", Generation: 1}, Spec: repositoriesv1alpha1.WorktreeSpec{RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: repository.Name}}, Status: repositoriesv1alpha1.WorktreeStatus{ObservedGeneration: 1, VolumeClaimName: "existing", WorktreePath: "/repository", Conditions: []metav1.Condition{{Type: repositoriesv1alpha1.WorktreeConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1}}}}
 	require.NoError(t, c.Create(t.Context(), worktree))
-	claim := worktreeVolumeClaim(worktree, worktree.Status.VolumeClaimName, repository.Name, worktreestorage.Plan{StorageClassName: "csi", Size: resource.MustParse("1Gi"), AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, VolumeMode: corev1.PersistentVolumeFilesystem})
+	claim := worktreeVolumeClaim(worktree, worktree.Status.VolumeClaimName, repository.Name, worktreestorage.Plan{StorageClassName: "csi", Size: resource.MustParse("1Gi"), AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}})
 	require.NoError(t, controllerutil.SetControllerReference(worktree, claim, c.Scheme()))
 	claim.Status.Phase = corev1.ClaimBound
 	require.NoError(t, c.Create(t.Context(), claim))

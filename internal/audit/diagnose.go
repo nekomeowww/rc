@@ -41,7 +41,8 @@ func resourceFindings(r Resource, g graph, inventory Inventory, policy Policy) [
 		for _, ref := range g.incoming(r) {
 			related = append(related, ref.Target)
 		}
-		for _, lease := range g.leases(r) {
+		leases := g.leases(r)
+		for _, lease := range leases {
 			related = append(related, lease.ObjectRef)
 		}
 		code := "DeletionPending"
@@ -50,7 +51,7 @@ func resourceFindings(r Resource, g graph, inventory Inventory, policy Policy) [
 		}
 		var details strings.Builder
 		details.WriteString("Deletion has not converged; finalizers=" + strings.Join(r.Finalizers, ","))
-		for _, lease := range g.leases(r) {
+		for _, lease := range leases {
 			details.WriteString("; Lease=" + lease.Name + " holder=" + lease.Holder + " reservation=" + lease.Reservation)
 		}
 		add(code, "warning", details.String(), related...)
@@ -74,8 +75,7 @@ func resourceFindings(r Resource, g graph, inventory Inventory, policy Policy) [
 	if r.Kind == podKind && r.Terminal && runtimePod(r, g) {
 		add("TerminalRuntimePod", "warning", "Runtime Pod is "+r.Phase+": "+r.Reason+"; "+r.Message)
 	}
-	findings = append(findings, pvcFindings(r, g, policy)...)
-
+	pvcFindings(r, g, policy, add)
 	if isHistory(r) && r.Terminal {
 		add("TerminalHistory", "info", "Terminal "+r.Phase+" record; retention and dependencies determine cleanup eligibility")
 	}
@@ -146,15 +146,12 @@ func runtimePod(pod Resource, g graph) bool {
 	return false
 }
 
-func pvcFindings(r Resource, g graph, policy Policy) []Finding {
+// pvcFindings reports PVC evidence through the caller's add, keeping one
+// Finding constructor per resource.
+func pvcFindings(r Resource, g graph, policy Policy, add func(code, severity, message string, related ...ObjectRef)) {
 	if r.Kind != pvcKind {
-		return nil
+		return
 	}
-	findings := []Finding{}
-	add := func(code, severity, message string, related ...ObjectRef) {
-		findings = append(findings, Finding{Code: code, Severity: severity, Resource: r.ObjectRef, Message: message, Related: related})
-	}
-
 	if len(r.Owners) == 0 {
 		add("UnverifiedPVCOwner", severityUnknown, "PVC has no owner reference; provenance and data lifetime cannot be inferred")
 	}
@@ -170,6 +167,4 @@ func pvcFindings(r Resource, g graph, policy Policy) []Finding {
 	if r.RequestedBytes != nil && *r.RequestedBytes >= policy.LargePVCBytes {
 		add("LargeStorageRequest", "info", fmt.Sprintf("PVC requests %d bytes; actual backend usage is unknown", *r.RequestedBytes))
 	}
-
-	return findings
 }

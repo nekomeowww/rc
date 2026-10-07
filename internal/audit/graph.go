@@ -1,13 +1,14 @@
 package audit
 
 import (
-	"encoding/json"
 	"slices"
 	"time"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	repositories "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	"github.com/nekomeowww/rc/internal/repositoryaccess"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
 )
 
@@ -100,25 +101,21 @@ func leaseReferences(lease, root Resource) bool {
 			return true
 		}
 	}
-	if root.UID != "" && (lease.Holder == string(root.UID) || lease.Holder == "worktree-delete/"+string(root.UID)) {
+	worktree := &repositories.Worktree{ObjectMeta: metav1.ObjectMeta{Name: root.Name, Namespace: root.Namespace, UID: root.UID}}
+	if root.UID != "" && (lease.Holder == string(root.UID) || lease.Holder == worktreeclaim.DeletionHolder(worktree)) {
 		return true
 	}
-	if root.Kind == worktreeKind {
-		worktree := &repositories.Worktree{ObjectMeta: metav1.ObjectMeta{Name: root.Name, Namespace: root.Namespace, UID: root.UID}}
-		if lease.Name == worktreeclaim.LeaseName(worktree) {
-			return true
-		}
+	if root.Kind == worktreeKind && lease.Name == worktreeclaim.LeaseName(worktree) {
+		return true
 	}
 	if lease.Reservation == "" {
 		return false
 	}
-	var reservation struct {
-		Holders map[string]bool `json:"holders"`
-	}
-	if err := json.Unmarshal([]byte(lease.Reservation), &reservation); err != nil {
-		return true
-	}
-	return reservation.Holders[root.Kind+"/"+string(root.UID)+"/"+root.Name]
+	// Reservation tokens use the consumer role (workspace, clone, sync, ...),
+	// not the Kind, so match any token for this UID. Undecodable state fails
+	// closed as a reference.
+	held, err := repositoryaccess.HeldBy(&coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{repositoryaccess.StateAnnotation: lease.Reservation}}}, root.UID)
+	return held || err != nil
 }
 
 func (g graph) worktreeBlockers(r Resource, inventory Inventory, policy Policy) []string {

@@ -260,8 +260,7 @@ func (r *WorktreeExecReconciler) readyWorktree(ctx context.Context, exec *reposi
 	if worktreeownership.MountsClosed(worktree) {
 		return nil, fmt.Errorf("referenced Worktree is being deleted")
 	}
-	ready := meta.FindStatusCondition(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady)
-	if worktree.Status.ObservedGeneration < worktree.Generation || ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration < worktree.Generation || worktree.Status.VolumeClaimName == "" {
+	if !worktreeownership.ReadyAtCurrentGeneration(worktree) || worktree.Status.VolumeClaimName == "" {
 		return nil, errWorktreeNotReady
 	}
 

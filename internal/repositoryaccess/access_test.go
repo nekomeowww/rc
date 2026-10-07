@@ -143,3 +143,21 @@ func TestAdmissionRetainsReservationWhileConsumersStop(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, busy)
 }
+
+func TestHeldByMatchesAnyRoleForUID(t *testing.T) {
+	t.Parallel()
+	owner := &repositories.Worktree{ObjectMeta: metav1.ObjectMeta{Name: "owner", UID: "owner-uid"}}
+	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{StateAnnotation: `{"mode":"mount","holders":{"` + Token("workspace", owner) + `":true,"clone/other-uid/x":true}}`}}}
+	held, err := HeldBy(lease, owner.UID)
+	require.NoError(t, err)
+	require.True(t, held)
+	held, err = HeldBy(lease, "owner")
+	require.NoError(t, err)
+	require.False(t, held, "UID must match a whole token segment")
+	held, err = HeldBy(lease, "")
+	require.NoError(t, err)
+	require.False(t, held)
+	lease.Annotations[StateAnnotation] = "{"
+	_, err = HeldBy(lease, owner.UID)
+	require.Error(t, err)
+}

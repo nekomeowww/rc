@@ -30,6 +30,7 @@ import (
 	"github.com/nekomeowww/rc/internal/volumeclaim"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
+	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
 const (
@@ -63,7 +64,7 @@ var _ = Describe("Worktree Controller", func() {
 		worktree := &repositoriesv1alpha1.Worktree{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: worktreeName, Namespace: testNamespace,
-				Labels: map[string]string{generatedWorkspaceLabel: generatedWorkspaceTestName},
+				Labels: map[string]string{worktreeownership.GeneratedForLabel: generatedWorkspaceTestName},
 			},
 			Spec: repositoriesv1alpha1.WorktreeSpec{
 				RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: repositoryName},
@@ -123,7 +124,7 @@ var _ = Describe("Worktree Controller", func() {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "generated-worktree",
 				Namespace: testNamespace,
-				Labels:    map[string]string{generatedWorkspaceLabel: generatedWorkspaceTestName},
+				Labels:    map[string]string{worktreeownership.GeneratedForLabel: generatedWorkspaceTestName},
 			},
 			Spec: repositoriesv1alpha1.WorktreeSpec{
 				RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: "repository-parent"},

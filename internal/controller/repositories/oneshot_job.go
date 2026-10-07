@@ -17,6 +17,7 @@ package repositories
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -105,7 +106,7 @@ func (a oneShotStatusAdapter[T]) set(
 			Message:            message,
 		})
 		a.apply(current, jobName, conditions)
-		if currentJobName == jobName && conditionsEqual(currentConditions, conditions) {
+		if currentJobName == jobName && slices.Equal(currentConditions, conditions) {
 			return nil
 		}
 		if err := kubeClient.Status().Patch(ctx, current, client.MergeFrom(before)); err != nil {

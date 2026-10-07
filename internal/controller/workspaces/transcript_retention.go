@@ -8,6 +8,7 @@ import (
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	processruntime "github.com/nekomeowww/rc/internal/execution"
+	"github.com/nekomeowww/rc/internal/executionretention"
 	"github.com/nekomeowww/rc/internal/rcplatform"
 	workspaceservice "github.com/nekomeowww/rc/internal/workspaces"
 	corev1 "k8s.io/api/core/v1"
@@ -22,10 +23,10 @@ var errTranscriptStorageGone = errors.New("original transcript PVC is deleting")
 
 // transcriptExpired is deliberately independent of CR age/count planning.
 func transcriptExpired(process *workspacesv1alpha1.WorkspaceExec, policy *workspacesv1alpha1.ExecutionRetentionPolicy, now time.Time) bool {
-	if policy == nil || process.Spec.Retain || !executionTerminal(process.Status.Phase) || process.Status.CompletedAt == nil || transcriptCleaned(process) {
+	if policy == nil || process.Spec.Retain || !process.Status.Phase.Terminal() || process.Status.CompletedAt == nil || transcriptCleaned(process) {
 		return false
 	}
-	ttl := 14 * 24 * time.Hour
+	ttl := executionretention.DefaultTranscriptTTL
 	if policy.TranscriptTTL != nil {
 		ttl = policy.TranscriptTTL.Duration
 	}

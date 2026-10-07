@@ -306,19 +306,6 @@ func jobCondition(job *batchv1.Job, conditionType batchv1.JobConditionType) *bat
 	return nil
 }
 
-func conditionsEqual(left, right []metav1.Condition) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-
-	return true
-}
-
 // SetupWithManager sets up the controller with the Manager.
 func (r *RepositoryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.APIReader = mgr.GetAPIReader()

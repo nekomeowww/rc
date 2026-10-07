@@ -83,7 +83,7 @@ func TestRetentionBoundsOutstandingDeletions(t *testing.T) {
 	}
 	r := &executionRetentionService{Client: kube, APIReader: kube}
 	for range 2 {
-		_, err := r.reconcileExecutionHistory(t.Context(), workspace.Namespace, executionTargetReference(workspace), workspace.UID, workspace.Spec.ExecutionRetention)
+		err := r.reconcileExecutionHistory(t.Context(), workspace.Namespace, executionTargetReference(workspace), workspace.UID, workspace.Spec.ExecutionRetention)
 		require.NoError(t, err)
 	}
 	list := new(workspacesv1alpha1.WorkspaceExecList)

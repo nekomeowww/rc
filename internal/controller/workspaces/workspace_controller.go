@@ -463,7 +463,7 @@ func (r *WorkspaceReconciler) finalizeWorkspace(ctx context.Context, workspace *
 			continue
 		}
 		waiting = true
-		if executionTerminal(process.Status.Phase) {
+		if process.Status.Phase.Terminal() {
 			if err := r.Delete(ctx, process); err != nil && !errors.IsNotFound(err) {
 				return ctrl.Result{}, fmt.Errorf("delete terminal process while finalizing Workspace: %w", err)
 			}
@@ -1087,7 +1087,7 @@ func workspaceProcessState(ctx context.Context, kubeClient client.Reader, worksp
 			continue
 		}
 		hasProcesses = true
-		if !executionTerminal(process.Status.Phase) {
+		if !process.Status.Phase.Terminal() {
 			active = true
 		}
 		if process.Status.CompletedAt != nil && (lastCompletion == nil || process.Status.CompletedAt.After(lastCompletion.Time)) {
@@ -1097,15 +1097,6 @@ func workspaceProcessState(ctx context.Context, kubeClient client.Reader, worksp
 	}
 
 	return active, hasProcesses, lastCompletion, nil
-}
-
-func executionTerminal(phase workspacesv1alpha1.WorkspaceExecPhase) bool {
-	switch phase {
-	case workspacesv1alpha1.WorkspaceExecPhaseSucceeded, workspacesv1alpha1.WorkspaceExecPhaseFailed, workspacesv1alpha1.WorkspaceExecPhaseStopped, workspacesv1alpha1.WorkspaceExecPhaseLost:
-		return true
-	default:
-		return false
-	}
 }
 
 func podReady(pod *corev1.Pod) bool {
@@ -1272,7 +1263,7 @@ func (r *WorkspaceReconciler) setWorkspaceStatus(ctx context.Context, key types.
 			ObservedGeneration: current.Generation, Reason: outdatedReason, Message: outdatedMessage,
 		})
 	}
-	if readyStatus == metav1.ConditionTrue || reason == "Suspended" {
+	if readyStatus == metav1.ConditionTrue || reason == reasonSuspended {
 		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 			Type: workspacesv1alpha1.WorkspaceConditionDegraded, Status: metav1.ConditionFalse,
 			ObservedGeneration: current.Generation, Reason: reason, Message: message,

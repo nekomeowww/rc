@@ -49,6 +49,16 @@ const (
 	WorkspaceExecConditionTranscriptCleanup                           = "TranscriptCleanup"
 )
 
+// Terminal reports whether the phase can no longer make progress.
+func (p WorkspaceExecPhase) Terminal() bool {
+	switch p {
+	case WorkspaceExecPhaseSucceeded, WorkspaceExecPhaseFailed, WorkspaceExecPhaseStopped, WorkspaceExecPhaseLost:
+		return true
+	default:
+		return false
+	}
+}
+
 // WorkspaceExecTargetReference selects a Workspace or Environment draft.
 type WorkspaceExecTargetReference struct {
 	// kind is Workspace or WorkspaceEnvironment. Environment targets always

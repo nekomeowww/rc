@@ -59,7 +59,7 @@ func (r *WorkspaceReconciler) reconcileRuntimeRecovery(ctx context.Context, work
 	bound := false
 	for i := range processes.Items {
 		process := &processes.Items[i]
-		if process.Status.RuntimePodName == pod.Name && process.Status.RuntimePodUID == string(pod.UID) && !executionTerminal(process.Status.Phase) {
+		if process.Status.RuntimePodName == pod.Name && process.Status.RuntimePodUID == string(pod.UID) && !process.Status.Phase.Terminal() {
 			bound = true
 			break
 		}

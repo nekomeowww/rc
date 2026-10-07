@@ -3,6 +3,7 @@ package repositories
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
@@ -114,7 +115,7 @@ func setRepositoryStorageReady(
 		if current.Status.ObservedGeneration == before.Status.ObservedGeneration &&
 			current.Status.VolumeClaimName == before.Status.VolumeClaimName &&
 			equality.Semantic.DeepEqual(current.Status.LastUpdatedAt, before.Status.LastUpdatedAt) &&
-			conditionsEqual(current.Status.Conditions, before.Status.Conditions) {
+			slices.Equal(current.Status.Conditions, before.Status.Conditions) {
 			return nil
 		}
 

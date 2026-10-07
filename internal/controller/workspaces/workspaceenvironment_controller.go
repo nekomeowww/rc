@@ -183,7 +183,7 @@ func (r *WorkspaceEnvironmentReconciler) reconcileEditorLifecycle(ctx context.Co
 		if process.Spec.TargetRef.Kind != workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment || process.Spec.TargetRef.Name != environment.Name {
 			continue
 		}
-		if !executionTerminal(process.Status.Phase) {
+		if !process.Status.Phase.Terminal() {
 			return ctrl.Result{}, false, nil
 		}
 		if process.Status.CompletedAt != nil && (lastCompletion == nil || process.Status.CompletedAt.After(lastCompletion.Time)) {
@@ -211,7 +211,7 @@ func (r *WorkspaceEnvironmentReconciler) environmentHasActiveProcess(ctx context
 	}
 	for index := range processes.Items {
 		process := &processes.Items[index]
-		if process.Spec.TargetRef.Kind == workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment && process.Spec.TargetRef.Name == environment.Name && !executionTerminal(process.Status.Phase) {
+		if process.Spec.TargetRef.Kind == workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment && process.Spec.TargetRef.Name == environment.Name && !process.Status.Phase.Terminal() {
 			return true, nil
 		}
 	}
@@ -231,7 +231,7 @@ func (r *WorkspaceEnvironmentReconciler) reconcileEnvironmentCommit(ctx context.
 	}
 	for index := range processes.Items {
 		process := &processes.Items[index]
-		if process.Spec.TargetRef.Kind == workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment && process.Spec.TargetRef.Name == environment.Name && !executionTerminal(process.Status.Phase) {
+		if process.Spec.TargetRef.Kind == workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment && process.Spec.TargetRef.Name == environment.Name && !process.Status.Phase.Terminal() {
 			return true, r.setEnvironmentDraftCondition(ctx, client.ObjectKeyFromObject(environment), "ActiveProcesses", "Environment draft cannot commit while processes are active")
 		}
 	}

@@ -25,7 +25,7 @@ func Prune(ctx context.Context, kube client.Client, review ReviewedPlan, now tim
 	if err := validatePlan(plan, now); err != nil {
 		return result, err
 	}
-	if len(review.Unknowns) > 0 || review.evaluate == nil {
+	if len(review.Unknowns) > 0 {
 		return result, fmt.Errorf("cannot prune with unknown eligibility: %v", review.Unknowns)
 	}
 	for _, ref := range plan.Candidates {

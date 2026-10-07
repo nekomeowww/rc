@@ -41,5 +41,5 @@ func (r *WorkspaceReconciler) suspendWorkspace(ctx context.Context, workspace *w
 	if err := r.releaseClaims(ctx, workspace); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, r.setWorkspaceStatus(ctx, client.ObjectKeyFromObject(workspace), resolved, metav1.ConditionFalse, "Suspended", "Workspace runtime is suspended")
+	return ctrl.Result{}, r.setWorkspaceStatus(ctx, client.ObjectKeyFromObject(workspace), resolved, metav1.ConditionFalse, reasonSuspended, "Workspace runtime is suspended")
 }

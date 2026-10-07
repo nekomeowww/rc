@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -18,6 +19,7 @@ import (
 
 	repositories "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspaces "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/repositoryaccess"
 )
 
 const (
@@ -41,7 +43,10 @@ const (
 // Callers must provide an uncached client.Reader. Unavailable lists become
 // unknown observations; cancellation and invalid policy are returned as errors.
 func Scan(ctx context.Context, reader client.Reader, namespace string, policy Policy, now time.Time) (Report, error) {
-	inventory, err := scanInventory(ctx, reader, namespace, policy, now)
+	if err := validatePolicy(policy); err != nil {
+		return Report{}, err
+	}
+	inventory, err := scanInventory(ctx, reader, namespace, now)
 	if err != nil {
 		return Report{}, err
 	}
@@ -50,10 +55,7 @@ func Scan(ctx context.Context, reader client.Reader, namespace string, policy Po
 
 // scanInventory is shared by doctor and the one pre-confirmation review. Prune
 // does not construct diagnostic findings or a second in-memory reference graph.
-func scanInventory(ctx context.Context, reader client.Reader, namespace string, policy Policy, now time.Time) (Inventory, error) {
-	if err := validatePolicy(policy); err != nil {
-		return Inventory{}, err
-	}
+func scanInventory(ctx context.Context, reader client.Reader, namespace string, now time.Time) (Inventory, error) {
 	inventory := Inventory{Namespace: namespace, ObservedAt: metav1.NewTime(now.UTC().Truncate(time.Second)), Complete: true, Resources: []Resource{}, Coverage: []Observation{}}
 	for _, list := range evidenceLists() {
 		if err := ctx.Err(); err != nil {
@@ -138,24 +140,16 @@ func projectRC(r *Resource, object client.Object) {
 	case *repositories.Worktree:
 		r.Conditions, r.ObservedGeneration, r.Locked = o.Status.Conditions, o.Status.ObservedGeneration, o.Spec.Lock
 		r.reference(repoAPI, "Repository", o.Spec.RepositoryRef.Name, "source")
-		name := o.Status.VolumeClaimName
-		if name == "" {
-			name = o.Name
-		}
-		r.reference("v1", pvcKind, name, pvcRelation)
+		r.reference("v1", pvcKind, cmp.Or(o.Status.VolumeClaimName, o.Name), pvcRelation)
 		r.reference("batch/v1", jobKind, o.Status.JobName, "bootstrap")
 	case *repositories.Repository:
 		r.Conditions, r.ObservedGeneration = o.Status.Conditions, o.Status.ObservedGeneration
-		name := o.Status.VolumeClaimName
-		if name == "" {
-			name = o.Name
-		}
-		r.reference("v1", pvcKind, name, pvcRelation)
+		r.reference("v1", pvcKind, cmp.Or(o.Status.VolumeClaimName, o.Name), pvcRelation)
 	case *workspaces.Workspace:
 		r.Conditions, r.ObservedGeneration, r.Phase = o.Status.Conditions, o.Status.ObservedGeneration, string(o.Spec.DesiredState)
 		name := o.Status.HomeVolumeClaimName
-		if name == "" && o.Spec.OS != corev1.OSName("darwin") {
-			name = o.Name
+		if o.Spec.OS != corev1.OSName("darwin") {
+			name = cmp.Or(name, o.Name)
 		}
 		r.reference("v1", pvcKind, name, pvcRelation)
 		r.reference("v1", podKind, o.Status.RuntimePodName, runtimeRelation)
@@ -175,7 +169,7 @@ func projectRC(r *Resource, object client.Object) {
 	case *workspaces.WorkspaceExec:
 		r.Conditions, r.ObservedGeneration = o.Status.Conditions, o.Status.ObservedGeneration
 		r.Phase, r.CompletedAt, r.AttachedClients = string(o.Status.Phase), o.Status.CompletedAt, o.Status.AttachedClients
-		r.Terminal = slices.Contains([]string{string(workspaces.WorkspaceExecPhaseSucceeded), string(workspaces.WorkspaceExecPhaseFailed), string(workspaces.WorkspaceExecPhaseStopped), string(workspaces.WorkspaceExecPhaseLost)}, r.Phase)
+		r.Terminal = o.Status.Phase.Terminal()
 		r.reference(workspaceAPI, string(o.Spec.TargetRef.Kind), o.Spec.TargetRef.Name, "execution")
 	case *repositories.WorktreeExec:
 		r.Conditions = o.Status.Conditions
@@ -207,7 +201,7 @@ func projectResult(r *Resource) {
 	r.CompletedAt = &condition.LastTransitionTime
 	r.Phase = string(workspaces.WorkspaceExecPhaseSucceeded)
 	if condition.Status == metav1.ConditionFalse {
-		r.Phase = "Failed"
+		r.Phase = string(workspaces.WorkspaceExecPhaseFailed)
 	}
 }
 
@@ -242,7 +236,7 @@ func projectKubernetes(r *Resource, object client.Object) {
 			r.Holder = *o.Spec.HolderIdentity
 		}
 		// Repository reservations are durable; expiration is never a release.
-		r.Reservation = o.Annotations["repositories.rc.ayaka.io/access"]
+		r.Reservation = o.Annotations[repositoryaccess.StateAnnotation]
 	case *corev1.Event:
 		r.Reason, r.Phase, r.Message = o.Reason, o.Type, o.Message
 		r.References = append(r.References, Reference{Relation: "event", Target: ObjectRef{APIVersion: o.InvolvedObject.APIVersion, Kind: o.InvolvedObject.Kind, Namespace: o.InvolvedObject.Namespace, Name: o.InvolvedObject.Name, UID: o.InvolvedObject.UID}})

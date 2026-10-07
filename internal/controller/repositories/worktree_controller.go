@@ -58,7 +58,6 @@ const (
 	worktreePathAnnotation     = "repositories.rc.ayaka.io/worktree-path"
 	worktreeManagedByLabel     = "app.kubernetes.io/managed-by"
 	worktreeManagedByValue     = "rc"
-	generatedWorkspaceLabel    = "workspaces.rc.ayaka.io/generated-for"
 	worktreeRequeueDelay       = 2 * time.Second
 	gitCheckoutSubcommand      = "checkout"
 	worktreeDeletionFinalizer  = worktreeclaim.DeletionFinalizer
@@ -126,7 +125,6 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if volumeclaim.IsConflict(err) {
 		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimConflict", err.Error(), worktree.Status.VolumeClaimName, worktree.Status.SourceVolumeClaimName, worktreePath)
 	}
-	err = claimErr
 	if errors.IsNotFound(claimErr) {
 		// A recorded child is durable creation evidence. Its loss must not silently
 		// authorize a new clone from today's Repository under the same Worktree.
@@ -301,21 +299,17 @@ func (r *WorktreeReconciler) reconcileDelete(ctx context.Context, worktree *repo
 	if !controllerutil.ContainsFinalizer(worktree, worktreeDeletionFinalizer) {
 		return ctrl.Result{}, nil
 	}
-	ready, err := r.prepareWorktreeCleanup(ctx, worktree)
+	// Finish an admitted clone before releasing its source reservation. Deleting
+	// a pending PVC can leave a CSI CreateVolume operation in flight.
+	// Cleanup resolves the same identity as provisioning, including recovery
+	// before status is persisted. Absence at the CR name does not prove its
+	// selected PVC is gone.
+	claimName, ready, err := r.prepareWorktreeCleanup(ctx, worktree)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if !ready {
 		return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, nil
-	}
-
-	// Finish an admitted clone before releasing its source reservation. Deleting
-	// a pending PVC can leave a CSI CreateVolume operation in flight.
-	// Use the same identity as provisioning, including recovery before status is
-	// persisted. Absence at the CR name does not prove its selected PVC is gone.
-	claimName, err := volumeclaim.Resolve(ctx, r.APIReader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
-	if err != nil && claimName == "" {
-		return ctrl.Result{}, err
 	}
 	claim := new(corev1.PersistentVolumeClaim)
 	claimKey := client.ObjectKey{Namespace: worktree.Namespace, Name: claimName}
@@ -354,10 +348,6 @@ func (r *WorktreeReconciler) reconcileDelete(ctx context.Context, worktree *repo
 	}
 
 	return ctrl.Result{}, nil
-}
-
-func (r *WorktreeReconciler) worktreeReferenceBlockers(ctx context.Context, worktree *repositoriesv1alpha1.Worktree) ([]string, error) {
-	return worktreeownership.ReferenceBlockers(ctx, r.APIReader, worktree.Namespace, worktree.Name)
 }
 
 func (r *WorktreeReconciler) worktreesForWorkspace(_ context.Context, object client.Object) []ctrl.Request {
@@ -399,7 +389,7 @@ func (r *WorktreeReconciler) reconcileWorkspaceBootstrap(ctx context.Context, wo
 	containerName := worktreebootstrap.ContainerName(worktree.Namespace, worktree.Name, worktree.UID)
 	initializing := false
 	failedMessage := ""
-	generatedWorkspace := worktree.Labels["workspaces.rc.ayaka.io/generated-for"]
+	generatedWorkspace := worktree.Labels[worktreeownership.GeneratedForLabel]
 	for index := range pods.Items {
 		pod := &pods.Items[index]
 		if !podUsesPersistentVolumeClaim(pod, claimName) {
@@ -462,7 +452,8 @@ func worktreeVolumeClaim(
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes:      slices.Clone(plan.AccessModes),
 			StorageClassName: &plan.StorageClassName,
-			VolumeMode:       &plan.VolumeMode,
+			// A Git checkout requires a mounted filesystem.
+			VolumeMode: new(corev1.PersistentVolumeFilesystem),
 			DataSource: &corev1.TypedLocalObjectReference{
 				Kind: "PersistentVolumeClaim",
 				Name: sourceClaimName,
@@ -652,9 +643,7 @@ func (r *WorktreeReconciler) setWorktreeVolumeReady(ctx context.Context, worktre
 		before := current.DeepCopy()
 		current.Status.ObservedGeneration = current.Generation
 		current.Status.SourceVolumeClaimName = sourceClaimName
-		if claimName != "" {
-			current.Status.VolumeClaimName = claimName
-		}
+		current.Status.VolumeClaimName = claimName
 		current.Status.WorktreePath = path
 		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 			Type: repositoriesv1alpha1.WorktreeConditionVolumeReady, Status: metav1.ConditionTrue,
@@ -664,7 +653,7 @@ func (r *WorktreeReconciler) setWorktreeVolumeReady(ctx context.Context, worktre
 			current.Status.SourceVolumeClaimName == before.Status.SourceVolumeClaimName &&
 			current.Status.VolumeClaimName == before.Status.VolumeClaimName &&
 			current.Status.WorktreePath == before.Status.WorktreePath &&
-			conditionsEqual(current.Status.Conditions, before.Status.Conditions) {
+			slices.Equal(current.Status.Conditions, before.Status.Conditions) {
 			return nil
 		}
 		if err := r.Status().Patch(ctx, current, client.MergeFrom(before)); err != nil {
@@ -716,7 +705,7 @@ func (r *WorktreeReconciler) setWorktreeStatus(ctx context.Context, worktree *re
 			current.Status.VolumeClaimName == before.Status.VolumeClaimName &&
 			current.Status.WorktreePath == before.Status.WorktreePath &&
 			current.Status.JobName == before.Status.JobName &&
-			conditionsEqual(current.Status.Conditions, before.Status.Conditions) {
+			slices.Equal(current.Status.Conditions, before.Status.Conditions) {
 			return nil
 		}
 

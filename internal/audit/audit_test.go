@@ -23,6 +23,7 @@ import (
 	repositories "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspaces "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/executionretention"
+	"github.com/nekomeowww/rc/internal/repositoryaccess"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
 )
 
@@ -361,4 +362,24 @@ func TestConfirmationCannotExtendPlanLifetime(t *testing.T) {
 	result, err := Prune(t.Context(), kube, review, auditNow.Add(time.Hour))
 	require.ErrorContains(t, err, "expired")
 	assert.Empty(t, result.Requested)
+}
+
+func TestRepositoryReservationAttributesHolderByRoleToken(t *testing.T) {
+	workspace := &workspaces.Workspace{ObjectMeta: fixtureMeta(testWorkspaceName)}
+	reserved := &coordinationv1.Lease{ObjectMeta: fixtureMeta("rc-repository-reserved")}
+	// Gate tokens use the consumer role ("workspace"), not the Kind ("Workspace").
+	reserved.Annotations = map[string]string{repositoryaccess.StateAnnotation: `{"mode":"mount","holders":{"` + repositoryaccess.Token("workspace", workspace) + `":true}}`}
+	malformed := &coordinationv1.Lease{ObjectMeta: fixtureMeta("rc-repository-malformed")}
+	malformed.Annotations = map[string]string{repositoryaccess.StateAnnotation: "{"}
+	unrelated := &coordinationv1.Lease{ObjectMeta: fixtureMeta("rc-repository-unrelated")}
+	unrelated.Annotations = map[string]string{repositoryaccess.StateAnnotation: `{"mode":"mount","holders":{"workspace/other-uid/other":true}}`}
+	g := newGraph(scanReport(t, fixtureClient(t, workspace, reserved, malformed, unrelated)).Inventory)
+	root, ok := g.resolve(ObjectRef{APIVersion: workspaceAPI, Kind: workspaceKind, Namespace: testNamespace, Name: testWorkspaceName})
+	require.True(t, ok)
+	leases := g.leases(root)
+	names := make([]string, 0, len(leases))
+	for _, lease := range leases {
+		names = append(names, lease.Name)
+	}
+	assert.ElementsMatch(t, []string{reserved.Name, malformed.Name}, names, "undecodable reservations fail closed as references")
 }

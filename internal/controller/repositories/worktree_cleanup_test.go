@@ -47,7 +47,7 @@ func ownershipStorage(t *testing.T) (*repositoriesv1alpha1.Repository, *reposito
 	repository := &repositoriesv1alpha1.Repository{ObjectMeta: metav1.ObjectMeta{Name: "ownership-parent", Namespace: ownershipNamespace}, Spec: repositoriesv1alpha1.RepositorySpec{Storage: repositoriesv1alpha1.RepositoryStorageSpec{Size: resource.MustParse("1Gi"), StorageClassName: ownershipStorageClass}}, Status: repositoriesv1alpha1.RepositoryStatus{VolumeClaimName: "ownership-parent"}}
 	claimName := volumeclaim.Name(volumeclaim.Worktree, ownershipWorktreeName, 0)
 	worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: ownershipWorktreeName, Namespace: ownershipNamespace, UID: ownershipWorktreeUID, Finalizers: []string{worktreeDeletionFinalizer}, Labels: map[string]string{worktreeownership.GeneratedForLabel: ownershipWorkspaceName}}, Spec: repositoriesv1alpha1.WorktreeSpec{RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: repository.Name}, Branch: "feature"}, Status: repositoriesv1alpha1.WorktreeStatus{VolumeClaimName: claimName, Conditions: []metav1.Condition{{Type: repositoriesv1alpha1.WorktreeConditionReady, Status: metav1.ConditionTrue}, {Type: repositoriesv1alpha1.WorktreeConditionVolumeReady, Status: metav1.ConditionTrue}}}}
-	claim := worktreeVolumeClaim(worktree, claimName, repository.Name, worktreestorage.Plan{StorageClassName: ownershipStorageClass, Size: resource.MustParse("1Gi"), AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, VolumeMode: corev1.PersistentVolumeFilesystem})
+	claim := worktreeVolumeClaim(worktree, claimName, repository.Name, worktreestorage.Plan{StorageClassName: ownershipStorageClass, Size: resource.MustParse("1Gi"), AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}})
 	require.NoError(t, controllerutil.SetControllerReference(worktree, claim, ownershipScheme(t)))
 	claim.Status.Phase = corev1.ClaimBound
 	return repository, worktree, claim
@@ -141,7 +141,7 @@ func TestDeletingWorkspaceDoesNotBlockWorktreeGC(t *testing.T) {
 	r := &WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 	// ROOT CAUSE: foreground GC waits for the dependent's finalizer, while
 	// the finalizer counted its deleting owner as a live reference forever.
-	blockers, err := r.worktreeReferenceBlockers(context.Background(), worktree)
+	blockers, err := r.cleanupReferenceBlockers(context.Background(), worktree)
 	require.NoError(t, err)
 	assert.Empty(t, blockers)
 	result, err := r.reconcileDelete(context.Background(), worktree)
@@ -163,7 +163,7 @@ func TestWorktreeGCWaitsForRuntimeCleanupAndWriterThenFinishes(t *testing.T) {
 	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: worktreeclaim.LeaseName(worktree), Namespace: ownershipNamespace}, Spec: coordinationv1.LeaseSpec{HolderIdentity: &holder}}
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, worktree, lease).Build()
 	r := &WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}
-	blockers, err := r.worktreeReferenceBlockers(ctx, worktree)
+	blockers, err := r.cleanupReferenceBlockers(ctx, worktree)
 	require.NoError(t, err)
 	assert.Equal(t, []string{owner.Name}, blockers, "runtime teardown still protects read-only and hot mounts even if GC removes writer Leases")
 	owner.Finalizers = []string{metav1.FinalizerDeleteDependents}
@@ -179,7 +179,7 @@ func TestWorktreeGCWaitsForRuntimeCleanupAndWriterThenFinishes(t *testing.T) {
 }
 
 func TestWorktreeVolumeIsProtectedFromFirstCreation(t *testing.T) {
-	claim := worktreeVolumeClaim(&repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: ownershipWorktreeName, Namespace: ownershipNamespace}}, volumeclaim.Name(volumeclaim.Worktree, ownershipWorktreeName, 0), "repo", worktreestorage.Plan{StorageClassName: ownershipStorageClass, Size: resource.MustParse("1Gi"), AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, VolumeMode: corev1.PersistentVolumeFilesystem})
+	claim := worktreeVolumeClaim(&repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: ownershipWorktreeName, Namespace: ownershipNamespace}}, volumeclaim.Name(volumeclaim.Worktree, ownershipWorktreeName, 0), "repo", worktreestorage.Plan{StorageClassName: ownershipStorageClass, Size: resource.MustParse("1Gi"), AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}})
 	assert.Contains(t, claim.Finalizers, worktreeownership.VolumeProtectionFinalizer)
 }
 

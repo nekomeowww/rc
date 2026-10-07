@@ -8,6 +8,7 @@ import (
 	"slices"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,6 +42,13 @@ func InitializeGenerated(workspace *workspacesv1alpha1.Workspace, worktree *repo
 	}
 	worktree.Labels[GeneratedForLabel] = workspace.Name
 	controllerutil.AddFinalizer(worktree, worktreeclaim.DeletionFinalizer)
+}
+
+// ReadyAtCurrentGeneration reports whether the Worktree's status and Ready
+// condition are True and observed at or after its current generation.
+func ReadyAtCurrentGeneration(worktree *repositoriesv1alpha1.Worktree) bool {
+	ready := meta.FindStatusCondition(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady)
+	return worktree.Status.ObservedGeneration >= worktree.Generation && ready != nil && ready.Status == metav1.ConditionTrue && ready.ObservedGeneration >= worktree.Generation
 }
 
 // WorkspaceOwner returns a Workspace controller reference, without interpreting

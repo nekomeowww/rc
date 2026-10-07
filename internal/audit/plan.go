@@ -32,9 +32,7 @@ func Review(ctx context.Context, reader client.Reader, namespace string, policy 
 			return review, fmt.Errorf("saved plan scope or policy differs from the requested review")
 		}
 	}
-	scanPolicy := DefaultPolicy()
-	scanPolicy.HistoryFor = policy.HistoryFor
-	inventory, err := scanInventory(ctx, reader, namespace, scanPolicy, now)
+	inventory, err := scanInventory(ctx, reader, namespace, now)
 	if err != nil {
 		return review, err
 	}
@@ -45,7 +43,7 @@ func Review(ctx context.Context, reader client.Reader, namespace string, policy 
 		}
 	}
 	if evaluate == nil {
-		review.Unknowns = append(review.Unknowns, "canonical history evaluator unavailable; integrate T-663 before pruning")
+		review.Unknowns = append(review.Unknowns, "canonical history evaluator unavailable; Review cannot select records for pruning without it")
 	}
 	if len(review.Unknowns) > 0 {
 		if saved != nil {
@@ -112,9 +110,6 @@ func historyEligible(r Resource, policy HistoryPolicy, now time.Time) bool {
 }
 
 func evaluateHistory(records []Resource, target client.Object, now time.Time, evaluate HistoryEvaluator) (map[int]bool, error) {
-	if evaluate == nil {
-		return nil, fmt.Errorf("canonical history evaluator unavailable")
-	}
 	typed := make([]workspacesv1alpha1.WorkspaceExec, len(records))
 	for i := range records {
 		record, ok := records[i].object.(*workspacesv1alpha1.WorkspaceExec)

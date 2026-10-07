@@ -18,7 +18,7 @@ Use rc as a Kubernetes-backed development runtime. Treat Repository mirrors, wri
 
 - Use `repo exec` or `worktree exec` only for short, non-interactive work.
 - Use `rcctl exec [flags] WORKSPACE -- COMMAND` for an existing Workspace. The positional Workspace is required even when `workspace default` is configured; put rcctl flags before it.
-- Use `rcctl run [flags] -- COMMAND` to create a new Workspace. It is retained by default; add `--name` for a stable name or `--rm` for a bounded isolated task whose home and generated Worktree should be cleaned up after all executions terminate. Referenced user-created Worktrees are not owned by this cleanup.
+- Use `rcctl run [flags] -- COMMAND` to create a new Workspace. Unnamed runs are temporary by default and clean up their home and generated Worktrees five minutes after all executions terminate. Add `--retain` for subsequent `exec` calls or persistent results. Use `--name NAME` for a retained development machine, or `--rm` for explicit cleanup. Named runs retain by default without a warning. Referenced user-created Worktrees are not owned by this cleanup.
 - `env default` supplies the Environment for new Workspace creation with `run`; it does not select or replace the target of `exec`.
 - Default to reusing a suitable named Workspace for the same project and trust boundary. One Workspace is designed to mount multiple Worktrees and run multiple WorkspaceExecs concurrently, so mount the project's additional branches there and start each agent, server, watcher, or command as a separate process.
 - A Repository is the shared mirror, not a writable checkout. Write in a Worktree. A read-write Worktree has one Workspace/WorktreeExec owner at a time.

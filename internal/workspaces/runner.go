@@ -48,14 +48,19 @@ type MountRequest struct {
 }
 
 type RunRequest struct {
-	OS                           corev1.OSName
-	NodeSelector                 map[string]string
-	Tolerations                  []corev1.Toleration
-	Namespace                    string
-	Workspace                    string
-	DefaultWorkspace             string
-	Create                       bool
-	Remove                       bool
+	OS               corev1.OSName
+	NodeSelector     map[string]string
+	Tolerations      []corev1.Toleration
+	Namespace        string
+	Workspace        string
+	DefaultWorkspace string
+	Create           bool
+	// RetentionPolicy overrides the creation default: named runs retain and
+	// unnamed runs expire after their processes exit. CLI aliases are resolved
+	// before this request reaches the runner.
+	RetentionPolicy              workspacesv1alpha1.WorkspaceRetentionPolicy
+	IdleTimeout                  *metav1.Duration
+	DeleteAfterSuspended         *metav1.Duration
 	Name                         string
 	Environment                  string
 	DefaultEnvironment           string
@@ -83,6 +88,9 @@ type Runner struct {
 }
 
 func (runner *Runner) Prepare(ctx context.Context, request RunRequest) (RunTarget, error) {
+	if request.RetentionPolicy != "" && request.RetentionPolicy != workspacesv1alpha1.WorkspaceRetentionPolicyRetain && request.RetentionPolicy != workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit {
+		return RunTarget{}, fmt.Errorf("unsupported Workspace retention policy %q", request.RetentionPolicy)
+	}
 	if request.Create && request.Workspace != "" {
 		return RunTarget{}, fmt.Errorf("workspace selection and creation are mutually exclusive")
 	}
@@ -317,12 +325,17 @@ func (runner *Runner) createTarget(ctx context.Context, request RunRequest) (tar
 			Resources:                    request.Resources,
 			ServiceAccountName:           request.ServiceAccountName,
 			AutomountServiceAccountToken: request.AutomountServiceAccountToken,
-			RetentionPolicy:              workspacesv1alpha1.WorkspaceRetentionPolicyRetain,
+			RetentionPolicy:              request.RetentionPolicy,
+			IdleTimeout:                  request.IdleTimeout,
+			DeleteAfterSuspended:         request.DeleteAfterSuspended,
 			Env:                          append([]corev1.EnvVar(nil), request.Env...),
 		},
 	}
-	if request.Remove {
-		workspace.Spec.RetentionPolicy = workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit
+	if workspace.Spec.RetentionPolicy == "" {
+		workspace.Spec.RetentionPolicy = workspacesv1alpha1.WorkspaceRetentionPolicyRetain
+		if request.Name == "" {
+			workspace.Spec.RetentionPolicy = workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit
+		}
 	}
 	if environmentName != "" {
 		workspace.Spec.EnvironmentRef = &workspacesv1alpha1.LocalReference{Name: environmentName}

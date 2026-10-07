@@ -103,7 +103,7 @@ type WorkspaceLifecycle struct {
 	BeforeStop []WorkspaceLifecycleAction `json:"beforeStop,omitempty"`
 }
 
-// WorkspaceSpec defines one persistent development machine.
+// WorkspaceSpec defines a development machine with an explicit lifetime.
 type WorkspaceSpec struct {
 	// os selects the runtime operating system. It must match the image and
 	// any source Environment; changing it would invalidate persistent home state.
@@ -201,9 +201,19 @@ type WorkspaceSpec struct {
 	// +optional
 	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
 
-	// idleTimeout suspends an idle named Workspace. Zero or omitted disables it.
+	// idleTimeout suspends compute after inactivity. Zero or omitted disables it.
+	// Creation, Ready, resume, and execution completion advance activity.
+	// Pending and running executions block suspension; attach alone is not activity.
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('0s')",message="idleTimeout must not be negative"
 	// +optional
 	IdleTimeout *metav1.Duration `json:"idleTimeout,omitempty"`
+
+	// deleteAfterSuspended deletes the Workspace and owned storage after
+	// confirmed suspension. Zero or omitted keeps storage indefinitely. This
+	// interval is the recovery grace period; no automatic snapshot is taken.
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('0s')",message="deleteAfterSuspended must not be negative"
+	// +optional
+	DeleteAfterSuspended *metav1.Duration `json:"deleteAfterSuspended,omitempty"`
 
 	// retentionPolicy controls whether the Workspace is retained after all of its
 	// processes exit. It defaults to Retain.
@@ -231,6 +241,23 @@ type WorkspaceStatus struct {
 	// observedGeneration is the latest generation reflected by status.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// executionAdmissionClosed fences new command starts during automatic
+	// deletion. Only the controllers manage this field. It survives restarts and
+	// is reopened when deletion is cancelled; it never expires on a wall clock.
+	// +optional
+	ExecutionAdmissionClosed bool `json:"executionAdmissionClosed,omitempty"`
+
+	// lastActivityTime persists the latest observed creation, Ready, resume, or
+	// execution completion time so deleting execution history cannot shorten idle.
+	// +optional
+	LastActivityTime *metav1.Time `json:"lastActivityTime,omitempty"`
+
+	// suspendedAt starts the storage grace period after the runtime is confirmed
+	// absent. It is cleared on resume and survives controller restarts. Workspaces
+	// suspended before this field existed receive a fresh full grace period.
+	// +optional
+	SuspendedAt *metav1.Time `json:"suspendedAt,omitempty"`
 
 	// sourceEnvironmentRevision records the cloned Environment revision.
 	// +optional

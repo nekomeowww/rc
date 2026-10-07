@@ -1195,6 +1195,36 @@ spec:
                 required:
                 - name
                 type: object
+              executionRetention:
+                description: |-
+                  executionRetention bounds terminal execution history independently of this
+                  target's lifetime. Omission preserves existing history on upgrade.
+                properties:
+                  maxEntries:
+                    default: 500
+                    description: maxEntries keeps at most this many unpinned terminal
+                      records per target.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  transcriptTTL:
+                    default: 336h
+                    description: |-
+                      transcriptTTL removes transcripts before their execution records when due.
+                      Record deletion always removes its transcript, even when this TTL is longer.
+                    type: string
+                    x-kubernetes-validations:
+                    - message: transcript TTL must be positive
+                      rule: duration(self) > duration('0s')
+                  ttlAfterFinished:
+                    default: 168h
+                    description: ttlAfterFinished is measured from completedAt, never
+                      creation or start time.
+                    type: string
+                    x-kubernetes-validations:
+                    - message: TTL must be positive
+                      rule: duration(self) > duration('0s')
+                type: object
               idleTimeout:
                 description: idleTimeout suspends an idle named Workspace. Zero or
                   omitted disables it.
@@ -1589,6 +1619,12 @@ spec:
                 description: |-
                   homeVolumeClaimName contains mutable Workspace home state and transcripts.
                   It is empty for Darwin Workspaces, which use node-local host storage.
+                type: string
+              lastExecutionCompletedAt:
+                description: |-
+                  lastExecutionCompletedAt preserves the idle clock after execution history
+                  is collected. It only moves forward.
+                format: date-time
                 type: string
               observedGeneration:
                 description: observedGeneration is the latest generation reflected

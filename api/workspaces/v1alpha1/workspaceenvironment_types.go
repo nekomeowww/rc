@@ -32,6 +32,11 @@ const (
 
 // WorkspaceEnvironmentSpec defines the reusable image and home volume state.
 type WorkspaceEnvironmentSpec struct {
+	// executionRetention bounds terminal execution history independently of this
+	// target's lifetime. Omission preserves existing history on upgrade.
+	// +optional
+	ExecutionRetention *ExecutionRetentionPolicy `json:"executionRetention,omitempty"`
+
 	// os selects the image and persistent home's operating system.
 	// +kubebuilder:validation:Enum=linux;windows
 	// +kubebuilder:default=linux
@@ -67,6 +72,11 @@ type WorkspaceEnvironmentSpec struct {
 
 // WorkspaceEnvironmentStatus defines the observed state of WorkspaceEnvironment.
 type WorkspaceEnvironmentStatus struct {
+	// lastExecutionCompletedAt preserves the idle clock after execution history
+	// is collected. It only moves forward.
+	// +optional
+	LastExecutionCompletedAt *metav1.Time `json:"lastExecutionCompletedAt,omitempty"`
+
 	// observedGeneration is the latest generation reflected by status.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`

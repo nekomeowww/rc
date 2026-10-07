@@ -41,7 +41,7 @@ func NewCommand() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
-	root.AddCommand(newServeCommand(), newProcessCommand(), newLifecycleCommand(), newHealthCommand(), newTranscriptCommand())
+	root.AddCommand(newServeCommand(), newProcessCommand(), newLifecycleCommand(), newHealthCommand(), newTranscriptCommand(), newPruneTranscriptCommand())
 
 	return root
 }
@@ -70,6 +70,7 @@ func newLifecycleCommand() *cobra.Command {
 func newServeCommand() *cobra.Command {
 	var socketPath string
 	var stateDirectory string
+	var transcriptScope string
 	var stopGrace time.Duration
 	var maxTranscriptBytes int64
 	var initializeActions string
@@ -93,6 +94,9 @@ func newServeCommand() *cobra.Command {
 					return err
 				}
 			}
+			if err := runtime.PrepareTranscriptScope(stateDirectory, transcriptScope); err != nil {
+				return err
+			}
 			native := rcnative.Current()
 			supervisor := runtime.NewSupervisor(stateDirectory, stopGrace,
 				runtime.WithRoots(native.Home, native.Workspace, native.Run),
@@ -102,6 +106,7 @@ func newServeCommand() *cobra.Command {
 		},
 	}
 	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
+	command.Flags().StringVar(&transcriptScope, "transcript-scope", "", "Persistent target identity used to discard inherited transcript copies")
 	command.Flags().StringVar(&stateDirectory, "state-dir", rcnative.Current().StateDirectory(), "Persistent process state directory")
 	command.Flags().StringVar(&initializeActions, "initialize-actions", "", "Lifecycle actions run in the runtime container before readiness")
 	command.Flags().DurationVar(&stopGrace, "stop-grace", 10*time.Second, "Process stop grace period before forced tree termination")
@@ -112,7 +117,7 @@ func newServeCommand() *cobra.Command {
 
 func newProcessCommand() *cobra.Command {
 	command := &cobra.Command{Use: "process", Short: "Bridge one request to the local supervisor"}
-	command.AddCommand(newStartCommand(), newStateCommand("inspect"), newStateCommand("stop"), newAttachCommand(), newLogsCommand(), newResizeCommand())
+	command.AddCommand(newStartCommand(), newStateCommand("inspect"), newStateCommand("stop"), newAttachCommand(), newLogsCommand(), newResizeCommand(), newPruneProcessCommand())
 
 	return command
 }
@@ -260,4 +265,31 @@ func newTranscriptCommand() *cobra.Command {
 			_, err = io.Copy(command.OutOrStdout(), file)
 			return err
 		}}
+}
+
+// newPruneProcessCommand bridges cleanup through the live supervisor lock.
+func newPruneProcessCommand() *cobra.Command {
+	var socket, uid string
+	command := &cobra.Command{Use: "prune ID", Short: "Remove a terminal process transcript", Args: cobra.ExactArgs(1), RunE: func(command *cobra.Command, args []string) error {
+		if err := runtime.NewClient(socket).PruneTranscript(command.Context(), args[0], uid); err != nil {
+			return err
+		}
+		return json.NewEncoder(command.OutOrStdout()).Encode(processruntime.State{})
+	}}
+	command.Flags().StringVar(&socket, "socket", rcnative.Current().Endpoint, "Local supervisor endpoint")
+	command.Flags().StringVar(&uid, "uid", "", "Expected WorkspaceExec UID")
+	_ = command.MarkFlagRequired("uid")
+	return command
+}
+
+// newPruneTranscriptCommand processes one immutable offline batch. Each entry
+// is UID-checked and idempotent, so a partial failure can safely retry the batch.
+func newPruneTranscriptCommand() *cobra.Command {
+	return &cobra.Command{Use: "prune-transcripts BATCH_JSON", Short: "Remove a batch of offline transcripts", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error {
+		var batch []processruntime.TranscriptIdentity
+		if err := json.Unmarshal([]byte(args[0]), &batch); err != nil {
+			return err
+		}
+		return runtime.RemoveTranscripts(rcnative.Current().StateDirectory(), batch)
+	}}
 }

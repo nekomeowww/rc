@@ -156,3 +156,9 @@ func (client *Client) Ping(ctx context.Context) error {
 	_, err := client.stateRequest(ctx, protocolRequest{Action: "ping"})
 	return err
 }
+
+// PruneTranscript removes a terminal transcript through the supervisor lock.
+func (client *Client) PruneTranscript(ctx context.Context, id, uid string) error {
+	_, err := client.stateRequest(ctx, protocolRequest{Action: "prune", ID: id, UID: uid})
+	return err
+}

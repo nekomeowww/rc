@@ -21,6 +21,8 @@ import (
 	"strings"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -345,6 +347,7 @@ func TestRuntimePodEventEnqueuesBoundActiveWorkspaceExecs(t *testing.T) {
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(running, starting, terminal, unrelated).
+		WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionPodIndex, executionPodNames).
 		Build()
 	reconciler := &WorkspaceExecReconciler{Client: kubeClient, Scheme: scheme}
 
@@ -389,9 +392,10 @@ func TestDeletingActiveWorkspaceExecStopsOriginalRuntimeBeforeRemovingFinalizer(
 					Phase: phase, RuntimePodName: pod.Name, RuntimePodUID: string(pod.UID),
 				},
 			}
+			workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testWorkspaceName, Namespace: testNamespace}}
 			kubeClient := fake.NewClientBuilder().WithScheme(scheme).
-				WithStatusSubresource(process, pod).
-				WithObjects(process, pod).
+				WithStatusSubresource(process, pod, workspace).
+				WithObjects(process, pod, workspace).
 				Build()
 			runtimeClient := &recordingProcessRuntime{stopState: processruntime.State{
 				ID: process.Name, UID: string(process.UID), Phase: "Stopped",
@@ -404,8 +408,22 @@ func TestDeletingActiveWorkspaceExecStopsOriginalRuntimeBeforeRemovingFinalizer(
 			requirements.NoError(err, "stop runtime while finalizing WorkspaceExec")
 			requirements.Equal(process.Name, runtimeClient.stoppedID, "stop the UID-bound process")
 			requirements.Equal(pod.Name, runtimeClient.stoppedTarget.Pod, "stop the original runtime Pod")
-			err = kubeClient.Get(ctx, key, new(workspacesv1alpha1.WorkspaceExec))
-			requirements.Error(err, "WorkspaceExec is deleted after runtime stops")
+			err = kubeClient.Get(ctx, key, process)
+			requirements.NoError(err, "CR remains until the target service acknowledges transcript cleanup")
+			requirements.True(transcriptRequested(process))
+			requirements.Equal(workspacesv1alpha1.WorkspaceExecPhaseStopped, process.Status.Phase)
+			requirements.NotNil(process.Status.CompletedAt)
+			setTranscriptCondition(process, metav1.ConditionTrue, "TranscriptDeleted", "test cleanup acknowledgement")
+			requirements.NoError(kubeClient.Status().Update(ctx, process))
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			requirements.NoError(err)
+			requirements.True(apierrors.IsNotFound(kubeClient.Get(ctx, key, process)))
+			requirements.NoError(kubeClient.Get(ctx, client.ObjectKeyFromObject(workspace), workspace))
+			requirements.NotNil(workspace.Status.LastExecutionCompletedAt)
 		})
 	}
+}
+
+func (processRuntime *recordingProcessRuntime) PruneTranscript(context.Context, processruntime.Target, string, string) error {
+	return nil
 }

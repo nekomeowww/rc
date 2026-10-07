@@ -30,7 +30,7 @@ func TestWindowsWorkspaceRuntime(t *testing.T) {
 	t.Parallel()
 	assertions, requirements := assert.New(t), require.New(t)
 	workspace := &workspacesv1alpha1.Workspace{
-		ObjectMeta: metav1.ObjectMeta{Name: "electron", Namespace: "runtime-test"},
+		ObjectMeta: metav1.ObjectMeta{Name: "electron", Namespace: "runtime-test", UID: "workspace-uid"},
 		Spec:       workspacesv1alpha1.WorkspaceSpec{OS: corev1.Windows, NodeSelector: map[string]string{"pool": "desktop"}, Tolerations: []corev1.Toleration{{Key: "os", Value: string(corev1.Windows), Operator: corev1.TolerationOpEqual, Effect: corev1.TaintEffectNoSchedule}}},
 	}
 	action := lifecycle.Action{Script: `New-Item -ItemType Directory C:\workspace\app`}
@@ -48,8 +48,8 @@ func TestWindowsWorkspaceRuntime(t *testing.T) {
 	requirements.Len(pod.Spec.Containers, 1)
 	container := pod.Spec.Containers[0]
 	assertions.Empty(container.Command, "retain image entrypoint session initialization")
-	assertions.Equal([]string{testWindowsExecutable, "serve", "--socket", testWindowsEndpoint, "--state-dir", `C:\home\agent\.rc\processes`, "--initialize-actions"}, container.Args[:7])
-	actions, err := lifecycle.Decode(container.Args[7])
+	assertions.Equal([]string{testWindowsExecutable, "serve", "--socket", testWindowsEndpoint, "--state-dir", `C:\home\agent\.rc\processes`, "--transcript-scope", "workspace/workspace-uid", "--initialize-actions"}, container.Args[:9])
+	actions, err := lifecycle.Decode(container.Args[9])
 	requirements.NoError(err)
 	assertions.Equal([]lifecycle.Action{action}, actions)
 	assertions.Nil(container.SecurityContext)

@@ -23,6 +23,7 @@ const protocolVersion = 4
 type protocolRequest struct {
 	Version  int                          `json:"version"`
 	Action   string                       `json:"action"`
+	UID      string                       `json:"uid,omitempty"`
 	ID       string                       `json:"id,omitempty"`
 	ClientID string                       `json:"clientID,omitempty"`
 	Start    *processruntime.StartRequest `json:"start,omitempty"`

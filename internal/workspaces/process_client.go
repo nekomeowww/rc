@@ -28,6 +28,7 @@ import (
 	"golang.org/x/term"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -350,6 +351,9 @@ func (processes *ProcessClient) Stop(ctx context.Context, process *workspacesv1a
 }
 
 func (processes *ProcessClient) Logs(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec, output io.Writer) error {
+	if condition := meta.FindStatusCondition(process.Status.Conditions, workspacesv1alpha1.WorkspaceExecConditionTranscriptCleanup); condition != nil && condition.Status == metav1.ConditionTrue {
+		return fmt.Errorf("transcript for %s was removed at %s", process.Name, condition.LastTransitionTime.Format(time.RFC3339))
+	}
 	if process.Status.RuntimePodName != "" {
 		pod := new(corev1.Pod)
 		key := types.NamespacedName{Name: process.Status.RuntimePodName, Namespace: process.Namespace}
@@ -365,20 +369,20 @@ func (processes *ProcessClient) Logs(ctx context.Context, process *workspacesv1a
 		}
 	}
 
-	volume, err := processes.logVolume(ctx, process)
+	volume, err := ResolveTranscriptVolume(ctx, processes.Kube, process)
 	if err != nil {
 		return err
 	}
-	if volume.runtime.OS() == rcplatform.Darwin {
+	if volume.Runtime.OS() == rcplatform.Darwin {
 		return fmt.Errorf("darwin process logs require the Workspace runtime Pod to be running")
 	}
 	if processes.Config == nil {
 		return fmt.Errorf("kubernetes REST config is required for suspended transcript reads")
 	}
 	helperName := boundedDNSName(process.Name + "-logs")
-	helper, err := volume.runtime.TranscriptReaderPod(rcplatform.TranscriptPodIntent{
+	helper, err := volume.Runtime.TranscriptReaderPod(rcplatform.TranscriptPodIntent{
 		Metadata: metav1.ObjectMeta{Name: helperName, Namespace: process.Namespace},
-		Image:    volume.image, HomeClaim: volume.claim, ProcessID: process.Name,
+		Image:    volume.Image, HomeClaim: volume.Claim, ProcessID: process.Name,
 	})
 	if err != nil {
 		return fmt.Errorf("build WorkspaceExec log helper Pod: %w", err)
@@ -411,49 +415,6 @@ func (processes *ProcessClient) Logs(ctx context.Context, process *workspacesv1a
 	_, err = io.Copy(output, stream)
 
 	return err
-}
-
-type transcriptVolume struct {
-	claim, image string
-	runtime      rcplatform.Runtime
-}
-
-func (processes *ProcessClient) logVolume(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) (transcriptVolume, error) {
-	switch process.Spec.TargetRef.Kind {
-	case workspacesv1alpha1.WorkspaceExecTargetWorkspace:
-		workspace := new(workspacesv1alpha1.Workspace)
-		key := types.NamespacedName{Name: process.Spec.TargetRef.Name, Namespace: process.Namespace}
-		if err := processes.Kube.Get(ctx, key, workspace); err != nil {
-			return transcriptVolume{}, fmt.Errorf("get WorkspaceExec Workspace for logs: %w", err)
-		}
-		platform, err := rcplatform.Resolve(rcplatform.Target{OS: workspace.Spec.OS, Placement: rcplatform.Placement{
-			NodeSelector: workspace.Spec.NodeSelector, Tolerations: workspace.Spec.Tolerations,
-			Affinity: workspace.Spec.Affinity, RuntimeClassName: workspace.Spec.RuntimeClassName,
-		}})
-		if err != nil {
-			return transcriptVolume{}, fmt.Errorf("resolve WorkspaceExec Workspace log platform: %w", err)
-		}
-		return transcriptVolume{claim: workspace.Status.HomeVolumeClaimName, image: workspace.Status.RuntimeImage, runtime: platform}, nil
-	case workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment:
-		environment := new(workspacesv1alpha1.WorkspaceEnvironment)
-		key := types.NamespacedName{Name: process.Spec.TargetRef.Name, Namespace: process.Namespace}
-		if err := processes.Kube.Get(ctx, key, environment); err != nil {
-			return transcriptVolume{}, fmt.Errorf("get WorkspaceExec WorkspaceEnvironment for logs: %w", err)
-		}
-		claimName := environment.Status.DraftVolumeClaimName
-		if claimName == "" {
-			claimName = environment.Status.CurrentVolumeClaimName
-		}
-		platform, err := rcplatform.Resolve(rcplatform.Target{OS: environment.Spec.OS, Placement: rcplatform.Placement{
-			NodeSelector: environment.Spec.NodeSelector, Tolerations: environment.Spec.Tolerations,
-		}})
-		if err != nil {
-			return transcriptVolume{}, fmt.Errorf("resolve WorkspaceExec WorkspaceEnvironment log platform: %w", err)
-		}
-		return transcriptVolume{claim: claimName, image: environment.Spec.Image, runtime: platform}, nil
-	default:
-		return transcriptVolume{}, fmt.Errorf("process %s has unsupported target kind %s", process.Name, process.Spec.TargetRef.Kind)
-	}
 }
 
 func processPhaseTerminal(phase workspacesv1alpha1.WorkspaceExecPhase) bool {

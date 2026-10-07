@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -286,4 +288,11 @@ func TestExecutionCommandsRejectRemovedCredentialAlias(t *testing.T) {
 		assert.Contains(t, err.Error(), "unknown flag")
 		require.NotNil(t, cmd.Flag("credential"))
 	}
+}
+
+func TestProcessListSelectorsBoundDefaultPSHistoryTransfer(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, client.MatchingFields{"status.phase": "Running"}, processListSelectors(listOptions{}))
+	require.Empty(t, processListSelectors(listOptions{all: true}))
+	require.Equal(t, client.MatchingFields{"spec.targetRef.name": "coding", "status.phase": "Failed"}, processListSelectors(listOptions{workspace: "coding", phase: "failed"}))
 }

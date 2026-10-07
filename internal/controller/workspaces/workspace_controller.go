@@ -957,8 +957,9 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 				workspaceRuntimePolicyAnnotation: workspaceRuntimePolicyVersion,
 			},
 		}, Image: resolved.image, HomeClaim: workspace.Name, HomeHostPath: resolved.homeHostPath,
-		HotMountRoot:   hotMountRoot,
-		ServiceAccount: resolved.serviceAccount, AutomountToken: resolved.automountSAToken,
+		HotMountRoot:    hotMountRoot,
+		TranscriptScope: "workspace/" + string(workspace.UID),
+		ServiceAccount:  resolved.serviceAccount, AutomountToken: resolved.automountSAToken,
 		Resources: workspace.Spec.Resources, AdditionalVolumes: resolved.volumes, AdditionalMounts: resolved.volumeMounts,
 		Initializers: initializers, BeforeStop: resolved.beforeStop,
 	})
@@ -1038,14 +1039,14 @@ func runtimePlatformCondition(err error) (string, string) {
 	}
 }
 
-func workspaceProcessState(ctx context.Context, kubeClient client.Client, workspace *workspacesv1alpha1.Workspace) (bool, bool, *metav1.Time, error) {
+func workspaceProcessState(ctx context.Context, kubeClient client.Reader, workspace *workspacesv1alpha1.Workspace) (bool, bool, *metav1.Time, error) {
 	processes := new(workspacesv1alpha1.WorkspaceExecList)
 	if err := kubeClient.List(ctx, processes, client.InNamespace(workspace.Namespace)); err != nil {
 		return false, false, nil, fmt.Errorf("list Workspace processes: %w", err)
 	}
-	hasProcesses := false
+	hasProcesses := workspace.Status.LastExecutionCompletedAt != nil
 	active := false
-	var lastCompletion *metav1.Time
+	lastCompletion := workspace.Status.LastExecutionCompletedAt.DeepCopy()
 	for index := range processes.Items {
 		process := &processes.Items[index]
 		if process.Spec.TargetRef.Kind != workspacesv1alpha1.WorkspaceExecTargetWorkspace || process.Spec.TargetRef.Name != workspace.Name {

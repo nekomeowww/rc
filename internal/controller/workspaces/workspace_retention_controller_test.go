@@ -23,6 +23,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,6 +40,7 @@ func TestTemporaryWorkspaceDeletionDoesNotDependOnRuntimeTopology(t *testing.T) 
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
+	requirements.NoError(corev1.AddToScheme(scheme))
 	completedAt := metav1.NewTime(time.Now().Add(-temporaryWorkspaceCleanupDelay - time.Second))
 	workspace := &workspacesv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{Name: "temporary", Namespace: testNamespace, Finalizers: []string{workspaceFinalizer}},
@@ -57,7 +59,7 @@ func TestTemporaryWorkspaceDeletionDoesNotDependOnRuntimeTopology(t *testing.T) 
 		},
 		Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, CompletedAt: &completedAt},
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, process).WithObjects(workspace, process).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).WithStatusSubresource(workspace, process).WithObjects(workspace, process).Build()
 	reconciler := &WorkspaceRetentionReconciler{Client: kubeClient}
 
 	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
@@ -74,6 +76,7 @@ func TestTemporaryWorkspaceWaitsDuringTerminalGracePeriod(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
+	requirements.NoError(corev1.AddToScheme(scheme))
 	completedAt := metav1.Now()
 	workspace := &workspacesv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{Name: "observing", Namespace: testNamespace, Finalizers: []string{workspaceFinalizer}},
@@ -89,7 +92,7 @@ func TestTemporaryWorkspaceWaitsDuringTerminalGracePeriod(t *testing.T) {
 		},
 		Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, CompletedAt: &completedAt},
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, process).WithObjects(workspace, process).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).WithStatusSubresource(workspace, process).WithObjects(workspace, process).Build()
 	reconciler := &WorkspaceRetentionReconciler{Client: kubeClient}
 
 	result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
@@ -107,6 +110,7 @@ func TestAbandonedTemporaryWorkspaceDeletesWithoutWorkspaceExec(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
+	requirements.NoError(corev1.AddToScheme(scheme))
 	workspace := &workspacesv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "abandoned", Namespace: testNamespace, Finalizers: []string{workspaceFinalizer},
@@ -116,7 +120,7 @@ func TestAbandonedTemporaryWorkspaceDeletesWithoutWorkspaceExec(t *testing.T) {
 			RetentionPolicy: workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit,
 		},
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).WithObjects(workspace).Build()
 	reconciler := &WorkspaceRetentionReconciler{Client: kubeClient}
 
 	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
@@ -133,6 +137,7 @@ func TestNewTemporaryWorkspaceWaitsForWorkspaceExecCreation(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
+	requirements.NoError(corev1.AddToScheme(scheme))
 	workspace := &workspacesv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "starting", Namespace: testNamespace,
@@ -142,7 +147,7 @@ func TestNewTemporaryWorkspaceWaitsForWorkspaceExecCreation(t *testing.T) {
 			RetentionPolicy: workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit,
 		},
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).WithObjects(workspace).Build()
 	reconciler := &WorkspaceRetentionReconciler{Client: kubeClient}
 
 	result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})

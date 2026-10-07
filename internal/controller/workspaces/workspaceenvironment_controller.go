@@ -173,7 +173,7 @@ func (r *WorkspaceEnvironmentReconciler) reconcileEditorLifecycle(ctx context.Co
 	if err := r.List(ctx, processes, client.InNamespace(environment.Namespace)); err != nil {
 		return ctrl.Result{}, true, fmt.Errorf("list Environment editor processes: %w", err)
 	}
-	var lastCompletion *metav1.Time
+	lastCompletion := environment.Status.LastExecutionCompletedAt.DeepCopy()
 	for index := range processes.Items {
 		process := &processes.Items[index]
 		if process.Spec.TargetRef.Kind != workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment || process.Spec.TargetRef.Name != environment.Name {

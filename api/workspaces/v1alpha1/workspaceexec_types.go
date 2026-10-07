@@ -46,6 +46,7 @@ const (
 	WorkspaceExecPhaseStopped               WorkspaceExecPhase        = "Stopped"
 	WorkspaceExecPhaseLost                  WorkspaceExecPhase        = "Lost"
 	WorkspaceExecConditionReady                                       = ConditionReady
+	WorkspaceExecConditionTranscriptCleanup                           = "TranscriptCleanup"
 )
 
 // WorkspaceExecTargetReference selects a Workspace or Environment draft.
@@ -73,10 +74,38 @@ type ProcessEnvironmentVariable struct {
 	Key string `json:"key,omitempty"`
 }
 
+// ExecutionRetentionPolicy bounds unpinned terminal records and their transcripts.
+// Age and count limits are combined with OR; failures have no implicit exemption.
+type ExecutionRetentionPolicy struct {
+	// ttlAfterFinished is measured from completedAt, never creation or start time.
+	// +kubebuilder:default="168h"
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="TTL must be positive"
+	// +optional
+	TTLAfterFinished *metav1.Duration `json:"ttlAfterFinished,omitempty"`
+
+	// maxEntries keeps at most this many unpinned terminal records per target.
+	// +kubebuilder:default=500
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MaxEntries int32 `json:"maxEntries,omitempty"`
+
+	// transcriptTTL removes transcripts before their execution records when due.
+	// +kubebuilder:default="336h"
+	// Record deletion always removes its transcript, even when this TTL is longer.
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="transcript TTL must be positive"
+	// +optional
+	TranscriptTTL *metav1.Duration `json:"transcriptTTL,omitempty"`
+}
+
 // WorkspaceExecSpec defines one immutable, at-most-once command.
 // +kubebuilder:validation:XValidation:rule="self.targetRef == oldSelf.targetRef && self.command == oldSelf.command && has(self.workingDirectory) == has(oldSelf.workingDirectory) && (!has(self.workingDirectory) || self.workingDirectory == oldSelf.workingDirectory) && has(self.tty) == has(oldSelf.tty) && (!has(self.tty) || self.tty == oldSelf.tty) && has(self.envSecretRef) == has(oldSelf.envSecretRef) && (!has(self.envSecretRef) || self.envSecretRef == oldSelf.envSecretRef) && has(self.env) == has(oldSelf.env) && (!has(self.env) || self.env == oldSelf.env) && has(self.agentType) == has(oldSelf.agentType) && (!has(self.agentType) || self.agentType == oldSelf.agentType) && has(self.agentCredentialRef) == has(oldSelf.agentCredentialRef) && (!has(self.agentCredentialRef) || self.agentCredentialRef == oldSelf.agentCredentialRef) && has(self.credentialRefs) == has(oldSelf.credentialRefs) && (!has(self.credentialRefs) || self.credentialRefs == oldSelf.credentialRefs)",message="process execution fields are immutable"
 // +kubebuilder:validation:XValidation:rule="has(oldSelf.desiredState) && oldSelf.desiredState == 'Stopped' ? has(self.desiredState) && self.desiredState == 'Stopped' : true",message="a stopped process cannot return to Running"
 type WorkspaceExecSpec struct {
+	// retain exempts this execution and transcript from automatic retention.
+	// Explicit deletion still removes both. Default false.
+	// +optional
+	Retain bool `json:"retain,omitempty"`
+
 	// targetRef selects the owning runtime.
 	// +required
 	TargetRef WorkspaceExecTargetReference `json:"targetRef"`
@@ -124,6 +153,13 @@ type WorkspaceExecSpec struct {
 
 // WorkspaceExecStatus defines the observed state of WorkspaceExec.
 type WorkspaceExecStatus struct {
+	// transcriptVolumeClaimName pins the original volume across Environment commits.
+	// +optional
+	TranscriptVolumeClaimName string `json:"transcriptVolumeClaimName,omitempty"`
+	// transcriptVolumeClaimUID prevents cleaning a replacement PVC with the same name.
+	// +optional
+	TranscriptVolumeClaimUID string `json:"transcriptVolumeClaimUID,omitempty"`
+
 	// observedGeneration is the latest generation reflected by status.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
@@ -183,6 +219,7 @@ type WorkspaceExecStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:selectablefield:JSONPath=".spec.targetRef.name"
+// +kubebuilder:selectablefield:JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Target",type=string,JSONPath=".spec.targetRef.name"
 // +kubebuilder:printcolumn:name="TTY",type=boolean,JSONPath=".spec.tty"
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=".status.phase"

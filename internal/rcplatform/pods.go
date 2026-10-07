@@ -1,9 +1,12 @@
 package rcplatform
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
+
+	processruntime "github.com/nekomeowww/rc/internal/execution"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,6 +40,7 @@ type WorkspacePodIntent struct {
 	Metadata          metav1.ObjectMeta
 	Image, HomeClaim  string
 	HomeHostPath      string
+	TranscriptScope   string
 	HotMountRoot      string
 	ServiceAccount    string
 	AutomountToken    bool
@@ -106,6 +110,9 @@ func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, err
 	}
 
 	serveArgs := []string{socketArgument, runtime.layout.endpoint, stateDirectoryArgument, runtime.join(runtime.layout.home, ".rc", "processes")}
+	if intent.TranscriptScope != "" {
+		serveArgs = append(serveArgs, "--transcript-scope", intent.TranscriptScope)
+	}
 	container := corev1.Container{
 		Name: runtimeContainerName, Image: intent.Image,
 		Command: []string{runtime.layout.executable, serveCommand}, Args: serveArgs,
@@ -187,10 +194,11 @@ func (runtime Runtime) darwinWorkspacePod(intent WorkspacePodIntent) (*corev1.Po
 
 // EditorPodIntent describes the mutable WorkspaceEnvironment editor runtime.
 type EditorPodIntent struct {
-	Metadata       metav1.ObjectMeta
-	Image          string
-	HomeClaim      string
-	ServiceAccount string
+	TranscriptScope string
+	Metadata        metav1.ObjectMeta
+	Image           string
+	HomeClaim       string
+	ServiceAccount  string
 }
 
 // EnvironmentEditorPod compiles a final editor Pod for the target OS.
@@ -207,6 +215,9 @@ func (runtime Runtime) EnvironmentEditorPod(intent EditorPodIntent) (*corev1.Pod
 		Args:           []string{socketArgument, runtime.layout.endpoint, stateDirectoryArgument, runtime.join(runtime.layout.home, ".rc", "processes")},
 		ReadinessProbe: runtime.readinessProbe(), VolumeMounts: mounts,
 		SecurityContext: runtimepolicy.ContainerSecurityContext(runtime.os),
+	}
+	if intent.TranscriptScope != "" {
+		container.Args = append(container.Args, "--transcript-scope", intent.TranscriptScope)
 	}
 	var initContainers []corev1.Container
 	if runtime.os == corev1.Windows {
@@ -293,4 +304,30 @@ func affinityClone(input *corev1.Affinity) *corev1.Affinity {
 		return nil
 	}
 	return input.DeepCopy()
+}
+
+// TranscriptCleanupPod compiles a narrowly scoped, writable offline helper.
+// It preserves placement and security policy while disabling API credentials.
+func (runtime Runtime) TranscriptCleanupPod(intent TranscriptPodIntent, batch []processruntime.TranscriptIdentity) (*corev1.Pod, error) {
+	if runtime.OS() == Darwin {
+		return nil, fmt.Errorf("darwin transcript cleanup requires a running Workspace")
+	}
+	if len(batch) == 0 {
+		return nil, fmt.Errorf("transcript cleanup batch is empty")
+	}
+	intent.ProcessID = batch[0].ID
+	pod, err := runtime.TranscriptReaderPod(intent)
+	if err != nil {
+		return nil, err
+	}
+	pod.Spec.Containers[0].Name = "cleaner"
+	payload, err := json.Marshal(batch)
+	if err != nil {
+		return nil, err
+	}
+	pod.Spec.Containers[0].Command = []string{runtime.layout.executable, "prune-transcripts"}
+	pod.Spec.Containers[0].Args = []string{string(payload)}
+	pod.Spec.Containers[0].VolumeMounts[0].ReadOnly = false
+	pod.Spec.Volumes[0].PersistentVolumeClaim.ReadOnly = false
+	return pod, nil
 }

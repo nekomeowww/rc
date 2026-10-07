@@ -163,6 +163,36 @@ func TestDeletedExecUsesTargetServiceWithPolicyDisabled(t *testing.T) {
 	require.NoFileExists(t, transcript)
 }
 
+// ROOT CAUSE: the Workspace retention controller skipped the target service
+// without a policy, so an explicitly deleted execution never released.
+func TestWorkspaceRetentionDischargesDeletedExecWithoutPolicy(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	kube, ws, process := transcriptFixture(t)
+	ws.Spec.ExecutionRetention = nil
+	require.NoError(t, kube.Update(ctx, ws))
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "live-runtime", Namespace: testNamespace, UID: "pod-uid", Labels: map[string]string{workspaceManagedByLabel: ws.Name}}, Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: transcriptHomeVolumeName, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: testTranscriptHomeClaim}}}}}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+	require.NoError(t, controllerutil.SetControllerReference(ws, pod, kube.Scheme()))
+	require.NoError(t, kube.Create(ctx, pod))
+	directory := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(directory, process.Name), 0o700))
+	transcript := filepath.Join(directory, process.Name, "transcript.log")
+	require.NoError(t, os.WriteFile(transcript, []byte("history"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, process.Name, "owner.uid"), []byte(process.UID), 0o600))
+	require.NoError(t, kube.Delete(ctx, process))
+	request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(process)}
+	exec := &WorkspaceExecReconciler{Client: kube, APIReader: kube}
+	_, err := exec.Reconcile(ctx, request)
+	require.NoError(t, err)
+	retention := &WorkspaceRetentionReconciler{Client: kube, APIReader: kube, Runtime: &filesystemProcessRuntime{supervisor: rckube.NewSupervisor(directory, time.Second)}}
+	_, err = retention.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(ws)})
+	require.NoError(t, err)
+	_, err = exec.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.True(t, apierrors.IsNotFound(kube.Get(ctx, request.NamespacedName, process)))
+	require.NoFileExists(t, transcript)
+}
+
 func TestWholeStorageLifecycleReleasesExecutionWithoutWorker(t *testing.T) {
 	t.Parallel()
 	for _, change := range []string{"target-deleting", "target-replaced", "pvc-deleting", "pvc-replaced", "pvc-missing"} {

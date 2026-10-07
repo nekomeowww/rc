@@ -198,10 +198,14 @@ func (r *WorkspaceRetentionReconciler) reconcileExecutions(ctx context.Context, 
 	policy := workspace.Spec.ExecutionRetention
 	if workspace.Spec.IsTemporary() {
 		policy = nil
-	} else if policy == nil {
-		return ctrl.Result{}, nil
 	}
-	return (&executionRetentionService{Client: r.Client, APIReader: r.APIReader, Runtime: r.Runtime}).reconcileTarget(ctx, workspace, policy)
+	result, err := (&executionRetentionService{Client: r.Client, APIReader: r.APIReader, Runtime: r.Runtime}).reconcileTarget(ctx, workspace, policy)
+	if policy == nil && !workspace.Spec.IsTemporary() {
+		// Without a policy nothing expires by time: explicitly deleted executions
+		// are discharged through WorkspaceExec and worker Pod events instead.
+		result = ctrl.Result{}
+	}
+	return result, err
 }
 
 func earlierResult(a, b ctrl.Result) ctrl.Result {

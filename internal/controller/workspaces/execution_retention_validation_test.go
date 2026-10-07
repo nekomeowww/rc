@@ -23,8 +23,8 @@ var _ = Describe("Execution retention API", func() {
 		Expect(workspace.Spec.ExecutionRetention).To(BeNil())
 		workspace.Spec.ExecutionRetention = &workspacesv1alpha1.ExecutionRetentionPolicy{}
 		Expect(k8sClient.Update(ctx, workspace)).To(Succeed())
-		Expect(workspace.Spec.ExecutionRetention.MaxEntries).To(Equal(int32(500)))
-		Expect(workspace.Spec.ExecutionRetention.TTLAfterFinished.Duration).To(Equal(7 * 24 * time.Hour))
+		Expect(workspace.Spec.ExecutionRetention.MaxEntries).To(Equal(int32(3000)))
+		Expect(workspace.Spec.ExecutionRetention.TTLAfterFinished.Duration).To(Equal(90 * 24 * time.Hour))
 		Expect(workspace.Spec.ExecutionRetention.TranscriptTTL.Duration).To(Equal(14 * 24 * time.Hour))
 		workspace.Spec.ExecutionRetention.TranscriptTTL = &metav1.Duration{Duration: -time.Hour}
 		Expect(k8sClient.Update(ctx, workspace)).NotTo(Succeed())

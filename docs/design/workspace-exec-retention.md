@@ -12,8 +12,8 @@ no automatic cleanup; `{}` enables the template below. Policies are not inherite
 ```yaml
 spec:
   executionRetention:
-    ttlAfterFinished: 168h
-    maxEntries: 500
+    ttlAfterFinished: 2160h
+    maxEntries: 3000
     transcriptTTL: 336h
 ```
 
@@ -119,7 +119,7 @@ are replaced by stable-target batch ownership and lifecycle tests.
 
 Keep focused responsibilities:
 
-- Pure policy tests: opt-in, 7d/500, boundaries, pins, phases, deterministic count.
+- Pure policy tests: opt-in, 90d/3000, boundaries, pins, phases, deterministic count.
 - Controller tests: core concurrent changes once on Workspace, one Environment
   smoke, stale API cache, conflict isolation and post-finalizer/count revalidation.
 - Storage tests: batch size/ownership, retry and acknowledgement loss, pin/PVC
@@ -174,7 +174,7 @@ No product controller/runner deployment or ihome operation is involved.
 - `go test -race ... -count=1`: passed for Workspace controllers, rckube,
   execution transport, Workspace client, execution CLI, runner CLI and platform.
 - Envtest (`TestControllers`, Kubernetes 1.36.2, `-count=1`): all four specs passed,
-  including opt-in 7d/500/14d defaults and API validation/selectable fields.
+  including opt-in 90d/3000/14d defaults and API validation/selectable fields.
 - Real foreground GC (`TestForegroundTranscriptCleanupWithGarbageCollector`,
   Kind Kubernetes 1.36.1, `-count=2`): both runs passed. Execution deletion kept
   the worker alive; target deletion collected it and released execution cleanup.

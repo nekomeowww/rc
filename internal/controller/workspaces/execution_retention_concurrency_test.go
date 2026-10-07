@@ -37,7 +37,7 @@ func retentionFixture(t *testing.T) (client.WithWatch, *workspacesv1alpha1.Works
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
-	ws := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testRetentionRaceTarget, Namespace: testNamespace, UID: "target-uid"}, Spec: workspacesv1alpha1.WorkspaceSpec{ExecutionRetention: &workspacesv1alpha1.ExecutionRetentionPolicy{}}}
+	ws := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testRetentionRaceTarget, Namespace: testNamespace, UID: "target-uid"}, Spec: workspacesv1alpha1.WorkspaceSpec{ExecutionRetention: &workspacesv1alpha1.ExecutionRetentionPolicy{TTLAfterFinished: &metav1.Duration{Duration: 7 * 24 * time.Hour}}}}
 	done := metav1.NewTime(time.Now().Add(-30 * 24 * time.Hour))
 	process := &workspacesv1alpha1.WorkspaceExec{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: testNamespace, UID: "a-uid"}, Spec: workspacesv1alpha1.WorkspaceExecSpec{TargetRef: executionTargetReference(ws)}, Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseFailed, CompletedAt: &done}}
 	require.NoError(t, controllerutil.SetControllerReference(ws, process, scheme))
@@ -194,7 +194,7 @@ func TestRetentionUsesAPIReaderInsteadOfStaleCache(t *testing.T) {
 	ctx := t.Context()
 	scheme := runtime.NewScheme()
 	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
-	ws := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testRetentionRaceTarget, Namespace: testNamespace}, Spec: workspacesv1alpha1.WorkspaceSpec{ExecutionRetention: &workspacesv1alpha1.ExecutionRetentionPolicy{}}}
+	ws := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testRetentionRaceTarget, Namespace: testNamespace}, Spec: workspacesv1alpha1.WorkspaceSpec{ExecutionRetention: &workspacesv1alpha1.ExecutionRetentionPolicy{TTLAfterFinished: &metav1.Duration{Duration: 7 * 24 * time.Hour}}}}
 	done := metav1.NewTime(time.Now().Add(-30 * 24 * time.Hour))
 	process := &workspacesv1alpha1.WorkspaceExec{ObjectMeta: metav1.ObjectMeta{Name: "pinned", Namespace: testNamespace, UID: "old"}, Spec: workspacesv1alpha1.WorkspaceExecSpec{TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: ws.Name}}, Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseFailed, CompletedAt: &done}}
 	cache := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ws, process).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()

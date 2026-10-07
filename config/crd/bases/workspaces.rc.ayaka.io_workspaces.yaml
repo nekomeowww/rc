@@ -1210,7 +1210,7 @@ spec:
                   target's lifetime. Omission preserves existing history on upgrade.
                 properties:
                   maxEntries:
-                    default: 500
+                    default: 3000
                     description: maxEntries keeps at most this many unpinned terminal
                       records per target.
                     format: int32
@@ -1226,7 +1226,7 @@ spec:
                     - message: transcript TTL must be positive
                       rule: duration(self) > duration('0s')
                   ttlAfterFinished:
-                    default: 168h
+                    default: 2160h
                     description: ttlAfterFinished is measured from completedAt, never
                       creation or start time.
                     type: string

@@ -78,13 +78,13 @@ type ProcessEnvironmentVariable struct {
 // Age and count limits are combined with OR; failures have no implicit exemption.
 type ExecutionRetentionPolicy struct {
 	// ttlAfterFinished is measured from completedAt, never creation or start time.
-	// +kubebuilder:default="168h"
+	// +kubebuilder:default="2160h"
 	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="TTL must be positive"
 	// +optional
 	TTLAfterFinished *metav1.Duration `json:"ttlAfterFinished,omitempty"`
 
 	// maxEntries keeps at most this many unpinned terminal records per target.
-	// +kubebuilder:default=500
+	// +kubebuilder:default=3000
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	MaxEntries int32 `json:"maxEntries,omitempty"`

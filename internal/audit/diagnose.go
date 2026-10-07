@@ -49,13 +49,14 @@ func resourceFindings(r Resource, g graph, inventory Inventory, policy Policy) [
 		for _, ref := range g.incoming(r) {
 			related = append(related, ref.Target)
 		}
-		leases := g.leases(r)
-		for _, lease := range leases {
-			related = append(related, lease.ObjectRef)
+		for _, ref := range r.References {
+			if ref.Relation == holderRelation {
+				related = append(related, ref.Target)
+			}
 		}
 		code, details := deletionEvidence(r, inventory.ObservedAt.Time, policy)
-		for _, lease := range leases {
-			details.WriteString("; Lease=" + lease.Name + " holder=" + lease.Holder + " reservation=" + lease.Reservation)
+		if len(r.Holders) > 0 {
+			details.WriteString("; holders=" + holderList(r.Holders))
 		}
 		add(code, "warning", details.String(), related...)
 	}
@@ -73,7 +74,7 @@ func resourceFindings(r Resource, g graph, inventory Inventory, policy Policy) [
 		findings = append(findings, dependencyFindings(r, g, inventory)...)
 	}
 	if r.Kind == worktreeKind && inventory.Complete && r.DeletingAt == nil && len(g.worktreeBlockers(r, inventory, policy)) == 0 {
-		add("UnreferencedWorktree", "warning", "No observed mounts, active/recent executions, live PVC consumers or Leases; Git data safety remains unknown")
+		add("UnreferencedWorktree", "warning", "No observed mounts, active/recent executions, live PVC consumers or holders; Git data safety remains unknown")
 	}
 	pvcFindings(r, g, policy, add)
 	if isHistory(r) && r.Terminal {

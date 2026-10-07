@@ -8,7 +8,6 @@ import (
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
-	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,7 +17,6 @@ import (
 
 	repositories "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspaces "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
-	"github.com/nekomeowww/rc/internal/repositoryaccess"
 )
 
 const (
@@ -30,14 +28,15 @@ const (
 	workspaceKind            = "Workspace"
 	workspaceEnvironmentKind = "WorkspaceEnvironment"
 	workspaceExecKind        = "WorkspaceExec"
+	worktreeExecKind         = "WorktreeExec"
 	workspaceExecFinalizer   = "workspaces.rc.ayaka.io/workspace-exec"
-	leaseKind                = "Lease"
 	podKind                  = "Pod"
 	jobKind                  = "Job"
 	ownerRelation            = "owner"
 	pvcRelation              = "storage"
 	runtimeRelation          = "runtime"
 	mountRelation            = "mount"
+	holderRelation           = "holder"
 )
 
 // Scan reads all evidence in a namespace (or all namespaces when empty).
@@ -107,7 +106,6 @@ func evidenceLists() []client.ObjectList {
 		{&corev1.PodList{}, "v1", "PodList"},
 		{&corev1.EventList{}, "v1", "EventList"},
 		{&batchv1.JobList{}, "batch/v1", "JobList"},
-		{&coordinationv1.LeaseList{}, "coordination.k8s.io/v1", "LeaseList"},
 	}
 	result := make([]client.ObjectList, 0, len(lists))
 	for _, item := range lists {
@@ -142,9 +140,13 @@ func projectRC(r *Resource, object client.Object) {
 		r.reference(repoAPI, repositoryKind, o.Spec.RepositoryRef.Name, "source")
 		r.storage(o.Status.VolumeClaimName)
 		r.reference("batch/v1", jobKind, o.Status.JobName, "bootstrap")
+		r.holders(o.Status.UsedBy)
 	case *repositories.Repository:
 		r.Conditions, r.ObservedGeneration = o.Status.Conditions, o.Status.ObservedGeneration
 		r.storage(o.Status.VolumeClaimName)
+		if o.Status.Access != nil {
+			r.holders(o.Status.Access.Holders)
+		}
 	case *workspaces.Workspace:
 		r.Conditions, r.ObservedGeneration, r.Phase = o.Status.Conditions, o.Status.ObservedGeneration, string(o.Spec.DesiredState)
 		r.Lifecycle = o.Status.Lifecycle
@@ -196,6 +198,19 @@ func (r *Resource) storage(name string) {
 	r.reference("v1", pvcKind, name, pvcRelation)
 }
 
+// holders records the published holders and references each one by UID, so
+// doctor attributes a Worktree or Repository to the resources that hold it.
+func (r *Resource) holders(holders []repositories.UsageReference) {
+	r.Holders = slices.Clone(holders)
+	for _, holder := range holders {
+		api := repoAPI
+		if holder.Kind == workspaceKind {
+			api = workspaceAPI
+		}
+		r.References = append(r.References, Reference{Relation: holderRelation, Target: ObjectRef{APIVersion: api, Kind: holder.Kind, Namespace: r.Namespace, Name: holder.Name, UID: holder.UID}})
+	}
+}
+
 // projectResult reads the controller-published completion time. A terminal
 // record without status.completedAt stays undated, which keeps it active for
 // age-based evidence.
@@ -238,12 +253,6 @@ func projectKubernetes(r *Resource, object client.Object) {
 			}
 		}
 		projectVolumes(r, o.Spec.Template.Spec.Volumes)
-	case *coordinationv1.Lease:
-		if o.Spec.HolderIdentity != nil {
-			r.Holder = *o.Spec.HolderIdentity
-		}
-		// Repository reservations are durable; expiration is never a release.
-		r.Reservation = o.Annotations[repositoryaccess.StateAnnotation]
 	case *corev1.Event:
 		r.Reason, r.Phase, r.Message = o.Reason, o.Type, o.Message
 		r.References = append(r.References, Reference{Relation: "event", Target: ObjectRef{APIVersion: o.InvolvedObject.APIVersion, Kind: o.InvolvedObject.Kind, Namespace: o.InvolvedObject.Namespace, Name: o.InvolvedObject.Name, UID: o.InvolvedObject.UID}})

@@ -2,14 +2,13 @@ package audit
 
 import (
 	"slices"
+	"strings"
 	"time"
 
-	coordinationv1 "k8s.io/api/coordination/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	repositories "github.com/nekomeowww/rc/api/repositories/v1alpha1"
-	"github.com/nekomeowww/rc/internal/repositoryaccess"
-	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
 type graph struct {
@@ -48,7 +47,7 @@ func (g graph) resolve(ref ObjectRef) (Resource, bool) {
 func isRC(r Resource) bool { return r.APIVersion == repoAPI || r.APIVersion == workspaceAPI }
 
 func isHistory(r Resource) bool {
-	return (r.APIVersion == workspaceAPI && r.Kind == workspaceExecKind) || (r.APIVersion == repoAPI && slices.Contains([]string{"WorktreeExec", "RepositoryExec", "RepositorySync"}, r.Kind))
+	return (r.APIVersion == workspaceAPI && r.Kind == workspaceExecKind) || (r.APIVersion == repoAPI && slices.Contains([]string{worktreeExecKind, "RepositoryExec", "RepositorySync"}, r.Kind))
 }
 
 func older(timestamp metav1.Time, now time.Time, age time.Duration) bool {
@@ -82,42 +81,6 @@ func (g graph) pvcs(root Resource) []Resource {
 	return result
 }
 
-func (g graph) leases(root Resource) []Resource {
-	result := []Resource{}
-	for _, r := range g.resources {
-		if r.Kind != leaseKind || r.Namespace != root.Namespace {
-			continue
-		}
-		if leaseReferences(r, root) {
-			result = append(result, r)
-		}
-	}
-	return result
-}
-
-func leaseReferences(lease, root Resource) bool {
-	for _, ref := range lease.References {
-		if matches(ref.Target, root.ObjectRef) {
-			return true
-		}
-	}
-	worktree := &repositories.Worktree{ObjectMeta: metav1.ObjectMeta{Name: root.Name, Namespace: root.Namespace, UID: root.UID}}
-	if root.UID != "" && (lease.Holder == string(root.UID) || lease.Holder == worktreeownership.LegacyDeletionHolder(worktree)) {
-		return true
-	}
-	if root.Kind == worktreeKind && lease.Name == worktreeownership.LegacyWriteLeaseName(worktree) {
-		return true
-	}
-	if lease.Reservation == "" {
-		return false
-	}
-	// Reservation tokens use the consumer role (workspace, clone, sync, ...),
-	// not the Kind, so match any token for this UID. Undecodable state fails
-	// closed as a reference.
-	held, err := repositoryaccess.HeldBy(&coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{repositoryaccess.StateAnnotation: lease.Reservation}}}, root.UID)
-	return held || err != nil
-}
-
 func (g graph) worktreeBlockers(r Resource, inventory Inventory, policy Policy) []string {
 	blockers := []string{}
 	if r.Locked {
@@ -131,7 +94,7 @@ func (g graph) worktreeBlockers(r Resource, inventory Inventory, policy Policy) 
 		if source.Kind == workspaceKind && incoming.Relation == "referenced-by:mount" {
 			blockers = append(blockers, "Workspace mount: "+source.Namespace+"/"+source.Name)
 		}
-		if source.Kind == "WorktreeExec" && recentlyActive(source, inventory.ObservedAt.Time, policy.UnusedFor) {
+		if source.Kind == worktreeExecKind && recentlyActive(source, inventory.ObservedAt.Time, policy.UnusedFor) {
 			blockers = append(blockers, "Active, recent or undated WorktreeExec: "+source.Name)
 		}
 	}
@@ -143,10 +106,23 @@ func (g graph) worktreeBlockers(r Resource, inventory Inventory, policy Policy) 
 			}
 		}
 	}
-	if len(g.leases(r)) > 0 {
-		blockers = append(blockers, "Worktree Lease exists; age does not establish release")
+	// The Worktree controller publishes its hold set; age never establishes
+	// release. A True InUse also covers Pods outside the hold set.
+	if inUse := meta.FindStatusCondition(r.Conditions, repositories.WorktreeConditionInUse); inUse != nil && inUse.Status == metav1.ConditionTrue {
+		blockers = append(blockers, "Worktree InUse ("+inUse.Reason+"): "+inUse.Message)
+	} else if len(r.Holders) > 0 {
+		blockers = append(blockers, "Worktree holders: "+holderList(r.Holders))
 	}
 	return blockers
+}
+
+// holderList renders published holders as Kind/name (mode).
+func holderList(holders []repositories.UsageReference) string {
+	names := make([]string, 0, len(holders))
+	for _, holder := range holders {
+		names = append(names, holder.Kind+"/"+holder.Name+" ("+holder.Mode+")")
+	}
+	return strings.Join(names, ", ")
 }
 
 func (g graph) managed() map[string]bool {

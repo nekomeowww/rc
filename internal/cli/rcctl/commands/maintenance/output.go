@@ -35,11 +35,8 @@ func evidence(r audit.Resource) string {
 	if len(r.Finalizers) > 0 {
 		parts = append(parts, "finalizers="+strings.Join(r.Finalizers, ","))
 	}
-	if r.Holder != "" {
-		parts = append(parts, "holder="+r.Holder)
-	}
-	if r.Reservation != "" {
-		parts = append(parts, "reservation="+r.Reservation)
+	for _, holder := range r.Holders {
+		parts = append(parts, "holder="+holder.Kind+"/"+holder.Name+" mode="+holder.Mode)
 	}
 	if r.Lifecycle != nil {
 		parts = append(parts, fmt.Sprintf("active-executions=%d", r.Lifecycle.ActiveExecutions), "idle-suspend-at="+timestamp(r.Lifecycle.IdleSuspendAt), "delete-at="+timestamp(r.Lifecycle.DeleteAt))

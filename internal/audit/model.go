@@ -7,6 +7,8 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	repositories "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	"k8s.io/apimachinery/pkg/types"
 
 	workspaces "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
@@ -69,9 +71,10 @@ type Resource struct {
 	// StorageUnpublished is set when the object owns a PVC but status names none.
 	StorageUnpublished bool `json:"storageUnpublished,omitempty"`
 	// Lifecycle is the Workspace's published suspension and deletion deadlines.
-	Lifecycle   *workspaces.WorkspaceLifecycleStatus `json:"lifecycle,omitempty"`
-	Holder      string                               `json:"holder,omitempty"`
-	Reservation string                               `json:"reservation,omitempty"`
+	Lifecycle *workspaces.WorkspaceLifecycleStatus `json:"lifecycle,omitempty"`
+	// Holders mirrors Worktree status.usedBy and Repository status.access,
+	// published by their controllers. Doctor reads it; it never decodes locks.
+	Holders []repositories.UsageReference `json:"holders,omitempty"`
 }
 
 // Observation distinguishes an empty successful list from unavailable evidence.

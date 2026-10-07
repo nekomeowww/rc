@@ -22,8 +22,6 @@ import (
 
 	repositories "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspaces "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
-	"github.com/nekomeowww/rc/internal/repositoryaccess"
-	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
 const testWorktree = "code"
@@ -81,13 +79,12 @@ func TestPartialVisibilityIsUnknown(t *testing.T) {
 	assert.Empty(t, history.Targets)
 }
 
-func TestWorktreeSafetyExcludesRecentExecLocksLeasesAndMounts(t *testing.T) {
+func TestWorktreeSafetyExcludesRecentExecLocksHoldersAndMounts(t *testing.T) {
 	worktree := &repositories.Worktree{ObjectMeta: fixtureMeta(testWorktree)}
 	for name, related := range map[string]client.Object{
-		"mount":       &workspaces.Workspace{ObjectMeta: fixtureMeta(testWorkspaceName), Spec: workspaces.WorkspaceSpec{Mounts: []workspaces.WorkspaceMount{{Name: testWorktree, WorktreeRef: &workspaces.LocalReference{Name: testWorktree}}}}},
-		"active-exec": &repositories.WorktreeExec{ObjectMeta: fixtureMeta("exec"), Spec: repositories.WorktreeExecSpec{WorktreeRef: repositories.WorktreeReference{Name: testWorktree}}},
-		"recent-exec": &repositories.WorktreeExec{ObjectMeta: fixtureMeta("exec"), Spec: repositories.WorktreeExecSpec{WorktreeRef: repositories.WorktreeReference{Name: testWorktree}}, Status: repositories.WorktreeExecStatus{CompletedAt: new(metav1.NewTime(auditNow)), Conditions: []metav1.Condition{{Type: repositories.WorktreeExecConditionSucceeded, Status: metav1.ConditionFalse, LastTransitionTime: metav1.NewTime(auditNow)}}}},
-		"lease":       &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: worktreeownership.LegacyWriteLeaseName(worktree), Namespace: worktree.Namespace}},
+		"workspace-mount": &workspaces.Workspace{ObjectMeta: fixtureMeta(testWorkspaceName), Spec: workspaces.WorkspaceSpec{Mounts: []workspaces.WorkspaceMount{{Name: testWorktree, WorktreeRef: &workspaces.LocalReference{Name: testWorktree}}}}},
+		"active-exec":     &repositories.WorktreeExec{ObjectMeta: fixtureMeta("exec"), Spec: repositories.WorktreeExecSpec{WorktreeRef: repositories.WorktreeReference{Name: testWorktree}}},
+		"recent-exec":     &repositories.WorktreeExec{ObjectMeta: fixtureMeta("exec"), Spec: repositories.WorktreeExecSpec{WorktreeRef: repositories.WorktreeReference{Name: testWorktree}}, Status: repositories.WorktreeExecStatus{CompletedAt: new(metav1.NewTime(auditNow)), Conditions: []metav1.Condition{{Type: repositories.WorktreeExecConditionSucceeded, Status: metav1.ConditionFalse, LastTransitionTime: metav1.NewTime(auditNow)}}}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			report := scanReport(t, fixtureClient(t, worktree.DeepCopy(), related))
@@ -96,10 +93,19 @@ func TestWorktreeSafetyExcludesRecentExecLocksLeasesAndMounts(t *testing.T) {
 			}
 		})
 	}
-	worktree.Spec.Lock = true
-	report := scanReport(t, fixtureClient(t, worktree))
-	for _, finding := range report.Findings {
-		assert.NotEqual(t, "UnreferencedWorktree", finding.Code)
+	// The controller's published hold set and InUse condition replace Lease parsing.
+	for name, status := range map[string]repositories.WorktreeStatus{
+		"in-use":  {Conditions: []metav1.Condition{{Type: repositories.WorktreeConditionInUse, Status: metav1.ConditionTrue, Reason: repositories.WorktreeReasonPodConsumer}}},
+		"used-by": {UsedBy: []repositories.UsageReference{{Kind: worktreeExecKind, Name: "writer", UID: "writer-uid", Mode: "write"}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			held := worktree.DeepCopy()
+			held.Status = status
+			report := scanReport(t, fixtureClient(t, held))
+			for _, finding := range report.Findings {
+				assert.NotEqual(t, "UnreferencedWorktree", finding.Code)
+			}
+		})
 	}
 }
 
@@ -140,22 +146,23 @@ func TestDataResourcesStayInDoctorOnly(t *testing.T) {
 	assert.EqualValues(t, 40*1024*1024*1024, report.Summary.PVCRequestedBytes)
 }
 
-func TestRepositoryReservationAttributesHolderByRoleToken(t *testing.T) {
+func TestDoctorAttributesRepositoryHolders(t *testing.T) {
 	workspace := &workspaces.Workspace{ObjectMeta: fixtureMeta(testWorkspaceName)}
-	reserved := &coordinationv1.Lease{ObjectMeta: fixtureMeta("rc-repository-reserved")}
-	// Gate tokens use the consumer role ("workspace"), not the Kind ("Workspace").
-	reserved.Annotations = map[string]string{repositoryaccess.StateAnnotation: `{"mode":"mount","holders":{"workspace/` + string(workspace.UID) + "/" + workspace.Name + `":true}}`}
-	malformed := &coordinationv1.Lease{ObjectMeta: fixtureMeta("rc-repository-malformed")}
-	malformed.Annotations = map[string]string{repositoryaccess.StateAnnotation: "{"}
-	unrelated := &coordinationv1.Lease{ObjectMeta: fixtureMeta("rc-repository-unrelated")}
-	unrelated.Annotations = map[string]string{repositoryaccess.StateAnnotation: `{"mode":"mount","holders":{"workspace/other-uid/other":true}}`}
-	g := newGraph(scanReport(t, fixtureClient(t, workspace, reserved, malformed, unrelated)).Inventory)
+	repository := &repositories.Repository{ObjectMeta: fixtureMeta("source")}
+	deleting := metav1.NewTime(auditNow.Add(-time.Minute))
+	repository.DeletionTimestamp = &deleting
+	repository.Finalizers = []string{"example.test/hold"}
+	repository.Status.Access = &repositories.RepositoryAccessStatus{Mode: "mount", Holders: []repositories.UsageReference{{Kind: workspaceKind, Name: workspace.Name, UID: workspace.UID, Mode: "mount"}}}
+	report := scanReport(t, fixtureClient(t, workspace, repository))
+	finding := requireFinding(t, report, "DeletionPending")
+	assert.Contains(t, finding.Message, "holders=Workspace/dev (mount)")
+	assert.Contains(t, finding.Related, ObjectRef{APIVersion: workspaceAPI, Kind: workspaceKind, Namespace: testNamespace, Name: workspace.Name, UID: workspace.UID})
+	g := newGraph(report.Inventory)
 	root, ok := g.resolve(ObjectRef{APIVersion: workspaceAPI, Kind: workspaceKind, Namespace: testNamespace, Name: testWorkspaceName})
 	require.True(t, ok)
-	leases := g.leases(root)
-	names := make([]string, 0, len(leases))
-	for _, lease := range leases {
-		names = append(names, lease.Name)
+	attributed := false
+	for _, incoming := range g.incoming(root) {
+		attributed = attributed || (incoming.Target.Kind == "Repository" && incoming.Relation == "referenced-by:"+holderRelation)
 	}
-	assert.ElementsMatch(t, []string{reserved.Name, malformed.Name}, names, "undecodable reservations fail closed as references")
+	assert.True(t, attributed, "the Repository's published holder links to its Workspace")
 }

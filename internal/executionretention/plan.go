@@ -66,7 +66,7 @@ func Build(executions []workspacesv1alpha1.WorkspaceExec, policy *workspacesv1al
 		ttl = 90 * 24 * time.Hour
 	}
 	if maximum <= 0 {
-		maximum = 3000
+		maximum = 15000
 	}
 	slices.SortFunc(eligible, func(a, b int) int {
 		if order := executions[b].Status.CompletedAt.Compare(executions[a].Status.CompletedAt.Time); order != 0 {

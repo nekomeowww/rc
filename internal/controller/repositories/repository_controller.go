@@ -36,6 +36,7 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
+	"github.com/nekomeowww/rc/internal/volumeclaim"
 )
 
 const (
@@ -102,11 +103,18 @@ func (r *RepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 	}
 
+	claimName, err := volumeclaim.Resolve(ctx, reader, repository, volumeclaim.Repository, 0, repository.Status.VolumeClaimName)
+	if volumeclaim.IsConflict(err) {
+		return ctrl.Result{}, setRepositoryStorageReady(ctx, r.Client, repository, metav1.ConditionFalse, "VolumeClaimConflict", err.Error(), repository.Status.VolumeClaimName, nil)
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	claim := new(corev1.PersistentVolumeClaim)
-	claimKey := types.NamespacedName{Name: repository.Name, Namespace: repository.Namespace}
-	err := r.Get(ctx, claimKey, claim)
+	claimKey := types.NamespacedName{Name: claimName, Namespace: repository.Namespace}
+	err = r.Get(ctx, claimKey, claim)
 	if errors.IsNotFound(err) {
-		claim = parentVolumeClaim(repository)
+		claim = parentVolumeClaim(repository, claimName)
 
 		err := controllerutil.SetControllerReference(repository, claim, r.Scheme)
 		if err != nil {
@@ -124,8 +132,14 @@ func (r *RepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("get parent PersistentVolumeClaim: %w", err)
 	}
-	if !metav1.IsControlledBy(claim, repository) {
-		return ctrl.Result{}, setRepositoryStorageReady(ctx, r.Client, repository, metav1.ConditionFalse, "VolumeClaimConflict", "A PersistentVolumeClaim with the Repository name already exists and is not owned by this Repository", "", nil)
+	if ownerErr := volumeclaim.CheckOwner(claim, repository); ownerErr != nil {
+		return ctrl.Result{}, setRepositoryStorageReady(ctx, r.Client, repository, metav1.ConditionFalse, "VolumeClaimConflict", ownerErr.Error(), repository.Status.VolumeClaimName, nil)
+	}
+
+	// Persist recovery before admission: the Repository gate compares the
+	// entire captured status with the API before allowing a checkout.
+	if repository.Status.VolumeClaimName != claim.Name {
+		return ctrl.Result{}, setRepositoryStorageReady(ctx, r.Client, repository, metav1.ConditionFalse, "Provisioning", "Recovered existing parent volume", claim.Name, nil)
 	}
 
 	if claim.Spec.StorageClassName == nil || *claim.Spec.StorageClassName != repository.Spec.Storage.StorageClassName {
@@ -254,11 +268,11 @@ func (r *RepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	return ctrl.Result{}, setRepositoryStorageReady(ctx, r.Client, repository, metav1.ConditionFalse, "Initializing", "Repository bootstrap Job is running", claim.Name, nil)
 }
 
-func parentVolumeClaim(repository *repositoriesv1alpha1.Repository) *corev1.PersistentVolumeClaim {
+func parentVolumeClaim(repository *repositoriesv1alpha1.Repository, claimName string) *corev1.PersistentVolumeClaim {
 	filesystem := corev1.PersistentVolumeFilesystem
 	return &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      repository.Name,
+			Name:      claimName,
 			Namespace: repository.Namespace,
 			Labels: map[string]string{
 				repositoryManagedByLabel: repositoryManagedByValue,

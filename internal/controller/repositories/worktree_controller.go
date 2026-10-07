@@ -45,6 +45,7 @@ import (
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
 	"github.com/nekomeowww/rc/internal/runtimepolicy"
+	"github.com/nekomeowww/rc/internal/volumeclaim"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
 )
@@ -115,8 +116,19 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	storageClassName, size, accessModes := effectiveWorktreeStorage(worktree, repository)
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	claimName, err := volumeclaim.Resolve(ctx, reader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
+	if volumeclaim.IsConflict(err) {
+		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimConflict", err.Error(), worktree.Status.VolumeClaimName, repository.Status.VolumeClaimName, worktreePath)
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	claim := new(corev1.PersistentVolumeClaim)
-	claimKey := types.NamespacedName{Name: worktree.Name, Namespace: worktree.Namespace}
+	claimKey := types.NamespacedName{Name: claimName, Namespace: worktree.Namespace}
 
 	err = r.Get(ctx, claimKey, claim)
 	if errors.IsNotFound(err) {
@@ -128,7 +140,7 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if admission != repositoryaccess.Admitted {
 			return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionUnknown, "RepositoryNotReady", "Repository is busy or not ready for cloning", "", repository.Status.VolumeClaimName, worktreePath)
 		}
-		claim = worktreeVolumeClaim(worktree, repository.Status.VolumeClaimName, storageClassName, size, accessModes)
+		claim = worktreeVolumeClaim(worktree, claimName, repository.Status.VolumeClaimName, storageClassName, size, accessModes)
 
 		err = controllerutil.SetControllerReference(worktree, claim, r.Scheme)
 		if err != nil {
@@ -148,8 +160,8 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("get Worktree PersistentVolumeClaim: %w", err)
 	}
-	if !metav1.IsControlledBy(claim, worktree) {
-		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimConflict", "A PersistentVolumeClaim with the Worktree name already exists and is not owned by this Worktree", "", repository.Status.VolumeClaimName, worktreePath)
+	if ownerErr := volumeclaim.CheckOwner(claim, worktree); ownerErr != nil {
+		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimConflict", ownerErr.Error(), worktree.Status.VolumeClaimName, repository.Status.VolumeClaimName, worktreePath)
 	}
 	if !worktreeClaimMatches(claim, repository.Status.VolumeClaimName, storageClassName, size, accessModes) {
 		return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, "VolumeClaimSpecChanged", "Changing the Worktree child volume specification is not supported", claim.Name, repository.Status.VolumeClaimName, worktreePath)
@@ -272,8 +284,15 @@ func (r *WorktreeReconciler) reconcileDelete(ctx context.Context, worktree *repo
 	}
 	// Finish an admitted clone before releasing its source reservation. Deleting
 	// a pending PVC can leave a CSI CreateVolume operation in flight.
+	// Use the same identity as provisioning, including recovery before status is
+	// persisted. Absence at the CR name does not prove its selected PVC is gone.
+	claimName, err := volumeclaim.Resolve(ctx, reader, worktree, volumeclaim.Worktree, 0, worktree.Status.VolumeClaimName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	claim := new(corev1.PersistentVolumeClaim)
-	if err := reader.Get(ctx, client.ObjectKeyFromObject(worktree), claim); err == nil && metav1.IsControlledBy(claim, worktree) && claim.Status.Phase != corev1.ClaimBound {
+	claimKey := client.ObjectKey{Namespace: worktree.Namespace, Name: claimName}
+	if err := reader.Get(ctx, claimKey, claim); err == nil && metav1.IsControlledBy(claim, worktree) && claim.Status.Phase != corev1.ClaimBound {
 		return ctrl.Result{RequeueAfter: worktreeRequeueDelay}, nil
 	} else if err != nil && !errors.IsNotFound(err) {
 		return ctrl.Result{}, err
@@ -422,7 +441,7 @@ func effectiveWorktreeStorage(worktree *repositoriesv1alpha1.Worktree, repositor
 
 func worktreeVolumeClaim(
 	worktree *repositoriesv1alpha1.Worktree,
-	sourceClaimName string,
+	claimName, sourceClaimName string,
 	storageClassName string,
 	size resource.Quantity,
 	accessModes []corev1.PersistentVolumeAccessMode,
@@ -430,7 +449,7 @@ func worktreeVolumeClaim(
 	filesystem := corev1.PersistentVolumeFilesystem
 	return &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      worktree.Name,
+			Name:      claimName,
 			Namespace: worktree.Namespace,
 			Labels: map[string]string{
 				worktreeManagedByLabel:  worktreeManagedByValue,
@@ -625,7 +644,9 @@ func (r *WorktreeReconciler) setWorktreeVolumeReady(ctx context.Context, worktre
 		before := current.DeepCopy()
 		current.Status.ObservedGeneration = current.Generation
 		current.Status.SourceVolumeClaimName = sourceClaimName
-		current.Status.VolumeClaimName = claimName
+		if claimName != "" {
+			current.Status.VolumeClaimName = claimName
+		}
 		current.Status.WorktreePath = path
 		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 			Type: repositoriesv1alpha1.WorktreeConditionVolumeReady, Status: metav1.ConditionTrue,
@@ -659,7 +680,9 @@ func (r *WorktreeReconciler) setWorktreeStatus(ctx context.Context, worktree *re
 		before := current.DeepCopy()
 		current.Status.ObservedGeneration = current.Generation
 		current.Status.SourceVolumeClaimName = sourceClaimName
-		current.Status.VolumeClaimName = claimName
+		if claimName != "" {
+			current.Status.VolumeClaimName = claimName
+		}
 		current.Status.WorktreePath = path
 		if claimName == "" || worktreebootstrap.Deferred(current) {
 			current.Status.JobName = ""
@@ -720,7 +743,7 @@ func (r *WorktreeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				worktree := &worktrees.Items[index]
 				claimName := worktree.Status.VolumeClaimName
 				if claimName == "" {
-					claimName = worktree.Name
+					continue
 				}
 				if podUsesPersistentVolumeClaim(pod, claimName) {
 					requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(worktree)})

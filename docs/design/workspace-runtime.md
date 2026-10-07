@@ -352,7 +352,7 @@ after confirmed suspension. It defaults to disabled. The persisted
 `status.suspendedAt` starts after compute has stopped, not when a stop was
 requested; restarting the controller does not extend the deadline. Legacy
 Suspended objects without this timestamp receive a complete grace period.
-See [lifetime decisions](../adr/0005-workspace-lifetimes.md).
+See [lifetime decisions](../adr/0007-workspace-lifetimes.md).
 
 ### Runtime lifecycle actions
 
@@ -827,7 +827,7 @@ DELETE keeps the closed fence's resourceVersion. ProcessClient rejects fenced
 or deleting owners early; direct API submissions are checked by the controller
 and fail with `WorkspaceAdmissionRejected` if closure won. Ownership references
 pin resource identity and cleanup but do not grant execution admission. See the
-[concurrency proof and alternatives](../adr/0005-workspace-lifetimes.md#execution-admission-and-automatic-deletion).
+[concurrency proof and alternatives](../adr/0007-workspace-lifetimes.md#execution-admission-and-automatic-deletion).
 
 Deleting a Workspace:
 
@@ -860,7 +860,7 @@ Workspace API writes cannot grant runtime access to a deleting Worktree. Direct
 PVC deletion follows the same fence and cleanup path; after storage disappears,
 the live Worktree reports `VolumeDeleted` and never silently reclones data.
 
-See [the ownership decision](../adr/0005-workspace-worktree-ownership.md) for
+See [the ownership decision](../adr/0006-workspace-worktree-ownership.md) for
 foreground GC ordering, the admission protocol, shared mounts, and migration details.
 
 The shared namespace `rc-workspace` Service Account and RoleBinding outlive

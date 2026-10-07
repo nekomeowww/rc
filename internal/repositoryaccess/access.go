@@ -170,7 +170,7 @@ func (g Gate) Acquire(ctx context.Context, repository *repositories.Repository, 
 		return Reserved, err
 	}
 	condition := meta.FindStatusCondition(current.Status.Conditions, repositories.RepositoryConditionStorageReady)
-	if current.UID != repository.UID || current.Generation != repository.Generation || !equality.Semantic.DeepEqual(current.Status, repository.Status) || !current.DeletionTimestamp.IsZero() ||
+	if current.UID != repository.UID || current.Generation != repository.Generation || !sameState(current.Status, repository.Status) || !current.DeletionTimestamp.IsZero() ||
 		(ready && (current.Status.ObservedGeneration != current.Generation || condition == nil || condition.Status != metav1.ConditionTrue || condition.ObservedGeneration != current.Generation || current.Status.VolumeClaimName == "")) {
 		return NotReserved, g.Release(ctx, repository, holder.Key())
 	}
@@ -186,6 +186,13 @@ func (g Gate) Acquire(ctx context.Context, repository *repositories.Repository, 
 // reservation whose owner is gone.
 func (g Gate) ConsumersStopped(ctx context.Context, repository *repositories.Repository) (bool, error) {
 	return g.consumersStopped(ctx, repository, Write)
+}
+
+// sameState compares Repository status except the access mirror, which
+// changes with every reservation and is never an input to admission.
+func sameState(left, right repositories.RepositoryStatus) bool {
+	left.Access, right.Access = nil, nil
+	return equality.Semantic.DeepEqual(left, right)
 }
 
 // consumersStopped protects admission across upgrades and observes consumers

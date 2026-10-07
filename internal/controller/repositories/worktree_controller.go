@@ -82,8 +82,17 @@ type WorktreeReconciler struct {
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=worktreeexecs,verbs=get;list;watch
 //
-//nolint:gocyclo // Reconcile is an explicit resource lifecycle state machine.
+// Reconcile runs the Worktree lifecycle, then mirrors its hold set in status.
 func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	result, err := r.reconcileWorktree(ctx, req)
+	if err != nil {
+		return result, err
+	}
+	return result, r.publishUsage(ctx, req.NamespacedName)
+}
+
+//nolint:gocyclo // reconcileWorktree is an explicit resource lifecycle state machine.
+func (r *WorktreeReconciler) reconcileWorktree(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	// Both creation evidence and child existence must be read outside the cache;
 	// a stale pre-creation Worktree must not authorize replacing a lost child.
@@ -739,6 +748,9 @@ func (r *WorktreeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &repositoriesv1alpha1.Worktree{}, worktreeRepositoryIndex, worktreeRepositoryIndexValues); err != nil {
 		return fmt.Errorf("index Worktrees by Repository: %w", err)
+	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &workspacesv1alpha1.Workspace{}, worktreeownership.WorkspaceWorktreeIndex, worktreeownership.WorkspaceWorktreeIndexValues); err != nil {
+		return fmt.Errorf("index Workspaces by mounted Worktree: %w", err)
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&repositoriesv1alpha1.Worktree{}).

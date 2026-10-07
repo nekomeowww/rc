@@ -25,6 +25,7 @@ import (
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -35,6 +36,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
@@ -73,8 +75,17 @@ type RepositoryReconciler struct {
 // Reconcile ensures that every Repository owns one persistent parent volume and
 // that its configured remote is bootstrapped into that volume.
 //
-//nolint:gocyclo // Reconcile is an existing explicit resource lifecycle state machine.
+// The Repository's access mirror is published after every pass.
 func (r *RepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	result, err := r.reconcileRepository(ctx, req)
+	if err != nil {
+		return result, err
+	}
+	return result, r.publishAccess(ctx, req.NamespacedName)
+}
+
+//nolint:gocyclo // reconcileRepository is an existing explicit resource lifecycle state machine.
+func (r *RepositoryReconciler) reconcileRepository(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	repository := new(repositoriesv1alpha1.Repository)
 	if err := r.Get(ctx, req.NamespacedName, repository); err != nil {
@@ -397,6 +408,8 @@ func (r *RepositoryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&repositoriesv1alpha1.Repository{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&batchv1.Job{}).
+		// Consumers change the access Lease; it is owned, not controlled.
+		Watches(&coordinationv1.Lease{}, handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), &repositoriesv1alpha1.Repository{})).
 		Named("repositories-repository").
 		Complete(r)
 }

@@ -79,8 +79,32 @@ func IsOwnedBy(worktree *repositoriesv1alpha1.Worktree, workspace *workspacesv1a
 // first; counting their mounts here would deadlock foreground garbage collection.
 // This is a conservative reference check, not an admission lock. Callers must
 // close MountAccess and wait for its holders to drain before finalizing.
+// reader should be a cache with WorkspaceWorktreeIndex; a reader without the
+// index, such as a direct API client, falls back to ListReferenceBlockers.
 func ReferenceBlockers(ctx context.Context, reader client.Reader, namespace, name string) ([]string, error) {
-	return ListReferenceBlockers(ctx, reader, namespace, name)
+	workspaces := new(workspacesv1alpha1.WorkspaceList)
+	if err := reader.List(ctx, workspaces, client.InNamespace(namespace), client.MatchingFields{WorkspaceWorktreeIndex: name}); err != nil {
+		return ListReferenceBlockers(ctx, reader, namespace, name)
+	}
+	return referenceBlockers(workspaces.Items, name), nil
+}
+
+// WorkspaceWorktreeIndex indexes Workspaces by the Worktrees their spec mounts.
+const WorkspaceWorktreeIndex = "spec.mounts.worktreeRef.name"
+
+// WorkspaceWorktreeIndexValues extracts WorkspaceWorktreeIndex values.
+func WorkspaceWorktreeIndexValues(object client.Object) []string {
+	workspace, ok := object.(*workspacesv1alpha1.Workspace)
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(workspace.Spec.Mounts))
+	for _, mount := range workspace.Spec.Mounts {
+		if mount.WorktreeRef != nil && !slices.Contains(names, mount.WorktreeRef.Name) {
+			names = append(names, mount.WorktreeRef.Name)
+		}
+	}
+	return names
 }
 
 // ListReferenceBlockers is ReferenceBlockers for clients without a cache

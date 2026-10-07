@@ -226,5 +226,8 @@ object, closing the earlier plain-read gap. rcctl no longer creates Leases: a
 mount only patches Workspace spec, and `worktree delete` checks references and
 deletes. Legacy `mount-holders`/`mounts-closed` annotations and live
 `rc-worktree-*` Leases are still honored for one release so an upgraded cluster
-keeps every writer an older controller admitted. A single leader-elected
+keeps every writer an older controller admitted. Holders whose owner is gone
+are swept only when no Pod uses the volume. Worktree `status.usedBy` with the
+`InUse` condition, and Repository `status.access`, mirror the hold sets for
+users and `rcctl doctor`; they are outputs, never locks. A single leader-elected
 controller is assumed; running old and new controller replicas together is unsafe.

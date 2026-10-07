@@ -44,8 +44,8 @@ const (
 	// DeletionBlockedReasonWaitingForMounts means Workspaces still reference or
 	// hold admitted mounts of the volume.
 	DeletionBlockedReasonWaitingForMounts = "WaitingForMounts"
-	// DeletionBlockedReasonWaitingForWriter means another writer holds the
-	// exclusive write Lease.
+	// DeletionBlockedReasonWaitingForWriter means a writer holds the volume
+	// exclusively.
 	DeletionBlockedReasonWaitingForWriter = "WaitingForWriter"
 	// DeletionBlockedReasonWaitingForPods means non-terminal Pods still use the
 	// volume.
@@ -149,6 +149,11 @@ type RepositoryStatus struct {
 	// +optional
 	LastUpdatedAt *metav1.Time `json:"lastUpdatedAt,omitempty"`
 
+	// access mirrors the parent volume's reservations. It is written by the
+	// Repository controller and is not a lock.
+	// +optional
+	Access *RepositoryAccessStatus `json:"access,omitempty"`
+
 	// conditions represent the current state of the Repository resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
@@ -171,6 +176,7 @@ type RepositoryStatus struct {
 // +kubebuilder:printcolumn:name="Ref",type=string,JSONPath=".spec.ref"
 // +kubebuilder:printcolumn:name="Updated",type=date,JSONPath=".status.lastUpdatedAt"
 // +kubebuilder:printcolumn:name="Volume",type=string,JSONPath=".status.volumeClaimName"
+// +kubebuilder:printcolumn:name="Access",type=string,JSONPath=".status.access.mode"
 // +kubebuilder:printcolumn:name="Blocked",type=string,JSONPath=".status.conditions[?(@.type=='DeletionBlocked')].reason",priority=1
 
 // Repository is the Schema for the repositories API

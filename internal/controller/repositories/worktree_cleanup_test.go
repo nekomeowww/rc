@@ -42,6 +42,11 @@ func ownershipScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
+// indexedFake registers the Workspace mount index the manager registers.
+func indexedFake(scheme *runtime.Scheme) *fake.ClientBuilder {
+	return fake.NewClientBuilder().WithScheme(scheme).WithIndex(&workspacesv1alpha1.Workspace{}, worktreeownership.WorkspaceWorktreeIndex, worktreeownership.WorkspaceWorktreeIndexValues)
+}
+
 func ownershipStorage(t *testing.T) (*repositoriesv1alpha1.Repository, *repositoriesv1alpha1.Worktree, *corev1.PersistentVolumeClaim) {
 	t.Helper()
 	repository := &repositoriesv1alpha1.Repository{ObjectMeta: metav1.ObjectMeta{Name: "ownership-parent", Namespace: ownershipNamespace}, Spec: repositoriesv1alpha1.RepositorySpec{Storage: repositoriesv1alpha1.RepositoryStorageSpec{Size: resource.MustParse("1Gi"), StorageClassName: ownershipStorageClass}}, Status: repositoriesv1alpha1.RepositoryStatus{VolumeClaimName: "ownership-parent"}}
@@ -57,7 +62,7 @@ func TestDirectLiveWorktreePVCDeletionConverges(t *testing.T) {
 	ctx := t.Context()
 	repository, worktree, claim := ownershipStorage(t)
 	scheme := ownershipScheme(t)
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(worktree, claim).WithObjects(repository, worktree, claim).Build()
+	kube := indexedFake(scheme).WithStatusSubresource(worktree, claim).WithObjects(repository, worktree, claim).Build()
 	require.NoError(t, kube.Delete(ctx, claim))
 	r := WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 	// ROOT CAUSE: the live Worktree path skipped terminating PVCs in
@@ -79,7 +84,7 @@ func TestDirectPVCDeletionWaitsForConsumerAndNeverReclones(t *testing.T) {
 	scheme := ownershipScheme(t)
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "external-reader", Namespace: ownershipNamespace}, Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim.Name, ReadOnly: true}}}}}}
 	// The Repository is intentionally absent. Storage cleanup must remain reachable.
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(worktree, claim).WithObjects(worktree, claim, pod).Build()
+	kube := indexedFake(scheme).WithStatusSubresource(worktree, claim).WithObjects(worktree, claim, pod).Build()
 	require.NoError(t, kube.Delete(ctx, claim))
 	r := WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(worktree)}
@@ -108,7 +113,7 @@ func TestDirectPVCDeletionIgnoresUnadmittedDesiredMount(t *testing.T) {
 	_, worktree, claim := ownershipStorage(t)
 	scheme := ownershipScheme(t)
 	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "suspended-consumer", Namespace: ownershipNamespace}, Spec: workspacesv1alpha1.WorkspaceSpec{DesiredState: workspacesv1alpha1.WorkspaceDesiredStateSuspended, Mounts: []workspacesv1alpha1.WorkspaceMount{{Name: ownershipWorktreeName, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: worktree.Name}, ReadOnly: true}}}}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(worktree, claim).WithObjects(worktree, claim, workspace).Build()
+	kube := indexedFake(scheme).WithStatusSubresource(worktree, claim).WithObjects(worktree, claim, workspace).Build()
 	require.NoError(t, kube.Delete(ctx, claim))
 	r := WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 	for range 3 {
@@ -137,7 +142,7 @@ func TestDeletingWorkspaceDoesNotBlockWorktreeGC(t *testing.T) {
 	now := metav1.Now()
 	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: ownershipWorkspaceName, Namespace: ownershipNamespace, UID: ownershipWorkspaceUID, DeletionTimestamp: &now, Finalizers: []string{metav1.FinalizerDeleteDependents}}, Spec: workspacesv1alpha1.WorkspaceSpec{Mounts: []workspacesv1alpha1.WorkspaceMount{{Name: ownershipWorktreeName, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: ownershipWorktreeName}}}}}
 	worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: ownershipWorktreeName, Namespace: ownershipNamespace, UID: ownershipWorktreeUID, DeletionTimestamp: &now, Finalizers: []string{worktreeDeletionFinalizer}}}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, worktree).Build()
+	kube := indexedFake(scheme).WithObjects(workspace, worktree).Build()
 	r := &WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 	// ROOT CAUSE: foreground GC waits for the dependent's finalizer, while
 	// the finalizer counted its deleting owner as a live reference forever.
@@ -161,7 +166,7 @@ func TestWorktreeGCWaitsForRuntimeCleanupAndWriterThenFinishes(t *testing.T) {
 	worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: ownershipWorktreeName, Namespace: ownershipNamespace, UID: ownershipWorktreeUID, DeletionTimestamp: &now, Finalizers: []string{worktreeDeletionFinalizer}}}
 	writer := holdset.Holder{Kind: worktreeownership.KindWorktreeExec, Name: "independent-writer", UID: "independent-writer-uid", Mode: worktreeownership.Write}
 	require.NoError(t, holdset.Encode(worktree, worktreeownership.HoldersAnnotation, holdset.State{Holders: []holdset.Holder{writer}}))
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, worktree).Build()
+	kube := indexedFake(scheme).WithObjects(owner, worktree).Build()
 	r := &WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 	blockers, err := r.cleanupReferenceBlockers(ctx, worktree)
 	require.NoError(t, err)
@@ -189,7 +194,7 @@ func TestWorktreeDeletionFinishesWhenGCRacesFinalizerPatch(t *testing.T) {
 	now := metav1.Now()
 	worktree.DeletionTimestamp = &now
 	injected := false
-	kube := fake.NewClientBuilder().WithScheme(ownershipScheme(t)).WithObjects(worktree).WithInterceptorFuncs(interceptor.Funcs{
+	kube := indexedFake(ownershipScheme(t)).WithObjects(worktree).WithInterceptorFuncs(interceptor.Funcs{
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 			if current, ok := obj.(*repositoriesv1alpha1.Worktree); ok && !controllerutil.ContainsFinalizer(current, worktreeDeletionFinalizer) {
 				// ROOT CAUSE: real foreground GC can finish deletion between the final
@@ -224,7 +229,7 @@ func TestWorktreeCleanupWaitsForWriterAdmittedDuringClose(t *testing.T) {
 	legacy := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: worktreeownership.LegacyWriteLeaseName(worktree), Namespace: worktree.Namespace}, Spec: coordinationv1.LeaseSpec{HolderIdentity: &deletionHolder}}
 	writer := holdset.Holder{Kind: worktreeownership.KindWorktreeExec, Name: "racing-exec", UID: "racing-exec-uid", Mode: worktreeownership.Write}
 	injected := false
-	kube := fake.NewClientBuilder().WithScheme(ownershipScheme(t)).WithObjects(worktree, legacy).WithInterceptorFuncs(interceptor.Funcs{
+	kube := indexedFake(ownershipScheme(t)).WithObjects(worktree, legacy).WithInterceptorFuncs(interceptor.Funcs{
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 			if _, ok := obj.(*repositoriesv1alpha1.Worktree); ok && !injected {
 				// ROOT CAUSE: a writer admitted between the fence's read and its write

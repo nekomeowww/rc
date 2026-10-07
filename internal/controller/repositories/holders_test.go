@@ -13,7 +13,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
@@ -61,7 +60,7 @@ func TestUpgradeImportsLegacyWriteLeaseAndMountAnnotationWithoutDeadlock(t *test
 	// in a Lease owned by the Workspace.
 	worktree.Annotations = map[string]string{"repositories.rc.ayaka.io/mount-holders": `{"` + ownershipWorkspaceUID + `/` + ownershipWorkspaceName + `":true}`}
 	lease := legacyWriteLease(t, worktree, workspace)
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(worktree, claim).WithObjects(worktree, claim, workspace, lease).Build()
+	kube := indexedFake(scheme).WithStatusSubresource(worktree, claim).WithObjects(worktree, claim, workspace, lease).Build()
 	r := WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 
 	changed, err := r.reconcileWorktreeHolders(ctx, worktree)
@@ -114,7 +113,7 @@ func TestUpgradeImportsRunningExecLeaseAndKeepsItsJob(t *testing.T) {
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: exec.Name, Namespace: exec.Namespace}}
 	require.NoError(t, controllerutil.SetControllerReference(exec, job, scheme))
 	lease := legacyWriteLease(t, worktree, exec)
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(exec, worktree).WithObjects(worktree, exec, job, lease).Build()
+	kube := indexedFake(scheme).WithStatusSubresource(exec, worktree).WithObjects(worktree, exec, job, lease).Build()
 
 	_, err := (&WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}).reconcileWorktreeHolders(ctx, worktree)
 	require.NoError(t, err)
@@ -140,7 +139,7 @@ func TestLegacyLeaseFromOldRcctlStillBlocksSecondWriter(t *testing.T) {
 	workspace := writingWorkspace(worktree)
 	lease := legacyWriteLease(t, worktree, workspace)
 	second := &repositoriesv1alpha1.WorktreeExec{ObjectMeta: metav1.ObjectMeta{Name: "second-writer", Namespace: ownershipNamespace, UID: "second-writer-uid"}, Spec: repositoriesv1alpha1.WorktreeExecSpec{WorktreeRef: repositoriesv1alpha1.WorktreeReference{Name: worktree.Name}, Command: []string{"probe-second"}}}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree, workspace, lease, second).Build()
+	kube := indexedFake(scheme).WithObjects(worktree, workspace, lease, second).Build()
 	execs := WorktreeExecReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 
 	admitted, err := execs.acquireClaim(ctx, second, worktree)
@@ -166,7 +165,7 @@ func TestLegacyLeaseOfUnwantedOwnerKeepsBlockingUntilGone(t *testing.T) {
 	workspace := writingWorkspace(worktree)
 	workspace.Spec.Mounts = nil
 	lease := legacyWriteLease(t, worktree, workspace)
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree, workspace, lease).Build()
+	kube := indexedFake(scheme).WithObjects(worktree, workspace, lease).Build()
 
 	changed, err := (&WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}).reconcileWorktreeHolders(ctx, worktree)
 	require.NoError(t, err)
@@ -185,10 +184,10 @@ func TestSweepNeverRemovesHolderWhosePodsRun(t *testing.T) {
 	require.NoError(t, holdset.Encode(worktree, worktreeownership.HoldersAnnotation, holdset.State{Holders: []holdset.Holder{gone, reader}}))
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "orphaned-writer", Namespace: ownershipNamespace},
-		Spec:       corev1.PodSpec{Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim.Name}}}}},
+		Spec:       corev1.PodSpec{Volumes: []corev1.Volume{{Name: "orphaned-data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim.Name}}}}},
 		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 	}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(pod).WithObjects(worktree, live, pod).Build()
+	kube := indexedFake(scheme).WithStatusSubresource(pod).WithObjects(worktree, live, pod).Build()
 	r := WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 
 	changed, err := r.reconcileWorktreeHolders(ctx, worktree)
@@ -217,7 +216,7 @@ func TestRepositorySweepWaitsForParentConsumers(t *testing.T) {
 		Spec:       corev1.PodSpec{Volumes: []corev1.Volume{{Name: "swept-parent", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: repository.Status.VolumeClaimName}}}}},
 		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 	}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repository, pod).Build()
+	kube := indexedFake(scheme).WithObjects(repository, pod).Build()
 	gate := repositoryaccess.Gate{Client: kube, Reader: kube}
 	gone := holdset.Holder{Kind: repositoryaccess.KindRepositorySync, Name: "force-deleted-sync", UID: "force-deleted-sync-uid", Mode: repositoryaccess.Write}
 	_, err := holdset.Update(ctx, gate.Store(repository), func(_ client.Object, state *holdset.State) (bool, error) {
@@ -247,7 +246,7 @@ func TestForceDeletedWorkspaceHolderDoesNotDeadlockDeletion(t *testing.T) {
 	// The Workspace's finalizer was removed by hand before it released its holder.
 	gone := worktreeownership.WorkspaceHolder(writingWorkspace(worktree), worktreeownership.Write)
 	require.NoError(t, holdset.Encode(worktree, worktreeownership.HoldersAnnotation, holdset.State{Holders: []holdset.Holder{gone}}))
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(worktree).WithObjects(worktree).Build()
+	kube := indexedFake(scheme).WithStatusSubresource(worktree).WithObjects(worktree).Build()
 	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(worktree)}
 	r := WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 	for range 2 {
@@ -255,4 +254,94 @@ func TestForceDeletedWorkspaceHolderDoesNotDeadlockDeletion(t *testing.T) {
 		require.NoError(t, err)
 	}
 	assert.True(t, apierrors.IsNotFound(kube.Get(ctx, request.NamespacedName, new(repositoriesv1alpha1.Worktree))))
+}
+
+func TestWorktreeStatusMirrorsHolders(t *testing.T) {
+	ctx := t.Context()
+	scheme := ownershipScheme(t)
+	_, worktree, claim := ownershipStorage(t)
+	workspace := writingWorkspace(worktree)
+	kube := indexedFake(scheme).WithStatusSubresource(worktree).WithObjects(worktree, workspace).Build()
+	r := WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}
+	key := client.ObjectKeyFromObject(worktree)
+	inUse := func() *metav1.Condition {
+		current := new(repositoriesv1alpha1.Worktree)
+		require.NoError(t, kube.Get(ctx, key, current))
+		worktree = current
+		return meta.FindStatusCondition(current.Status.Conditions, repositoriesv1alpha1.WorktreeConditionInUse)
+	}
+
+	require.NoError(t, r.publishUsage(ctx, key))
+	condition := inUse()
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Equal(t, repositoriesv1alpha1.WorktreeReasonIdle, condition.Reason)
+	assert.Empty(t, worktree.Status.UsedBy)
+	version := worktree.ResourceVersion
+	require.NoError(t, r.publishUsage(ctx, key))
+	inUse()
+	assert.Equal(t, version, worktree.ResourceVersion, "status is written only on change")
+
+	result, err := (worktreeownership.MountAccess{Client: kube, Reader: kube}).Admit(ctx, worktree, workspace, worktreeownership.WorkspaceHolder(workspace, worktreeownership.Write))
+	require.NoError(t, err)
+	require.True(t, result.Admitted)
+	require.NoError(t, r.publishUsage(ctx, key))
+	condition = inUse()
+	assert.Equal(t, metav1.ConditionTrue, condition.Status)
+	assert.Equal(t, repositoriesv1alpha1.WorktreeReasonMountedByWorkspace, condition.Reason)
+	require.Len(t, worktree.Status.UsedBy, 1)
+	assert.Equal(t, repositoriesv1alpha1.UsageReference{Kind: worktreeownership.KindWorkspace, Name: workspace.Name, UID: workspace.UID, Mode: string(worktreeownership.Write), Since: worktree.Status.UsedBy[0].Since}, worktree.Status.UsedBy[0])
+	assert.NotNil(t, worktree.Status.UsedBy[0].Since)
+
+	require.NoError(t, (worktreeownership.MountAccess{Client: kube, Reader: kube}).ReleaseExcept(ctx, workspace, []repositoriesv1alpha1.Worktree{*worktree}, nil))
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "outside-reader", Namespace: ownershipNamespace},
+		Spec:       corev1.PodSpec{Volumes: []corev1.Volume{{Name: "outside-data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim.Name}}}}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	require.NoError(t, kube.Create(ctx, pod))
+	require.NoError(t, r.publishUsage(ctx, key))
+	condition = inUse()
+	assert.Equal(t, repositoriesv1alpha1.WorktreeReasonPodConsumer, condition.Reason)
+	assert.Contains(t, condition.Message, pod.Name)
+	assert.Empty(t, worktree.Status.UsedBy)
+}
+
+func TestRepositoryStatusMirrorsAccessWithoutInvalidatingAdmission(t *testing.T) {
+	ctx := t.Context()
+	scheme := ownershipScheme(t)
+	repository, _, _ := ownershipStorage(t)
+	repository.UID, repository.Generation = "mirrored-parent-uid", 1
+	repository.Status.ObservedGeneration = 1
+	repository.Status.Conditions = []metav1.Condition{{Type: repositoriesv1alpha1.RepositoryConditionStorageReady, Status: metav1.ConditionTrue, ObservedGeneration: 1}}
+	kube := indexedFake(scheme).WithStatusSubresource(repository).WithObjects(repository).Build()
+	gate := repositoryaccess.Gate{Client: kube, Reader: kube}
+	r := RepositoryReconciler{Client: kube, APIReader: kube, Scheme: scheme}
+	key := client.ObjectKeyFromObject(repository)
+	captured := repository.DeepCopy()
+
+	first := holdset.Holder{Kind: repositoryaccess.KindWorktree, Name: "first-clone", UID: "first-clone-uid", Mode: repositoryaccess.Clone}
+	admission, err := gate.Acquire(ctx, captured, first, true)
+	require.NoError(t, err)
+	require.Equal(t, repositoryaccess.Admitted, admission)
+	require.NoError(t, r.publishAccess(ctx, key))
+	current := new(repositoriesv1alpha1.Repository)
+	require.NoError(t, kube.Get(ctx, key, current))
+	require.NotNil(t, current.Status.Access)
+	assert.Equal(t, string(repositoryaccess.Clone), current.Status.Access.Mode)
+	require.Len(t, current.Status.Access.Holders, 1)
+	assert.Equal(t, "first-clone", current.Status.Access.Holders[0].Name)
+
+	// A consumer that captured the Repository before the mirror changed is
+	// still admitted: status.access is an output, never an admission input.
+	second := holdset.Holder{Kind: repositoryaccess.KindWorktree, Name: "second-clone", UID: "second-clone-uid", Mode: repositoryaccess.Clone}
+	admission, err = gate.Acquire(ctx, captured, second, true)
+	require.NoError(t, err)
+	assert.Equal(t, repositoryaccess.Admitted, admission)
+
+	require.NoError(t, gate.Release(ctx, current, first.Key()))
+	require.NoError(t, gate.Release(ctx, current, second.Key()))
+	require.NoError(t, r.publishAccess(ctx, key))
+	require.NoError(t, kube.Get(ctx, key, current))
+	assert.Nil(t, current.Status.Access)
 }

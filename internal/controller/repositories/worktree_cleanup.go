@@ -144,11 +144,13 @@ func (r *WorktreeReconciler) setDeletionBlocked(ctx context.Context, worktree *r
 // cleanupReferenceBlockers preserves references when deleting a Worktree. An
 // explicit PVC DELETE instead waits for admitted/actual consumers; a suspended
 // Workspace's desired mount must not strand an unused PVC in Terminating.
+// References are read from the indexed cache: they are a conservative check,
+// not a lock. The hold set fence makes a mount added after it harmless.
 func (r *WorktreeReconciler) cleanupReferenceBlockers(ctx context.Context, worktree *repositoriesv1alpha1.Worktree) ([]string, error) {
 	if worktree.DeletionTimestamp.IsZero() {
 		return nil, nil
 	}
-	return worktreeownership.ReferenceBlockers(ctx, r.APIReader, worktree.Namespace, worktree.Name)
+	return worktreeownership.ReferenceBlockers(ctx, r.Client, worktree.Namespace, worktree.Name)
 }
 
 // reconcileStorageDeletion handles a direct PVC DELETE without deleting its

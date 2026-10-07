@@ -14,7 +14,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -31,7 +30,7 @@ func TestMountInsertedAfterFinalDeletionListIsNeverAdmitted(t *testing.T) {
 	now := metav1.Now()
 	worktree.DeletionTimestamp = &now
 	inserted := false
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(worktree, &workspacesv1alpha1.Workspace{}, &corev1.PersistentVolumeClaim{}).WithObjects(worktree).WithInterceptorFuncs(interceptor.Funcs{
+	kube := indexedFake(scheme).WithStatusSubresource(worktree, &workspacesv1alpha1.Workspace{}, &corev1.PersistentVolumeClaim{}).WithObjects(worktree).WithInterceptorFuncs(interceptor.Funcs{
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 			wt, ok := obj.(*repositoriesv1alpha1.Worktree)
 			if ok && !controllerutil.ContainsFinalizer(wt, worktreeDeletionFinalizer) && !inserted {
@@ -69,7 +68,7 @@ func TestExecCannotStartAfterClose(t *testing.T) {
 	_, worktree, _ := ownershipStorage(t)
 	exec := &repositoriesv1alpha1.WorktreeExec{ObjectMeta: metav1.ObjectMeta{Name: "late-exec", Namespace: ownershipNamespace, UID: "late-exec-uid"}, Spec: repositoriesv1alpha1.WorktreeExecSpec{WorktreeRef: repositoriesv1alpha1.WorktreeReference{Name: worktree.Name}, Command: []string{"probe-closed-storage"}}}
 	injected := false
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(exec).WithObjects(worktree, exec).WithInterceptorFuncs(interceptor.Funcs{
+	kube := indexedFake(scheme).WithStatusSubresource(exec).WithObjects(worktree, exec).WithInterceptorFuncs(interceptor.Funcs{
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 			if _, ok := obj.(*repositoriesv1alpha1.Worktree); ok && !injected {
 				injected = true
@@ -101,7 +100,7 @@ func TestExecAdmittedBeforeCloseKeepsCleanupWaiting(t *testing.T) {
 	scheme := ownershipScheme(t)
 	_, worktree, _ := ownershipStorage(t)
 	exec := &repositoriesv1alpha1.WorktreeExec{ObjectMeta: metav1.ObjectMeta{Name: "early-exec", Namespace: ownershipNamespace, UID: "early-exec-uid"}, Spec: repositoriesv1alpha1.WorktreeExecSpec{WorktreeRef: repositoriesv1alpha1.WorktreeReference{Name: worktree.Name}, Command: []string{"probe-early-writer"}}}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(exec, worktree).WithObjects(worktree, exec).Build()
+	kube := indexedFake(scheme).WithStatusSubresource(exec, worktree).WithObjects(worktree, exec).Build()
 	r := WorktreeExecReconciler{Client: kube, APIReader: kube, Scheme: scheme, RunnerImage: ownershipRunnerImage}
 	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(exec)})
 	require.NoError(t, err)

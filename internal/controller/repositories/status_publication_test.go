@@ -16,7 +16,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
@@ -77,7 +76,7 @@ func TestWorktreeExecRecordsCompletedAtOnce(t *testing.T) {
 			scheme := ownershipScheme(t)
 			exec, job := runningWorktreeExec(t, scheme)
 			job.Status = scenario.status
-			kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(exec, job).WithObjects(exec, job).Build()
+			kube := indexedFake(scheme).WithStatusSubresource(exec, job).WithObjects(exec, job).Build()
 			r := &WorktreeExecReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(exec)}
 
@@ -105,7 +104,7 @@ func TestWorktreeExecJobLostRecordsCompletedAt(t *testing.T) {
 	ctx := t.Context()
 	scheme := ownershipScheme(t)
 	exec, _ := runningWorktreeExec(t, scheme)
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(exec).WithObjects(exec).Build()
+	kube := indexedFake(scheme).WithStatusSubresource(exec).WithObjects(exec).Build()
 	r := &WorktreeExecReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 	before := metav1.NewTime(time.Now().Add(-time.Second))
 
@@ -123,7 +122,7 @@ func TestWorktreeExecBackfillsCompletedAtFromSucceededCondition(t *testing.T) {
 	scheme := ownershipScheme(t)
 	exec, _ := runningWorktreeExec(t, scheme)
 	exec.Status.Conditions[0] = metav1.Condition{Type: repositoriesv1alpha1.WorktreeExecConditionSucceeded, Status: metav1.ConditionTrue, Reason: "CommandSucceeded", LastTransitionTime: statusTime(9)}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(exec).WithObjects(exec).Build()
+	kube := indexedFake(scheme).WithStatusSubresource(exec).WithObjects(exec).Build()
 	r := &WorktreeExecReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(exec)}
 
@@ -156,7 +155,7 @@ func TestRepositoryExecCompletedAt(t *testing.T) {
 	require.NoError(t, controllerutil.SetControllerReference(running, job, scheme))
 	legacy := newExec("legacy", metav1.Condition{Type: repositoriesv1alpha1.RepositoryExecConditionSucceeded, Status: metav1.ConditionFalse, Reason: "CommandFailed", LastTransitionTime: statusTime(4)})
 	legacy.Status.JobName = ""
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(running, legacy, job).WithObjects(running, legacy, job).Build()
+	kube := indexedFake(scheme).WithStatusSubresource(running, legacy, job).WithObjects(running, legacy, job).Build()
 	r := &RepositoryExecReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 
 	for _, scenario := range []struct {
@@ -209,7 +208,7 @@ func TestWorktreeDeletionBlockedNamesBlockers(t *testing.T) {
 		Spec:       corev1.PodSpec{Volumes: []corev1.Volume{{Name: statusVolumeName, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim.Name}}}}},
 		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 	}
-	kube := fake.NewClientBuilder().WithScheme(scheme).
+	kube := indexedFake(scheme).
 		WithStatusSubresource(worktree, claim, pod).
 		WithObjects(repository, worktree, claim, workspace, lease, pod).Build()
 	r := &WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}
@@ -262,7 +261,7 @@ func TestWorktreeDeletionBlockedWaitsForPendingVolume(t *testing.T) {
 	scheme := ownershipScheme(t)
 	repository, worktree, claim := ownershipStorage(t)
 	claim.Status.Phase = corev1.ClaimPending
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(worktree, claim).WithObjects(repository, worktree, claim).Build()
+	kube := indexedFake(scheme).WithStatusSubresource(worktree, claim).WithObjects(repository, worktree, claim).Build()
 	r := &WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 	require.NoError(t, kube.Delete(ctx, worktree))
 
@@ -279,7 +278,7 @@ func TestDirectPVCDeletionDoesNotPublishDeletionBlocked(t *testing.T) {
 	scheme := ownershipScheme(t)
 	_, worktree, claim := ownershipStorage(t)
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "reader", Namespace: ownershipNamespace}, Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: statusVolumeName, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim.Name}}}}}}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(worktree, claim).WithObjects(worktree, claim, pod).Build()
+	kube := indexedFake(scheme).WithStatusSubresource(worktree, claim).WithObjects(worktree, claim, pod).Build()
 	require.NoError(t, kube.Delete(ctx, claim))
 	r := WorktreeReconciler{Client: kube, APIReader: kube, Scheme: scheme}
 
@@ -305,7 +304,7 @@ func TestRepositoryDeletionBlockedReportsGarbageCollectionWaits(t *testing.T) {
 		Spec:       corev1.PodSpec{Volumes: []corev1.Volume{{Name: workerVolumeName, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: statusParentName}}}}},
 		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 	}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(repository, claim, pod).WithObjects(repository, claim, pod).Build()
+	kube := indexedFake(scheme).WithStatusSubresource(repository, claim, pod).WithObjects(repository, claim, pod).Build()
 	r := &RepositoryReconciler{Client: kube, APIReader: kube, Scheme: scheme, RunnerImage: ownershipRunnerImage}
 	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(repository)}
 	require.NoError(t, kube.Delete(ctx, repository))

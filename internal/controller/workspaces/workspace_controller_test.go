@@ -81,7 +81,7 @@ func TestWorkspaceCreatesHomeWhileWorktreeIsProvisioning(t *testing.T) {
 	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
 	requirements.NoError(err)
 	home := new(corev1.PersistentVolumeClaim)
-	requirements.NoError(kubeClient.Get(context.Background(), key, home), "home PVC starts provisioning without waiting for the Worktree")
+	requirements.NoError(kubeClient.Get(context.Background(), client.ObjectKey{Namespace: workspace.Namespace, Name: "workspace-" + workspace.Name + "-home"}, home), "home PVC starts provisioning without waiting for the Worktree")
 }
 
 func TestWorkspaceRuntimeUsesDeferredWorktreeAndLifecycleActions(t *testing.T) {
@@ -167,6 +167,8 @@ func TestWorkspaceRuntimeUsesDeferredWorktreeAndLifecycleActions(t *testing.T) {
 	requirements.NoError(err)
 	assertions.Equal([]string{lifecycleToolTestName, "cleanup"}, beforeStop[0].Command)
 
+	// Mount admission updates Worktree metadata; status writers must re-fetch its resourceVersion.
+	requirements.NoError(kubeClient.Get(ctx, client.ObjectKeyFromObject(worktree), worktree))
 	worktree.Status.Conditions = append(worktree.Status.Conditions, metav1.Condition{
 		Type: repositoriesv1alpha1.WorktreeConditionReady, Status: metav1.ConditionTrue, Reason: "Initialized",
 	})
@@ -293,7 +295,7 @@ func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 	requirements.NoError(err, "create Workspace home clone")
 	home := new(corev1.PersistentVolumeClaim)
-	requirements.NoError(kubeClient.Get(ctx, key, home), "get Workspace home PVC")
+	requirements.NoError(kubeClient.Get(ctx, client.ObjectKey{Namespace: workspace.Namespace, Name: "workspace-" + workspace.Name + "-home"}, home), "get Workspace home PVC")
 	requirements.NotNil(home.Spec.DataSource, "Environment Workspace clones current PVC")
 	assertions.Equal(environment.Status.CurrentVolumeClaimName, home.Spec.DataSource.Name, "clone the committed revision")
 
@@ -332,7 +334,8 @@ func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 	requirements.NoError(kubeClient.Get(ctx, types.NamespacedName{Name: "rc-workspace", Namespace: workspace.Namespace}, serviceAccount), "get shared ServiceAccount")
 	role := new(rbacv1.Role)
 	requirements.NoError(kubeClient.Get(ctx, types.NamespacedName{Name: "rc-workspace", Namespace: workspace.Namespace}, role), "get shared Role")
-	assertions.Contains(role.Rules[0].Resources, "workspaceexecs", "nested rcctl can manage process resources")
+	assertions.Contains(role.Rules, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"persistentvolumeclaims"}, Verbs: []string{verbGet}}, "nested rcctl can preflight storage with read-only access")
+	assertions.Contains(role.Rules[1].Resources, "workspaceexecs", "nested rcctl can manage process resources")
 	leases := new(coordinationv1.LeaseList)
 	requirements.NoError(kubeClient.List(ctx, leases, client.InNamespace(workspace.Namespace)), "list Worktree write Leases")
 	requirements.Len(leases.Items, 1, "claim each writable Worktree atomically")
@@ -343,7 +346,7 @@ func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 	requirements.NoError(kubeClient.Get(ctx, key, persisted), "get reconciled Workspace")
 	assertions.Equal(int64(4), persisted.Status.SourceEnvironmentRevision, "record cloned revision")
 	assertions.Equal(environment.Status.CurrentImage, persisted.Status.RuntimeImage, "snapshot exact image string")
-	assertions.Equal(workspace.Name, persisted.Status.HomeVolumeClaimName, "publish home PVC")
+	assertions.Equal(home.Name, persisted.Status.HomeVolumeClaimName, "publish home PVC")
 	ready := meta.FindStatusCondition(persisted.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady)
 	requirements.NotNil(ready, "publish Ready condition")
 	assertions.Equal(metav1.ConditionFalse, ready.Status, "pending Pod is not ready")

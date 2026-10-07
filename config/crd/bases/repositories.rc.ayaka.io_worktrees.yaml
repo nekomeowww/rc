@@ -101,13 +101,17 @@ spec:
                 minLength: 1
                 type: string
               storage:
-                description: storage optionally overrides the Repository storage settings.
+                description: |-
+                  storage optionally overrides creation-time clone storage defaults.
+                  Subsequent parent changes do not alter an existing independent child PVC.
                 properties:
                   accessModes:
                     description: |-
                       accessModes controls how workloads may mount the child volume. When
-                      omitted, the controller requests ReadWriteMany so a workload and a
-                      parallel inspection Pod can mount the worktree together.
+                      omitted, it inherits the actual source PVC access modes (normally RWO).
+                      Explicit RWX remains available for drivers that support it. The previous
+                      parallel inspection Pod default was removed because it assumed CSI RWX
+                      support; inspection must respect the volume's mount and scheduling limits.
                     items:
                       type: string
                     type: array
@@ -115,15 +119,21 @@ spec:
                     anyOf:
                     - type: integer
                     - type: string
-                    description: size is the requested capacity of the child volume.
+                    description: |-
+                      size is the requested capacity of the child volume. When omitted, it is
+                      the maximum of Repository size, source PVC request, and source capacity.
+                      An explicit size below either source value is rejected before PVC creation.
+                      Planning waits until the source is Bound and reports a positive capacity.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                     x-kubernetes-validations:
                     - message: size must be greater than zero
                       rule: quantity(self).isGreaterThan(quantity('0'))
                   storageClassName:
-                    description: storageClassName is the StorageClass used to provision
-                      the child volume.
+                    description: |-
+                      storageClassName is the StorageClass used to provision the child volume.
+                      When omitted, it inherits the actual source PVC class. A different class
+                      requires compatible CSI cloning support; rc does not infer capabilities.
                     minLength: 1
                     type: string
                 type: object

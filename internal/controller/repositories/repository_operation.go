@@ -101,7 +101,9 @@ func setRepositoryStorageReady(
 		}
 		before := current.DeepCopy()
 		current.Status.ObservedGeneration = repository.Generation
-		current.Status.VolumeClaimName = claimName
+		if claimName != "" {
+			current.Status.VolumeClaimName = claimName
+		}
 		if lastUpdatedAt != nil {
 			current.Status.LastUpdatedAt = lastUpdatedAt.DeepCopy()
 		}

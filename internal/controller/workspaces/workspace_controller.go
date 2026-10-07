@@ -50,17 +50,20 @@ import (
 	"github.com/nekomeowww/rc/internal/lifecycle"
 	"github.com/nekomeowww/rc/internal/rcplatform"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
+	"github.com/nekomeowww/rc/internal/volumeclaim"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
 	"github.com/nekomeowww/rc/internal/worktreeclaim"
+	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
 const (
+	reasonWorktreeDeleting           = "WorktreeDeleting"
 	defaultWorkspaceServiceAccount   = "rc-workspace"
 	workspaceTopologyAnnotation      = "workspaces.rc.ayaka.io/topology"
 	workspaceManagedByLabel          = "workspaces.rc.ayaka.io/workspace"
 	workspaceRootMountPath           = "/workspace"
 	workspaceDependencyRequeue       = 2 * time.Second
-	workspaceFinalizer               = "workspaces.rc.ayaka.io/terminate-processes"
+	workspaceFinalizer               = worktreeownership.WorkspaceCleanupFinalizer
 	workspaceImageAnnotation         = "workspaces.rc.ayaka.io/runtime-image"
 	workspaceRevisionAnnotation      = "workspaces.rc.ayaka.io/source-revision"
 	workspaceWriteClaimsAnnotation   = "workspaces.rc.ayaka.io/write-claims"
@@ -88,6 +91,7 @@ type resolvedWorkspace struct {
 	revision             int64
 	storage              workspacesv1alpha1.PersistentStorageSpec
 	sourceClaimName      string
+	homeClaimName        string
 	volumeMounts         []corev1.VolumeMount
 	volumes              []corev1.Volume
 	hotMounts            []hotWorktreeMount
@@ -96,6 +100,7 @@ type resolvedWorkspace struct {
 	serviceAccount       string
 	automountSAToken     bool
 	writeClaims          []workspaceWriteClaim
+	worktreeMounts       []*repositoriesv1alpha1.Worktree
 	initializers         []workspaceInitializer
 	beforeStop           []lifecycle.Action
 	homeHostPath         string
@@ -136,7 +141,8 @@ type WorkspaceReconciler struct {
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces/finalizers,verbs=update
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaceenvironments;workspaceexecs,verbs=get;list;watch
-// +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=repositories;worktrees,verbs=get;list;watch
+// +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=repositories,verbs=get;list;watch
+// +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=worktrees,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims;pods;serviceaccounts;configmaps;secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods/exec;pods/log;pods/portforward,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch
@@ -188,8 +194,16 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	if resolved.runtime.OS() != rcplatform.Darwin {
+		claimName, resolveErr := volumeclaim.Resolve(ctx, reader, workspace, volumeclaim.WorkspaceHome, 0, workspace.Status.HomeVolumeClaimName)
+		if volumeclaim.IsConflict(resolveErr) {
+			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "VolumeClaimConflict", resolveErr.Error())
+		}
+		if resolveErr != nil {
+			return ctrl.Result{}, resolveErr
+		}
+		resolved.homeClaimName = claimName
 		home := new(corev1.PersistentVolumeClaim)
-		err = r.Get(ctx, req.NamespacedName, home)
+		err = r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: claimName}, home)
 		if errors.IsNotFound(err) {
 			home = workspaceHomeVolumeClaim(workspace, resolved)
 			if err := controllerutil.SetControllerReference(workspace, home, r.Scheme); err != nil {
@@ -205,8 +219,8 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("get Workspace home PersistentVolumeClaim: %w", err)
 		}
-		if !metav1.IsControlledBy(home, workspace) {
-			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "VolumeClaimConflict", "Workspace home PersistentVolumeClaim is not owned by this Workspace")
+		if ownerErr := volumeclaim.CheckOwner(home, workspace); ownerErr != nil {
+			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "VolumeClaimConflict", ownerErr.Error())
 		}
 		if workspace.Status.RuntimeImage == "" && home.Annotations[workspaceImageAnnotation] != "" {
 			resolved.image = home.Annotations[workspaceImageAnnotation]
@@ -234,6 +248,14 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	resolved, reason, message, err = r.resolveWorkspaceDependencies(ctx, workspace, resolved)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	// Closing storage admission must not prevent its current consumer from stopping.
+	if reason == reasonWorktreeDeleting && workspace.Spec.DesiredState == workspacesv1alpha1.WorkspaceDesiredStateSuspended {
+		active, _, _, err := workspaceProcessState(ctx, r.Client, workspace)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		return r.suspendWorkspace(ctx, workspace, resolved, active)
 	}
 	if reason != "" {
 		result := ctrl.Result{}
@@ -268,31 +290,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{Requeue: true}, nil
 	}
 	if desiredState == workspacesv1alpha1.WorkspaceDesiredStateSuspended {
-		if active {
-			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "ActiveProcesses", "Workspace cannot suspend while processes are active")
-		}
-		if removed, err := r.removeHotMounts(ctx, workspace); err != nil {
-			return ctrl.Result{}, err
-		} else if !removed {
-			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Unmounting", "Workspace Worktree mounts are stopping")
-		}
-		pod := new(corev1.Pod)
-		if err := reader.Get(ctx, req.NamespacedName, pod); err == nil {
-			if !metav1.IsControlledBy(pod, workspace) {
-				return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "RuntimePodConflict", "A Pod with the Workspace runtime name exists but is not owned by this Workspace")
-			}
-			if err := r.Delete(ctx, pod); err != nil {
-				return ctrl.Result{}, fmt.Errorf("delete suspended Workspace runtime Pod: %w", err)
-			}
-			log.Info("Deleted Workspace runtime Pod", "name", pod.Name)
-			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Stopping", "Workspace runtime Pod is stopping")
-		} else if !errors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("get suspended Workspace runtime Pod: %w", err)
-		}
-		if err := r.releaseClaims(ctx, workspace); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Suspended", "Workspace runtime is suspended")
+		return r.suspendWorkspace(ctx, workspace, resolved, active)
 	}
 
 	if resolved.automountSAToken && resolved.serviceAccount == defaultWorkspaceServiceAccount {
@@ -343,6 +341,12 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "RepositoryNotReady", "Repository is busy or not ready for mounting")
 			}
 		}
+		if admitted, err := r.admitWorktreeMounts(ctx, workspace, resolved.worktreeMounts); err != nil {
+			return ctrl.Result{}, err
+		} else if !admitted {
+			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reasonWorktreeDeleting, "Worktree mount admission is closed")
+		}
+
 		pod, err = workspaceRuntimePod(workspace, resolved)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -422,6 +426,12 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reasonStarting, "Workspace runtime Pod is starting")
 	}
 	if resolved.runtime.OS() == corev1.Linux {
+		if admitted, err := r.admitWorktreeMounts(ctx, workspace, resolved.worktreeMounts); err != nil {
+			return ctrl.Result{}, err
+		} else if !admitted {
+			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reasonWorktreeDeleting, "Worktree mount admission is closed")
+		}
+
 		ready, reason, message, err := r.reconcileHotMounts(ctx, workspace, pod, resolved.hotMounts, active)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -429,6 +439,10 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if !ready {
 			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reason, message)
 		}
+		if err := r.releaseOldWorktreeMounts(ctx, workspace, pod, resolved.worktreeMounts); err != nil {
+			return ctrl.Result{}, err
+		}
+
 		if err := r.releaseWriteClaims(ctx, workspace, resolved.writeClaims); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -500,6 +514,12 @@ func (r *WorkspaceReconciler) finalizeWorkspace(ctx context.Context, workspace *
 	} else if !errors.IsNotFound(err) {
 		return ctrl.Result{}, fmt.Errorf("get runtime Pod while finalizing Workspace: %w", err)
 	}
+	if gone, err := r.hotMountsGone(ctx, workspace); err != nil {
+		return ctrl.Result{}, err
+	} else if !gone {
+		return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, nil
+	}
+
 	if err := r.releaseClaims(ctx, workspace); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -593,6 +613,10 @@ func (r *WorkspaceReconciler) releaseClaims(ctx context.Context, workspace *work
 	// reader; cached absence must not release another writer into an old mount.
 	removed, err := r.removeHotMounts(ctx, workspace)
 	if err != nil || !removed {
+		return err
+	}
+
+	if err := r.releaseWorktreeMounts(ctx, workspace, nil); err != nil {
 		return err
 	}
 
@@ -708,6 +732,21 @@ func (r *WorkspaceReconciler) resolveWorkspaceDependencies(ctx context.Context, 
 		}
 		if reason != "" {
 			return resolved, reason, message, nil
+		}
+
+		if mount.WorktreeRef != nil {
+			captured := new(repositoriesv1alpha1.Worktree)
+			reader := r.APIReader
+			if reader == nil {
+				reader = r.Client
+			}
+			if err := reader.Get(ctx, client.ObjectKey{Namespace: workspace.Namespace, Name: mount.WorktreeRef.Name}, captured); err != nil {
+				return nil, "", "", err
+			}
+			if captured.Status.VolumeClaimName != volume.PersistentVolumeClaim.ClaimName || worktreeownership.MountsClosed(captured) {
+				return resolved, reasonWorktreeDeleting, "Worktree changed while resolving the mount", nil
+			}
+			resolved.worktreeMounts = append(resolved.worktreeMounts, captured)
 		}
 		if resolved.runtime.OS() == corev1.Linux && mount.WorktreeRef != nil {
 			if _, duplicate := hotWorktreeNames[mount.WorktreeRef.Name]; duplicate {
@@ -851,6 +890,10 @@ func (r *WorkspaceReconciler) resolveWorkspaceMount(ctx context.Context, namespa
 			}
 			return volume, volumeMount, nil, nil, "", "", fmt.Errorf("get mounted Worktree: %w", err)
 		}
+		if worktreeownership.MountsClosed(worktree) {
+			return volume, volumeMount, nil, nil, reasonWorktreeDeleting, fmt.Sprintf("Mounted Worktree %s is being deleted or has lost its storage", worktree.Name), nil
+		}
+
 		ready := meta.FindStatusCondition(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady)
 		worktreeReady := ready != nil && ready.Status == metav1.ConditionTrue
 		deferred := worktreebootstrap.Deferred(worktree)
@@ -910,7 +953,7 @@ func workspaceHomeVolumeClaim(workspace *workspacesv1alpha1.Workspace, resolved 
 	volumeMode := resolved.storage.VolumeModeOrDefault()
 	claim := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      workspace.Name,
+			Name:      resolved.homeClaimName,
 			Namespace: workspace.Namespace,
 			Labels:    map[string]string{workspaceManagedByLabel: workspace.Name},
 			Annotations: map[string]string{
@@ -976,7 +1019,7 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 				workspaceWriteClaimsAnnotation:   string(writeClaims),
 				workspaceRuntimePolicyAnnotation: workspaceRuntimePolicyVersion,
 			},
-		}, Image: resolved.image, HomeClaim: workspace.Name, HomeHostPath: resolved.homeHostPath,
+		}, Image: resolved.image, HomeClaim: resolved.homeClaimName, HomeHostPath: resolved.homeHostPath,
 		HotMountRoot:   hotMountRoot,
 		ServiceAccount: resolved.serviceAccount, AutomountToken: resolved.automountSAToken,
 		Resources: workspace.Spec.Resources, AdditionalVolumes: resolved.volumes, AdditionalMounts: resolved.volumeMounts,
@@ -1114,6 +1157,8 @@ func (r *WorkspaceReconciler) ensureWorkspaceAccess(ctx context.Context, namespa
 	role := &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{Name: defaultWorkspaceServiceAccount, Namespace: namespace},
 		Rules: []rbacv1.PolicyRule{
+			// Nested rcctl creation preflights PVC ownership without changing storage.
+			{APIGroups: []string{""}, Resources: []string{"persistentvolumeclaims"}, Verbs: []string{verbGet}},
 			{APIGroups: []string{"workspaces.rc.ayaka.io"}, Resources: []string{"workspaceenvironments", "workspaces", "workspaceexecs", "workspaceexecs/status"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
 			{APIGroups: []string{"repositories.rc.ayaka.io"}, Resources: []string{"repositories", "repositoryexecs", "repositorysyncs", "worktrees"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
 			{APIGroups: []string{"configs.rc.ayaka.io"}, Resources: []string{"credentials", "agentcredentials"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
@@ -1208,8 +1253,8 @@ func (r *WorkspaceReconciler) setWorkspaceStatus(ctx context.Context, key types.
 	current.Status.ObservedGeneration = current.Generation
 	if current.Spec.OS == rcplatform.Darwin {
 		current.Status.HomeVolumeClaimName = ""
-	} else {
-		current.Status.HomeVolumeClaimName = current.Name
+	} else if resolved != nil && resolved.homeClaimName != "" {
+		current.Status.HomeVolumeClaimName = resolved.homeClaimName
 	}
 	if resolved != nil {
 		if current.Status.RuntimeImage == "" {

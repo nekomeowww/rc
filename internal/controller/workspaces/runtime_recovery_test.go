@@ -441,8 +441,12 @@ func TestWorkspaceExecDoesNotStartWhenClaimedRuntimeTerminates(t *testing.T) {
 				return err
 			}
 			if execution, ok := obj.(*workspacesv1alpha1.WorkspaceExec); ok && execution.Status.Phase == workspacesv1alpha1.WorkspaceExecPhaseStarting {
-				fixture.pod.Status.Phase = corev1.PodSucceeded
-				return c.Status().Update(ctx, fixture.pod)
+				currentPod := new(corev1.Pod)
+				if err := c.Get(ctx, client.ObjectKeyFromObject(fixture.pod), currentPod); err != nil {
+					return err
+				}
+				currentPod.Status.Phase = corev1.PodSucceeded
+				return c.Status().Update(ctx, currentPod)
 			}
 			return nil
 		},

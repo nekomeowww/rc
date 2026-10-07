@@ -35,6 +35,7 @@ import (
 	"github.com/nekomeowww/rc/internal/cli/rcctl/command"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/progress"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
+	"github.com/nekomeowww/rc/internal/volumeclaim"
 	workspaceservice "github.com/nekomeowww/rc/internal/workspaces"
 )
 
@@ -99,6 +100,9 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			}
 			if options.idleTimeout >= 0 {
 				environment.Spec.EditorIdleTimeout = &metav1.Duration{Duration: options.idleTimeout}
+			}
+			if err := volumeclaim.Preflight(cmd.Context(), clusterClient.Kube, environment, volumeclaim.EnvironmentCurrent, 1); err != nil {
+				return err
 			}
 			if err := clusterClient.Kube.Create(cmd.Context(), environment); err != nil {
 				return fmt.Errorf("create WorkspaceEnvironment: %w", err)

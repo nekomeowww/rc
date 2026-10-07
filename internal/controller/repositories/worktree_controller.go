@@ -80,6 +80,7 @@ type WorktreeReconciler struct {
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;delete
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces,verbs=get;list;watch
+// +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=worktreeexecs,verbs=get;list;watch
 //
 //nolint:gocyclo // Reconcile is an explicit resource lifecycle state machine.
 func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -89,6 +90,15 @@ func (r *WorktreeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	worktree := new(repositoriesv1alpha1.Worktree)
 	if err := r.APIReader.Get(ctx, req.NamespacedName, worktree); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	// Migration and stale-holder repair run before deletion too: a holder
+	// whose owner was force-deleted must not deadlock the finalizer.
+	if changed, err := r.reconcileWorktreeHolders(ctx, worktree); err != nil {
+		return ctrl.Result{}, err
+	} else if changed {
+		if err := r.APIReader.Get(ctx, req.NamespacedName, worktree); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
+		}
 	}
 	if !worktree.DeletionTimestamp.IsZero() {
 		return r.reconcileDelete(ctx, worktree)
@@ -367,6 +377,16 @@ func (r *WorktreeReconciler) worktreesForWorkspace(_ context.Context, object cli
 	}
 	slices.SortFunc(requests, func(left, right ctrl.Request) int { return strings.Compare(left.Name, right.Name) })
 	return requests
+}
+
+// worktreeForExec enqueues an exec's Worktree, so a deleted exec's holder is
+// swept and a running one's legacy Lease is imported.
+func worktreeForExec(_ context.Context, object client.Object) []ctrl.Request {
+	exec, ok := object.(*repositoriesv1alpha1.WorktreeExec)
+	if !ok || exec.Spec.WorktreeRef.Name == "" {
+		return nil
+	}
+	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: exec.Namespace, Name: exec.Spec.WorktreeRef.Name}}}
 }
 
 func (r *WorktreeReconciler) reconcileWorkspaceBootstrap(ctx context.Context, worktree *repositoriesv1alpha1.Worktree, claimName, sourceClaimName, path string) error {
@@ -725,6 +745,7 @@ func (r *WorktreeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(r.worktreesForClaim)).
 		Owns(&batchv1.Job{}).
 		Watches(&workspacesv1alpha1.Workspace{}, handler.EnqueueRequestsFromMapFunc(r.worktreesForWorkspace)).
+		Watches(&repositoriesv1alpha1.WorktreeExec{}, handler.EnqueueRequestsFromMapFunc(worktreeForExec)).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, object client.Object) []ctrl.Request {
 			pod, ok := object.(*corev1.Pod)
 			if !ok {

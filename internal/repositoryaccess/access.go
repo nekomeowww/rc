@@ -181,6 +181,13 @@ func (g Gate) Acquire(ctx context.Context, repository *repositories.Repository, 
 	return Admitted, nil
 }
 
+// ConsumersStopped reports that no Pod uses the parent volume and no pending
+// clone reads it, read outside the cache. Sweep requires it before removing a
+// reservation whose owner is gone.
+func (g Gate) ConsumersStopped(ctx context.Context, repository *repositories.Repository) (bool, error) {
+	return g.consumersStopped(ctx, repository, Write)
+}
+
 // consumersStopped protects admission across upgrades and observes consumers
 // outside rc without treating a cached absence as proof that they stopped.
 func (g Gate) consumersStopped(ctx context.Context, repository *repositories.Repository, mode Mode) (bool, error) {

@@ -67,6 +67,8 @@ type RepositoryReconciler struct {
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=repositories.rc.ayaka.io,resources=worktrees;repositorysyncs;repositoryexecs,verbs=get
+// +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces,verbs=get
 
 // Reconcile ensures that every Repository owns one persistent parent volume and
 // that its configured remote is bootstrapped into that volume.
@@ -81,6 +83,10 @@ func (r *RepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	if !repository.DeletionTimestamp.IsZero() {
 		return r.reconcileDeletionBlocked(ctx, repository)
+	}
+	// A reservation whose owner was force-deleted would block writers forever.
+	if err := r.sweepRepositoryHolders(ctx, repository); err != nil {
+		return ctrl.Result{}, err
 	}
 	gate := repositoryaccess.Gate{Client: r.Client, Reader: r.APIReader}
 	holder := repositoryaccess.Holder(repositoryaccess.KindRepository, repository, repositoryaccess.Write)

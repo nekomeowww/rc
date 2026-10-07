@@ -21,13 +21,13 @@ import (
 	"testing"
 	"time"
 
-	"sigs.k8s.io/controller-runtime/pkg/client"
-
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
@@ -39,6 +39,8 @@ import (
 const testAgentCommand = "codex"
 const testTaskArgument = "task"
 const testNameFlag = "--name"
+const testRetainFlag = "--retain"
+const testRemoveFlag = "--rm"
 const testDevelopmentName = "dev"
 const testEnvironmentValue = "value"
 
@@ -126,19 +128,19 @@ func TestNPMRegistryRoutingWithoutFlagLeavesEnvironmentUnchanged(t *testing.T) {
 	assert.Equal(t, map[string]string{workspaceservice.NPMRegistryEnvironmentName: "caller-value"}, processEnvironment, "preserve process environment when the flag is absent")
 }
 
-func TestRunCleanupIsExplicit(t *testing.T) {
+func TestRunCleanupFlagsAreExplicit(t *testing.T) {
 	t.Parallel()
 	command := newRunCommand(kubeconfig.NewFlags(), true)
 	remove := command.Flag("rm")
 	require.NotNil(t, remove)
-	assert.Equal(t, "false", remove.DefValue, "retain a new Workspace by default")
+	assert.Equal(t, "false", remove.DefValue, "--rm is an explicit override; runner resolves name and --retain defaults")
 	assert.Nil(t, command.Flag("temporary"))
 	assert.Nil(t, command.Flag("workspace"), "run always creates a new Workspace")
 }
 
 func TestExecRejectsWorkspaceCreationFlags(t *testing.T) {
 	t.Parallel()
-	for _, flag := range []string{"image", "size", "storage-class", "rm", "name", "temporary"} {
+	for _, flag := range []string{"image", "size", "storage-class", "rm", "retain", "name", "temporary", "idle-timeout", "delete-after-suspended"} {
 		t.Run(flag, func(t *testing.T) {
 			t.Parallel()
 			command := newRunCommand(kubeconfig.NewFlags(), false)
@@ -295,4 +297,67 @@ func TestProcessListSelectorsBoundDefaultPSHistoryTransfer(t *testing.T) {
 	require.Equal(t, client.MatchingFields{"status.phase": "Running"}, processListSelectors(listOptions{}))
 	require.Empty(t, processListSelectors(listOptions{all: true}))
 	require.Equal(t, client.MatchingFields{"spec.targetRef.name": "coding", "status.phase": "Failed"}, processListSelectors(listOptions{workspace: "coding", phase: "failed"}))
+}
+
+func TestRunRejectsConflictingRetentionBeforeConnecting(t *testing.T) {
+	command := newRunCommand(kubeconfig.NewFlags(), true)
+	command.SetArgs([]string{testRemoveFlag, testRetainFlag, "--", testAgentCommand})
+	require.ErrorContains(t, command.Execute(), "[rm retain]")
+}
+
+func TestRunLifecycleNotice(t *testing.T) {
+	t.Parallel()
+	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: testDevelopmentName}}
+	message := runLifecycleNotice(workspace)
+	assert.Contains(t, message, "retention=Retain")
+	assert.NotContains(t, message, "Warning", "named retention is a supported default")
+	workspace.Spec.RetentionPolicy = workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit
+	message = runLifecycleNotice(workspace)
+	assert.Contains(t, message, "retention=DeleteAfterProcessesExit")
+	assert.Contains(t, message, "owned storage will be deleted 5m")
+	assert.Contains(t, message, "--retain to keep")
+	assert.NotContains(t, message, "Warning")
+}
+
+func TestRunRejectsInvalidLifecycleBeforeConnecting(t *testing.T) {
+	command := newRunCommand(kubeconfig.NewFlags(), true)
+	command.SetArgs([]string{"--delete-after-suspended=-1h", "--", testAgentCommand})
+	require.EqualError(t, command.Execute(), "lifecycle durations must not be negative")
+}
+
+func TestRunFlagsToRetentionPolicy(t *testing.T) {
+	t.Parallel()
+	for _, scenario := range []struct {
+		name   string
+		flags  []string
+		policy workspacesv1alpha1.WorkspaceRetentionPolicy
+	}{
+		{name: "default"},
+		{name: "name does not override policy", flags: []string{testNameFlag, testDevelopmentName}},
+		{name: "remove", flags: []string{testRemoveFlag}, policy: workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit},
+		{name: "retain", flags: []string{testRetainFlag}, policy: workspacesv1alpha1.WorkspaceRetentionPolicyRetain},
+		{name: "retain false uses default", flags: []string{"--retain=false"}},
+		{name: "legacy rm false", flags: []string{"--rm=false"}, policy: workspacesv1alpha1.WorkspaceRetentionPolicyRetain},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			options := runOptions{createWorkspace: true}
+			addRunFlags(cmd, &options)
+			require.NoError(t, cmd.ParseFlags(scenario.flags))
+			request, err := options.targetRequest(cmd.Flags())
+			require.NoError(t, err)
+			assert.Equal(t, scenario.policy, request.RetentionPolicy)
+		})
+	}
+}
+
+func TestRunFlagsToWorkspaceClocks(t *testing.T) {
+	cmd := &cobra.Command{}
+	options := runOptions{createWorkspace: true}
+	addRunFlags(cmd, &options)
+	require.NoError(t, cmd.ParseFlags([]string{"--idle-timeout=1h", "--delete-after-suspended=24h"}))
+	request, err := options.targetRequest(cmd.Flags())
+	require.NoError(t, err)
+	assert.Equal(t, time.Hour, request.IdleTimeout.Duration)
+	assert.Equal(t, 24*time.Hour, request.DeleteAfterSuspended.Duration)
 }

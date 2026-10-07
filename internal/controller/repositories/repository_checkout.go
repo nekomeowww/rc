@@ -112,7 +112,7 @@ func repositoryCheckoutJob(
 					Volumes: append([]corev1.Volume{{
 						Name: workerVolumeName,
 						VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-							ClaimName: repository.Name,
+							ClaimName: repository.Status.VolumeClaimName,
 						}},
 					}}, auth.volumes...),
 				},

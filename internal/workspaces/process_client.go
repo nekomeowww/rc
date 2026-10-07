@@ -40,6 +40,7 @@ import (
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/rcplatform"
+	"github.com/nekomeowww/rc/internal/workspaceadmission"
 )
 
 const WorkspaceHomePath = "/home/agent"
@@ -154,9 +155,12 @@ func (processes *ProcessClient) Start(ctx context.Context, request ProcessStartR
 	if err != nil {
 		return nil, err
 	}
+	// This reference pins the chosen owner UID for name-reuse safety. It is a
+	// cleanup edge, not admission: the controller must still cross the fence.
 	if err := controllerutil.SetControllerReference(owner, process, processes.Kube.Scheme()); err != nil {
 		return nil, fmt.Errorf("set process target owner on WorkspaceExec: %w", err)
 	}
+
 	if err := processes.Kube.Create(ctx, process); err != nil {
 		return nil, fmt.Errorf("create WorkspaceExec: %w", err)
 	}
@@ -189,11 +193,17 @@ func (processes *ProcessClient) processOwner(ctx context.Context, namespace stri
 		if err := processes.Kube.Get(ctx, key, workspace); err != nil {
 			return nil, fmt.Errorf("get WorkspaceExec Workspace owner: %w", err)
 		}
+		if err := workspaceadmission.Check(workspace); err != nil {
+			return nil, err
+		}
 		return workspace, nil
 	case workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment:
 		environment := new(workspacesv1alpha1.WorkspaceEnvironment)
 		if err := processes.Kube.Get(ctx, key, environment); err != nil {
 			return nil, fmt.Errorf("get WorkspaceExec WorkspaceEnvironment owner: %w", err)
+		}
+		if !environment.DeletionTimestamp.IsZero() {
+			return nil, fmt.Errorf("WorkspaceEnvironment %q is deleting", environment.Name)
 		}
 		return environment, nil
 	default:

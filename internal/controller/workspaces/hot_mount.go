@@ -171,7 +171,7 @@ func hotMountCleanupPod(workspace *workspacesv1alpha1.Workspace, helper *corev1.
 func (r *WorkspaceReconciler) cleanFailedHotMount(ctx context.Context, workspace *workspacesv1alpha1.Workspace, helper *corev1.Pod) (bool, string, error) {
 	cleaner := new(corev1.Pod)
 	key := client.ObjectKey{Name: helper.Name + "-clean", Namespace: workspace.Namespace}
-	if err := r.Get(ctx, key, cleaner); errors.IsNotFound(err) {
+	if err := r.runtimeReader().Get(ctx, key, cleaner); errors.IsNotFound(err) {
 		cleaner, err = hotMountCleanupPod(workspace, helper, r.RunnerImage)
 		if err != nil {
 			return false, "", err
@@ -272,7 +272,7 @@ func hotMountHelperPod(workspace *workspacesv1alpha1.Workspace, runtime *corev1.
 
 func (r *WorkspaceReconciler) removeOrphanHotMountCleanups(ctx context.Context, workspace *workspacesv1alpha1.Workspace, helpers *corev1.PodList) (bool, string, error) {
 	cleanupPods := new(corev1.PodList)
-	if err := r.List(ctx, cleanupPods, client.InNamespace(workspace.Namespace), client.MatchingLabels{
+	if err := r.runtimeReader().List(ctx, cleanupPods, client.InNamespace(workspace.Namespace), client.MatchingLabels{
 		workspaceManagedByLabel: workspace.Name, hotMountCleanupLabel: hotMountLabelValue,
 	}); err != nil {
 		return false, "", fmt.Errorf("list hot Worktree cleanup Pods: %w", err)
@@ -304,7 +304,7 @@ func (r *WorkspaceReconciler) removeOrphanHotMountCleanups(ctx context.Context, 
 
 func (r *WorkspaceReconciler) reconcileHotMounts(ctx context.Context, workspace *workspacesv1alpha1.Workspace, runtime *corev1.Pod, desired []hotWorktreeMount, active bool) (bool, string, string, error) {
 	listed := new(corev1.PodList)
-	if err := r.List(ctx, listed, client.InNamespace(workspace.Namespace), client.MatchingLabels{
+	if err := r.runtimeReader().List(ctx, listed, client.InNamespace(workspace.Namespace), client.MatchingLabels{
 		workspaceManagedByLabel: workspace.Name, hotMountHelperLabel: hotMountLabelValue,
 	}); err != nil {
 		return false, "", "", fmt.Errorf("list hot Worktree mount Pods: %w", err)

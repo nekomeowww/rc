@@ -34,6 +34,7 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/rcplatform"
 )
 
 const runnerTestNamespace = "development"
@@ -52,6 +53,7 @@ func TestRunnerRejectsRepositoryRequirementMissingFromExistingWorkspace(t *testi
 	t.Parallel()
 	requirements := require.New(t)
 	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
 	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme), "register Repository API types")
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
 	workspace := &workspacesv1alpha1.Workspace{
@@ -78,6 +80,7 @@ func TestRunnerCreatesTemporaryWorkspaceAndWorktreeForRepository(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
 	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme), "register Repository API types")
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
 	repository := &repositoriesv1alpha1.Repository{
@@ -107,7 +110,7 @@ func TestRunnerCreatesTemporaryWorkspaceAndWorktreeForRepository(t *testing.T) {
 	gpuResource := corev1.ResourceName("nvidia.com/gpu")
 
 	result, err := runner.Prepare(context.Background(), RunRequest{
-		Namespace: runnerTestNamespace, Create: true, Remove: true, Environment: environment.Name,
+		Namespace: runnerTestNamespace, Create: true, RetentionPolicy: workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit, Environment: environment.Name,
 		Repositories: []MountRequest{{Name: repository.Name, MountName: "rc", Path: "rc"}},
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{gpuResource: resource.MustParse("2")},
@@ -136,6 +139,7 @@ func TestRunnerMarksTemporaryWorkspaceAndOwnsGeneratedWorktree(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
 	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme), "register Repository API types")
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
 	repository := &repositoriesv1alpha1.Repository{
@@ -148,7 +152,7 @@ func TestRunnerMarksTemporaryWorkspaceAndOwnsGeneratedWorktree(t *testing.T) {
 	runner := &Runner{Client: kubeClient, NameGenerator: func(string) string { return "codex-temporary" }}
 
 	target, err := runner.Prepare(context.Background(), RunRequest{
-		Namespace: runnerTestNamespace, Create: true, Remove: true, Image: runnerTestImage,
+		Namespace: runnerTestNamespace, Create: true, RetentionPolicy: workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit, Image: runnerTestImage,
 		Repositories: []MountRequest{{Name: repository.Name}},
 	})
 	requirements.NoError(err, "prepare temporary Workspace")
@@ -169,6 +173,7 @@ func TestRunnerWritesEnvironmentToTemporaryWorkspace(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
 	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
 	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme), "register Repository API types")
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -176,7 +181,7 @@ func TestRunnerWritesEnvironmentToTemporaryWorkspace(t *testing.T) {
 	environment := []corev1.EnvVar{{Name: NPMRegistryEnvironmentName, Value: testNPMRegistryURL + "/"}, {Name: CorepackRegistryEnvironmentName, Value: testNPMRegistryURL}}
 
 	target, err := runner.Prepare(context.Background(), RunRequest{
-		Namespace: runnerTestNamespace, Create: true, Remove: true, Image: runnerTestImage, Env: environment,
+		Namespace: runnerTestNamespace, Create: true, RetentionPolicy: workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit, Image: runnerTestImage, Env: environment,
 	})
 	requirements.NoError(err, "prepare temporary Workspace")
 	assert.Equal(t, environment, target.Workspace.Spec.Env, "put registry defaults on the temporary Workspace")
@@ -187,6 +192,7 @@ func TestRunnerUsesDefaultWorkspaceWhenNoCodeSourceIsSelected(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
 	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme), "register Repository API types")
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
 	defaultWorkspace := &workspacesv1alpha1.Workspace{
@@ -213,6 +219,7 @@ func TestRunnerRequiresWorkspaceSelectionWithoutTemporary(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
 	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
 	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme), "register Repository API types")
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
 	runner := &Runner{Client: fake.NewClientBuilder().WithScheme(scheme).Build()}
@@ -226,11 +233,12 @@ func TestRunnerRejectsWorkspaceSelectionWithTemporary(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
 	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
 	runner := &Runner{Client: fake.NewClientBuilder().WithScheme(scheme).Build()}
 
 	_, err := runner.Prepare(context.Background(), RunRequest{
-		Namespace: runnerTestNamespace, Workspace: runnerTestExistingWorkspace, Create: true, Remove: true,
+		Namespace: runnerTestNamespace, Workspace: runnerTestExistingWorkspace, Create: true, RetentionPolicy: workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit,
 	})
 
 	requirements.EqualError(err, "workspace selection and creation are mutually exclusive")
@@ -240,6 +248,7 @@ func TestRunnerRejectsExistingTemporaryWorkspace(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
 	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
 	workspace := &workspacesv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{Name: "temporary", Namespace: runnerTestNamespace},
@@ -264,6 +273,7 @@ func TestRunnerTreatsGPUResourcesAsRequirementsForExistingWorkspace(t *testing.T
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
 	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme), "register Repository API types")
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
 	gpuResource := corev1.ResourceName("nvidia.com/gpu")
@@ -290,6 +300,7 @@ func TestRunnerTreatsCredentialsAsRequirementsForExistingWorkspace(t *testing.T)
 	t.Parallel()
 	requirements := require.New(t)
 	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
 	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme), "register Repository API types")
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
 	workspace := &workspacesv1alpha1.Workspace{
@@ -305,6 +316,7 @@ func TestRunnerCreatesWorkspaceBeforeGeneratedWorktrees(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
 	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
 	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme), "register Repository API types")
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
 	repository := &repositoriesv1alpha1.Repository{
@@ -315,7 +327,7 @@ func TestRunnerCreatesWorkspaceBeforeGeneratedWorktrees(t *testing.T) {
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repository, conflict).Build()
 	runner := &Runner{Client: kubeClient, NameGenerator: func(string) string { return conflict.Name }}
 
-	_, err := runner.Prepare(context.Background(), RunRequest{Namespace: runnerTestNamespace, Create: true, Remove: true, Image: runnerTestImage, Repositories: []MountRequest{{Name: repository.Name}}})
+	_, err := runner.Prepare(context.Background(), RunRequest{Namespace: runnerTestNamespace, Create: true, RetentionPolicy: workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit, Image: runnerTestImage, Repositories: []MountRequest{{Name: repository.Name}}})
 	requirements.Error(err, "report Workspace create conflict")
 	worktrees := new(repositoriesv1alpha1.WorktreeList)
 	requirements.NoError(kubeClient.List(context.Background(), worktrees), "list Worktrees after rollback")
@@ -326,6 +338,7 @@ func TestRunnerRollsBackTemporaryTopologyWhenWorktreeCreationFails(t *testing.T)
 	t.Parallel()
 	requirements := require.New(t)
 	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
 	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme), "register Repository API types")
 	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
 	repositories := []client.Object{
@@ -357,7 +370,7 @@ func TestRunnerRollsBackTemporaryTopologyWhenWorktreeCreationFails(t *testing.T)
 	runner := &Runner{Client: kubeClient, NameGenerator: func(string) string { return "temporary-rollback" }}
 
 	_, err := runner.Prepare(context.Background(), RunRequest{
-		Namespace: runnerTestNamespace, Create: true, Remove: true, Image: runnerTestImage,
+		Namespace: runnerTestNamespace, Create: true, RetentionPolicy: workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit, Image: runnerTestImage,
 		Repositories: []MountRequest{{Name: "first"}, {Name: "second"}},
 	})
 	requirements.ErrorContains(err, "injected Worktree creation failure", "report the Worktree creation error")
@@ -365,21 +378,110 @@ func TestRunnerRollsBackTemporaryTopologyWhenWorktreeCreationFails(t *testing.T)
 	requirements.Error(kubeClient.Get(context.Background(), client.ObjectKey{Name: "temporary-rollback", Namespace: runnerTestNamespace}, workspace), "delete the partially created Workspace")
 	worktrees := new(repositoriesv1alpha1.WorktreeList)
 	requirements.NoError(kubeClient.List(context.Background(), worktrees), "list Worktrees after rollback")
-	requirements.Empty(worktrees.Items, "delete every Worktree created before the failure")
+	requirements.Len(worktrees.Items, 1, "only the first Worktree was created")
+	// Cleanup requests deletion; the controller must release clone reservations
+	// and writer protection before the API object can disappear.
+	requirements.False(worktrees.Items[0].DeletionTimestamp.IsZero(), "request deletion of every created Worktree")
+	requirements.Contains(worktrees.Items[0].Finalizers, "repositories.rc.ayaka.io/worktree-delete-protection")
 }
 
-func TestRunnerCreatesRetainedNamedWorkspace(t *testing.T) {
+// ROOT CAUSE: command creation used the persistent-machine default even for
+// unnamed runs. Naming supplies the default, and one explicit policy overrides it.
+func TestRunnerRetentionMatrix(t *testing.T) {
+	t.Parallel()
+	for _, scenario := range []struct {
+		name      string
+		policy    workspacesv1alpha1.WorkspaceRetentionPolicy
+		temporary bool
+	}{
+		{name: "", temporary: true},
+		{name: "named"},
+		{name: "", policy: workspacesv1alpha1.WorkspaceRetentionPolicyRetain},
+		{name: "named", policy: workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit, temporary: true},
+	} {
+		t.Run(scenario.name+"/"+string(scenario.policy), func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+			runner := &Runner{Client: kubeClient, NameGenerator: func(string) string { return "generated" }}
+			target, err := runner.Prepare(context.Background(), RunRequest{
+				Namespace: runnerTestNamespace, Create: true, Name: scenario.name,
+				Image: runnerTestImage, RetentionPolicy: scenario.policy,
+			})
+			require.NoError(t, err)
+			assert.True(t, target.Created)
+			assert.Equal(t, scenario.temporary, target.Workspace.Spec.IsTemporary())
+			assert.Nil(t, target.Workspace.Spec.DeleteAfterSuspended, "storage expiry is opt-in")
+		})
+	}
+}
+
+func TestRunnerRejectsDeletingWorktreeBeforeCreatingWorkspace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, repositoriesv1alpha1.AddToScheme(scheme))
+	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
+	now := metav1.Now()
+	worktree := &repositoriesv1alpha1.Worktree{ObjectMeta: metav1.ObjectMeta{Name: "deleting", Namespace: runnerTestNamespace, DeletionTimestamp: &now, Finalizers: []string{"test/hold"}}, Status: repositoriesv1alpha1.WorktreeStatus{Conditions: []metav1.Condition{{Type: repositoriesv1alpha1.WorktreeConditionReady, Status: metav1.ConditionTrue}}}}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(worktree).Build()
+	_, err := (&Runner{Client: kube}).Prepare(context.Background(), RunRequest{Create: true, Name: "new-workspace", Namespace: runnerTestNamespace, Worktrees: []MountRequest{{Name: worktree.Name}}})
+	require.ErrorContains(t, err, "is being deleted")
+	workspaces := new(workspacesv1alpha1.WorkspaceList)
+	require.NoError(t, kube.List(context.Background(), workspaces))
+	assert.Empty(t, workspaces.Items)
+}
+
+func TestRunnerRejectsPVCConflictBeforeCreatingTopology(t *testing.T) {
+	t.Parallel()
+	for _, claimName := range []string{"workspace-blocked-home", "worktree-blocked-source"} {
+		t.Run(claimName, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, repositoriesv1alpha1.AddToScheme(scheme))
+			require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
+			repository := &repositoriesv1alpha1.Repository{
+				ObjectMeta: metav1.ObjectMeta{Name: "source", Namespace: runnerTestNamespace},
+				Status:     repositoriesv1alpha1.RepositoryStatus{Conditions: []metav1.Condition{{Type: repositoriesv1alpha1.RepositoryConditionStorageReady, Status: metav1.ConditionTrue}}},
+			}
+			claim := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: runnerTestNamespace}}
+			kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repository, claim).Build()
+			_, err := (&Runner{Client: kube}).Prepare(t.Context(), RunRequest{
+				Namespace: runnerTestNamespace, Create: true, Name: "blocked", Image: runnerTestImage,
+				Repositories: []MountRequest{{Name: repository.Name}},
+			})
+			require.ErrorContains(t, err, "PVC preflight")
+			workspaces := new(workspacesv1alpha1.WorkspaceList)
+			require.NoError(t, kube.List(t.Context(), workspaces))
+			require.Empty(t, workspaces.Items)
+			worktrees := new(repositoriesv1alpha1.WorktreeList)
+			require.NoError(t, kube.List(t.Context(), worktrees))
+			require.Empty(t, worktrees.Items)
+		})
+	}
+}
+
+func TestRunnerDarwinSkipsHomePVCPreflight(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	runner := &Runner{Client: kubeClient}
-	target, err := runner.Prepare(context.Background(), RunRequest{
-		Namespace: runnerTestNamespace, Create: true, Name: "retained", Image: runnerTestImage,
+	denied := errors.New("PVC reads are unavailable")
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(ctx context.Context, kube client.WithWatch, key client.ObjectKey, object client.Object, options ...client.GetOption) error {
+			if _, ok := object.(*corev1.PersistentVolumeClaim); ok {
+				return denied
+			}
+			return kube.Get(ctx, key, object, options...)
+		},
+	}).Build()
+	runner := &Runner{Client: kube}
+	// Darwin uses a host path, so creation must not depend on PVC read access.
+	target, err := runner.Prepare(t.Context(), RunRequest{
+		Namespace: runnerTestNamespace, Create: true, Name: "darwin", Image: runnerTestImage, OS: rcplatform.Darwin,
 	})
 	require.NoError(t, err)
 	assert.True(t, target.Created)
-	assert.Equal(t, "retained", target.Workspace.Name)
-	assert.Equal(t, workspacesv1alpha1.WorkspaceRetentionPolicyRetain, target.Workspace.Spec.EffectiveRetentionPolicy())
-	assert.False(t, target.Workspace.Spec.IsTemporary())
+	// Generated Worktrees still allocate PVCs, even for a Darwin Workspace.
+	err = runner.preflightTarget(t.Context(), target.Workspace, []*repositoriesv1alpha1.Worktree{{ObjectMeta: metav1.ObjectMeta{Name: "mounted", Namespace: runnerTestNamespace}}})
+	require.ErrorIs(t, err, denied)
 }

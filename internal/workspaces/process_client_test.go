@@ -17,7 +17,15 @@ limitations under the License.
 package workspaces
 
 import (
+	"context"
+	"strconv"
 	"testing"
+
+	"github.com/nekomeowww/rc/internal/workspaceadmission"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/stretchr/testify/require"
 
@@ -35,4 +43,33 @@ func TestResultErrorRejectsEveryNonSuccessTerminalPhase(t *testing.T) {
 		require.Error(t, ResultError(process), "phase %s must fail a foreground command", phase)
 	}
 	require.NoError(t, ResultError(&workspacesv1alpha1.WorkspaceExec{Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded}}))
+}
+
+func TestProcessClientRejectsDeletingOrFencedOwnerBeforeCreatingResources(t *testing.T) {
+	for _, deleting := range []bool{false, true} {
+		t.Run(strconv.FormatBool(deleting), func(t *testing.T) {
+			ctx := context.Background()
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
+			workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: "development", UID: "owner-uid"}}
+			if deleting {
+				stamp := metav1.Now()
+				workspace.DeletionTimestamp = &stamp
+				workspace.Finalizers = []string{"test-delete-protection"}
+			} else {
+				workspace.Status.ExecutionAdmissionClosed = true
+			}
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace).Build()
+			processClient := &ProcessClient{Kube: kubeClient}
+			_, err := processClient.Start(ctx, ProcessStartRequest{Namespace: workspace.Namespace, Target: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: workspace.Name}, Command: []string{"true"}, Environment: map[string]string{"ADMISSION_TEST": "fixture"}})
+			require.ErrorIs(t, err, workspaceadmission.ErrClosed)
+			processes := new(workspacesv1alpha1.WorkspaceExecList)
+			require.NoError(t, kubeClient.List(ctx, processes))
+			require.Empty(t, processes.Items)
+			secrets := new(corev1.SecretList)
+			require.NoError(t, kubeClient.List(ctx, secrets))
+			require.Empty(t, secrets.Items)
+		})
+	}
 }

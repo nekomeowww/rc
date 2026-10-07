@@ -30,6 +30,7 @@ import (
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/rcplatform"
+	"github.com/nekomeowww/rc/internal/volumeclaim"
 )
 
 func (r *WorkspaceExecReconciler) resolveEnvironmentProcessTarget(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) (*resolvedProcessTarget, string, string, error) {
@@ -53,13 +54,16 @@ func (r *WorkspaceExecReconciler) resolveEnvironmentProcessTarget(ctx context.Co
 		reason, message := runtimePlatformCondition(platformErr)
 		return nil, reason, message, nil
 	}
-	draftName := environment.Status.DraftVolumeClaimName
-	if draftName == "" {
-		draftName = fmt.Sprintf("%s-draft-%d", environment.Name, environment.Status.CurrentRevision+1)
+	draftName, err := volumeclaim.Resolve(ctx, r.Client, environment, volumeclaim.EnvironmentDraft, environment.Status.CurrentRevision+1, environment.Status.DraftVolumeClaimName)
+	if volumeclaim.IsConflict(err) {
+		return nil, "VolumeClaimConflict", err.Error(), nil
+	}
+	if err != nil {
+		return nil, "", "", err
 	}
 	draft := new(corev1.PersistentVolumeClaim)
 	draftKey := types.NamespacedName{Name: draftName, Namespace: environment.Namespace}
-	err := r.Get(ctx, draftKey, draft)
+	err = r.Get(ctx, draftKey, draft)
 	if apierrors.IsNotFound(err) {
 		draft = environmentVolumeClaim(environment, draftName, environment.Status.CurrentVolumeClaimName)
 		if err := controllerutil.SetControllerReference(environment, draft, r.Scheme); err != nil {
@@ -76,6 +80,9 @@ func (r *WorkspaceExecReconciler) resolveEnvironmentProcessTarget(ctx context.Co
 	}
 	if err != nil {
 		return nil, "", "", fmt.Errorf("get WorkspaceEnvironment draft PersistentVolumeClaim: %w", err)
+	}
+	if err := volumeclaim.CheckOwner(draft, environment); err != nil {
+		return nil, "VolumeClaimConflict", err.Error(), nil
 	}
 	if !environmentClaimMatches(draft, environment.Spec.Storage, environment.Status.CurrentVolumeClaimName) {
 		return nil, "DraftVolumeMismatch", "Environment draft volume does not clone current", nil

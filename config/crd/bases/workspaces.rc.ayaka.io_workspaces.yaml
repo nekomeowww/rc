@@ -1016,6 +1016,15 @@ spec:
                 description: defaultWorkingDirectory is used when a process does not
                   set --cwd.
                 type: string
+              deleteAfterSuspended:
+                description: |-
+                  deleteAfterSuspended deletes the Workspace and owned storage after
+                  confirmed suspension. Zero or omitted keeps storage indefinitely. This
+                  interval is the recovery grace period; no automatic snapshot is taken.
+                type: string
+                x-kubernetes-validations:
+                - message: deleteAfterSuspended must not be negative
+                  rule: duration(self) >= duration('0s')
               desiredState:
                 default: Running
                 description: desiredState controls runtime compute while retaining
@@ -1226,9 +1235,14 @@ spec:
                       rule: duration(self) > duration('0s')
                 type: object
               idleTimeout:
-                description: idleTimeout suspends an idle named Workspace. Zero or
-                  omitted disables it.
+                description: |-
+                  idleTimeout suspends compute after inactivity. Zero or omitted disables it.
+                  Creation, Ready, resume, and execution completion advance activity.
+                  Pending and running executions block suspension; attach alone is not activity.
                 type: string
+                x-kubernetes-validations:
+                - message: idleTimeout must not be negative
+                  rule: duration(self) >= duration('0s')
               image:
                 description: |-
                   image is used only for a blank Workspace without environmentRef. When
@@ -1615,10 +1629,22 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              executionAdmissionClosed:
+                description: |-
+                  executionAdmissionClosed fences new command starts during automatic
+                  deletion. Only the controllers manage this field. It survives restarts and
+                  is reopened when deletion is cancelled; it never expires on a wall clock.
+                type: boolean
               homeVolumeClaimName:
                 description: |-
                   homeVolumeClaimName contains mutable Workspace home state and transcripts.
                   It is empty for Darwin Workspaces, which use node-local host storage.
+                type: string
+              lastActivityTime:
+                description: |-
+                  lastActivityTime persists the latest observed creation, Ready, resume, or
+                  execution completion time so deleting execution history cannot shorten idle.
+                format: date-time
                 type: string
               lastExecutionCompletedAt:
                 description: |-
@@ -1644,6 +1670,13 @@ spec:
                   revision.
                 format: int64
                 type: integer
+              suspendedAt:
+                description: |-
+                  suspendedAt starts the storage grace period after the runtime is confirmed
+                  absent. It is cleared on resume and survives controller restarts. Workspaces
+                  suspended before this field existed receive a fresh full grace period.
+                format: date-time
+                type: string
             type: object
         required:
         - spec

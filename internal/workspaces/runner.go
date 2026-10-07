@@ -32,13 +32,16 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/rcplatform"
+	"github.com/nekomeowww/rc/internal/volumeclaim"
+	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
 
-const CreatedForWorkspaceLabel = "workspaces.rc.ayaka.io/generated-for"
+// CreatedForWorkspaceLabel is a provenance hint, never deletion authority.
+const CreatedForWorkspaceLabel = worktreeownership.GeneratedForLabel
 
 type MountRequest struct {
 	Name      string
@@ -48,14 +51,19 @@ type MountRequest struct {
 }
 
 type RunRequest struct {
-	OS                           corev1.OSName
-	NodeSelector                 map[string]string
-	Tolerations                  []corev1.Toleration
-	Namespace                    string
-	Workspace                    string
-	DefaultWorkspace             string
-	Create                       bool
-	Remove                       bool
+	OS               corev1.OSName
+	NodeSelector     map[string]string
+	Tolerations      []corev1.Toleration
+	Namespace        string
+	Workspace        string
+	DefaultWorkspace string
+	Create           bool
+	// RetentionPolicy overrides the creation default: named runs retain and
+	// unnamed runs expire after their processes exit. CLI aliases are resolved
+	// before this request reaches the runner.
+	RetentionPolicy              workspacesv1alpha1.WorkspaceRetentionPolicy
+	IdleTimeout                  *metav1.Duration
+	DeleteAfterSuspended         *metav1.Duration
 	Name                         string
 	Environment                  string
 	DefaultEnvironment           string
@@ -83,6 +91,9 @@ type Runner struct {
 }
 
 func (runner *Runner) Prepare(ctx context.Context, request RunRequest) (RunTarget, error) {
+	if request.RetentionPolicy != "" && request.RetentionPolicy != workspacesv1alpha1.WorkspaceRetentionPolicyRetain && request.RetentionPolicy != workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit {
+		return RunTarget{}, fmt.Errorf("unsupported Workspace retention policy %q", request.RetentionPolicy)
+	}
 	if request.Create && request.Workspace != "" {
 		return RunTarget{}, fmt.Errorf("workspace selection and creation are mutually exclusive")
 	}
@@ -102,6 +113,9 @@ func (runner *Runner) Prepare(ctx context.Context, request RunRequest) (RunTarge
 				return RunTarget{}, fmt.Errorf("workspace %q does not exist", workspaceName)
 			}
 			return RunTarget{}, fmt.Errorf("get Workspace %q: %w", workspaceName, err)
+		}
+		if !workspace.DeletionTimestamp.IsZero() {
+			return RunTarget{}, fmt.Errorf("workspace %q is being deleted", workspace.Name)
 		}
 		if workspace.Spec.IsTemporary() {
 			return RunTarget{}, fmt.Errorf("workspace %q is temporary and cannot be selected for another run", workspaceName)
@@ -270,7 +284,6 @@ func (runner *Runner) createTarget(ctx context.Context, request RunRequest) (tar
 		worktree := &repositoriesv1alpha1.Worktree{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: worktreeName, Namespace: request.Namespace,
-				Labels: map[string]string{CreatedForWorkspaceLabel: workspaceName},
 			},
 			Spec: repositoriesv1alpha1.WorktreeSpec{
 				RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: repository.Name},
@@ -287,6 +300,9 @@ func (runner *Runner) createTarget(ctx context.Context, request RunRequest) (tar
 		key := client.ObjectKey{Name: source.Name, Namespace: request.Namespace}
 		if err := runner.Client.Get(ctx, key, worktree); err != nil {
 			return RunTarget{}, fmt.Errorf("get Worktree %q: %w", source.Name, err)
+		}
+		if worktreeownership.MountsClosed(worktree) {
+			return RunTarget{}, fmt.Errorf("worktree %q is being deleted", worktree.Name)
 		}
 		if !meta.IsStatusConditionTrue(worktree.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady) {
 			return RunTarget{}, fmt.Errorf("worktree %q is not Ready", source.Name)
@@ -317,12 +333,17 @@ func (runner *Runner) createTarget(ctx context.Context, request RunRequest) (tar
 			Resources:                    request.Resources,
 			ServiceAccountName:           request.ServiceAccountName,
 			AutomountServiceAccountToken: request.AutomountServiceAccountToken,
-			RetentionPolicy:              workspacesv1alpha1.WorkspaceRetentionPolicyRetain,
+			RetentionPolicy:              request.RetentionPolicy,
+			IdleTimeout:                  request.IdleTimeout,
+			DeleteAfterSuspended:         request.DeleteAfterSuspended,
 			Env:                          append([]corev1.EnvVar(nil), request.Env...),
 		},
 	}
-	if request.Remove {
-		workspace.Spec.RetentionPolicy = workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit
+	if workspace.Spec.RetentionPolicy == "" {
+		workspace.Spec.RetentionPolicy = workspacesv1alpha1.WorkspaceRetentionPolicyRetain
+		if request.Name == "" {
+			workspace.Spec.RetentionPolicy = workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit
+		}
 	}
 	if environmentName != "" {
 		workspace.Spec.EnvironmentRef = &workspacesv1alpha1.LocalReference{Name: environmentName}
@@ -333,14 +354,16 @@ func (runner *Runner) createTarget(ctx context.Context, request RunRequest) (tar
 	for _, name := range request.CredentialRefs {
 		workspace.Spec.CredentialRefs = append(workspace.Spec.CredentialRefs, workspacesv1alpha1.LocalReference{Name: name})
 	}
+	if err := runner.preflightTarget(ctx, workspace, generatedWorktrees); err != nil {
+		return RunTarget{}, err
+	}
+
 	if err := runner.Client.Create(ctx, workspace); err != nil {
 		return RunTarget{}, fmt.Errorf("create Workspace %q: %w", workspace.Name, err)
 	}
 	createdWorkspace = workspace
 	for _, worktree := range generatedWorktrees {
-		if err := controllerutil.SetControllerReference(workspace, worktree, runner.Client.Scheme()); err != nil {
-			return RunTarget{}, fmt.Errorf("set Workspace owner on generated Worktree %q: %w", worktree.Name, err)
-		}
+		worktreeownership.InitializeGenerated(workspace, worktree)
 		if err := runner.Client.Create(ctx, worktree); err != nil {
 			return RunTarget{}, fmt.Errorf("create generated Worktree %q: %w", worktree.Name, err)
 		}
@@ -348,6 +371,22 @@ func (runner *Runner) createTarget(ctx context.Context, request RunRequest) (tar
 	}
 
 	return RunTarget{Workspace: workspace, Created: true}, nil
+}
+
+// preflightTarget checks all intended volumes before creating any part of a
+// runtime, so an occupied generated Worktree claim cannot leave a Workspace.
+func (runner *Runner) preflightTarget(ctx context.Context, workspace *workspacesv1alpha1.Workspace, worktrees []*repositoriesv1alpha1.Worktree) error {
+	if workspace.Spec.OS != rcplatform.Darwin {
+		if err := volumeclaim.Preflight(ctx, runner.Client, workspace, volumeclaim.WorkspaceHome, 0); err != nil {
+			return err
+		}
+	}
+	for _, worktree := range worktrees {
+		if err := volumeclaim.Preflight(ctx, runner.Client, worktree, volumeclaim.Worktree, 0); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (runner *Runner) rollbackTarget(ctx context.Context, workspace *workspacesv1alpha1.Workspace, worktrees []*repositoriesv1alpha1.Worktree, cause error) error {

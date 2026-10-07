@@ -28,9 +28,11 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/duration"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -52,6 +54,8 @@ type runOptions struct {
 	workspace        string
 	createWorkspace  bool
 	remove           bool
+	retain           bool
+	lifecycle        command.LifecycleOptions
 	name             string
 	interactive      bool
 	tty              bool
@@ -104,7 +108,8 @@ func newRunCommand(kubeconfigFlags *kubeconfig.Flags, createWorkspace bool) *cob
 	options := &runOptions{createWorkspace: createWorkspace}
 	cmd := &cobra.Command{
 		Use:   "run [flags] -- COMMAND [ARG...]",
-		Short: "Create a Workspace and run a command",
+		Short: "Run a command in a new Workspace (unnamed runs are temporary)",
+		Long:  "Run a command in a new Workspace. Unnamed runs delete the Workspace and owned storage after all processes exit. Use --retain to keep it, or workspace create for a persistent development machine. Named runs retain by default. Use --rm to delete a named Workspace after execution.",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !createWorkspace {
@@ -125,6 +130,7 @@ func newRunCommand(kubeconfigFlags *kubeconfig.Flags, createWorkspace bool) *cob
 	if !createWorkspace {
 		cmd.Use = "exec [flags] WORKSPACE -- COMMAND [ARG...]"
 		cmd.Short = "Run a command in an existing Workspace"
+		cmd.Long = cmd.Short
 		cmd.Args = cobra.MinimumNArgs(2)
 	}
 	addRunFlags(cmd, options)
@@ -138,8 +144,11 @@ func newRunCommand(kubeconfigFlags *kubeconfig.Flags, createWorkspace bool) *cob
 func addRunFlags(cmd *cobra.Command, options *runOptions) {
 	options.placement.AddFlags(cmd.Flags())
 	if options.createWorkspace {
-		cmd.Flags().BoolVar(&options.remove, "rm", false, "Delete the created Workspace after all its processes terminate")
-		cmd.Flags().StringVar(&options.name, "name", "", "Name for the new Workspace; generated when omitted")
+		cmd.Flags().BoolVar(&options.remove, "rm", false, "Delete after all processes terminate (default for unnamed runs); --rm=false preserves legacy retention")
+		cmd.Flags().BoolVar(&options.retain, "retain", false, "Keep the Workspace after processes exit; idle lifecycle policy still applies")
+		cmd.MarkFlagsMutuallyExclusive("rm", "retain")
+		options.lifecycle.AddFlags(cmd.Flags())
+		cmd.Flags().StringVar(&options.name, "name", "", "Name for the new Workspace; named runs retain by default (use --rm for cleanup)")
 	}
 	cmd.Flags().StringVar(&options.environment, "environment", "", "WorkspaceEnvironment for a new Workspace or existing-target requirement")
 	cmd.Flags().StringArrayVar(&options.repositories, "repo", nil, "Repository requirement or new writable Worktree source; repeat")
@@ -163,6 +172,10 @@ func addRunFlags(cmd *cobra.Command, options *runOptions) {
 
 //nolint:gocyclo // This command coordinates target, credential, environment, and terminal setup.
 func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []string, options runOptions) (returnedErr error) {
+	runRequest, err := options.targetRequest(cmd.Flags())
+	if err != nil {
+		return err
+	}
 	registryEnvironment, err := workspaceservice.NPMRegistryEnvironment(options.npmRegistry)
 	if err != nil {
 		return err
@@ -216,12 +229,14 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 	if err != nil {
 		return err
 	}
-	runRequest := workspaceservice.RunRequest{
-		OS: osName, NodeSelector: options.placement.NodeSelector, Tolerations: tolerations,
-		Namespace: namespace, Workspace: options.workspace, DefaultWorkspace: defaults.Workspace, Create: options.createWorkspace, Remove: options.remove, Name: options.name,
-		Environment: options.environment, DefaultEnvironment: defaults.Environment,
-		Repositories: repositories, Worktrees: worktrees,
-	}
+	runRequest.OS = osName
+	runRequest.NodeSelector = options.placement.NodeSelector
+	runRequest.Tolerations = tolerations
+	runRequest.Namespace = namespace
+	runRequest.DefaultWorkspace = defaults.Workspace
+	runRequest.DefaultEnvironment = defaults.Environment
+	runRequest.Repositories = repositories
+	runRequest.Worktrees = worktrees
 	credentialRefs := options.credentials
 	credentialNames, agentCredential, selectedAgentType, err := selectAgentCredentials(
 		cmd.Context(), clusterClient.Kube, namespace, agentType, options.agentCredentials, options.createWorkspace,
@@ -271,7 +286,7 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 		}
 	}()
 	if target.Created {
-		if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "workspace/%s created\n", target.Workspace.Name); err != nil {
+		if _, err := fmt.Fprintln(cmd.ErrOrStderr(), runLifecycleNotice(target.Workspace)); err != nil {
 			return err
 		}
 		indicator := progress.Start(cmd.ErrOrStderr(), "preparing Workspace...")
@@ -336,6 +351,47 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 		}
 	}
 	return workspaceservice.ResultError(finished)
+}
+
+// targetRequest translates CLI creation intent once, before any cluster access.
+// It preserves the legacy explicit --rm=false form alongside --retain.
+func (options runOptions) targetRequest(flags *pflag.FlagSet) (workspaceservice.RunRequest, error) {
+	if err := options.lifecycle.Validate(); err != nil {
+		return workspaceservice.RunRequest{}, err
+	}
+	var retention workspacesv1alpha1.WorkspaceRetentionPolicy
+	if flags.Changed("rm") {
+		retention = workspacesv1alpha1.WorkspaceRetentionPolicyRetain
+		if options.remove {
+			retention = workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit
+		}
+	} else if options.retain {
+		retention = workspacesv1alpha1.WorkspaceRetentionPolicyRetain
+	}
+	return workspaceservice.RunRequest{
+		Create: options.createWorkspace, Workspace: options.workspace, Name: options.name,
+		RetentionPolicy:      retention,
+		Environment:          options.environment,
+		IdleTimeout:          &metav1.Duration{Duration: options.lifecycle.IdleTimeout},
+		DeleteAfterSuspended: &metav1.Duration{Duration: options.lifecycle.DeleteAfterSuspended},
+	}, nil
+}
+
+// runLifecycleNotice keeps command stdout clean and makes cleanup visible to
+// both interactive users and automation before the execution starts.
+func runLifecycleNotice(workspace *workspacesv1alpha1.Workspace) string {
+	message := fmt.Sprintf("workspace/%s created; retention=%s", workspace.Name, workspace.Spec.EffectiveRetentionPolicy())
+	if workspace.Spec.IsTemporary() {
+		return message + "; Workspace and owned storage will be deleted 5m after all processes exit (--retain to keep)"
+	}
+	if workspace.Spec.IdleTimeout != nil {
+		message += "; idleTimeout=" + workspace.Spec.IdleTimeout.Duration.String()
+	}
+	if workspace.Spec.DeleteAfterSuspended != nil {
+		message += "; deleteAfterSuspended=" + workspace.Spec.DeleteAfterSuspended.Duration.String()
+	}
+
+	return message
 }
 
 func routeNPMRegistryEnvironment(temporary bool, request *workspaceservice.RunRequest, processEnvironment map[string]string, registry []corev1.EnvVar) {

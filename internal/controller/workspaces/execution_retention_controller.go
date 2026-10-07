@@ -37,27 +37,58 @@ func executionPodNames(object client.Object) []string {
 	return []string{name}
 }
 
-// reconcileExecutionHistory uses a target-scoped snapshot only to plan work.
-// Every mutation re-reads the execution and policy directly from the API. One
-// item's conflict is deferred to the next pass rather than starving its peers.
+// reconcileExecutionHistory prunes history under policy. A nil policy keeps
+// all history and performs no reads.
 func (r *executionRetentionService) reconcileExecutionHistory(ctx context.Context, namespace string, target workspacesv1alpha1.WorkspaceExecTargetReference, targetUID types.UID, policy *workspacesv1alpha1.ExecutionRetentionPolicy) error {
 	if policy == nil {
 		return nil
 	}
+	_, err := r.pruneExecutionHistory(ctx, namespace, target, targetUID, policy)
+	return err
+}
+
+// executionHistorySummary counts one target's records from the planning
+// snapshot. Records owned by an earlier same-name target are not counted.
+type executionHistorySummary struct {
+	retained int32
+	pending  int32
+}
+
+// pruneExecutionHistory uses a target-scoped snapshot only to plan work.
+// Every mutation re-reads the execution and policy directly from the API. One
+// item's conflict is deferred to the next pass rather than starving its peers.
+// The summary is nil only when the snapshot could not be listed.
+func (r *executionRetentionService) pruneExecutionHistory(ctx context.Context, namespace string, target workspacesv1alpha1.WorkspaceExecTargetReference, targetUID types.UID, policy *workspacesv1alpha1.ExecutionRetentionPolicy) (*executionHistorySummary, error) {
 	executions, err := r.executionHistory(ctx, namespace, target)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	pending := 0
+	owned := func(p *workspacesv1alpha1.WorkspaceExec) bool {
+		owner := metav1.GetControllerOf(p)
+		return owner == nil || targetUID == "" || owner.UID == targetUID
+	}
+	summary := &executionHistorySummary{}
+	deleting := 0
 	for i := range executions {
 		p := &executions[i]
-		owner := metav1.GetControllerOf(p)
-		if !p.DeletionTimestamp.IsZero() && (owner == nil || targetUID == "" || owner.UID == targetUID) {
-			pending++
+		if !owned(p) {
+			continue
+		}
+		summary.retained++
+		if !p.DeletionTimestamp.IsZero() {
+			deleting++
 		}
 	}
 	plan := executionretention.Build(executions, policy, time.Now())
-	budget := executionCleanupBatch - pending
+	expired := 0
+	for _, i := range plan.Remove {
+		if owned(&executions[i]) {
+			expired++
+		}
+	}
+	summary.pending = int32(deleting + expired)
+	summary.retained -= summary.pending
+	budget := executionCleanupBatch - deleting
 	var failures []error
 	for _, i := range plan.Remove {
 		if budget <= 0 {
@@ -72,7 +103,7 @@ func (r *executionRetentionService) reconcileExecutionHistory(ctx context.Contex
 			failures = append(failures, fmt.Errorf("request cleanup for %s: %w", executions[i].Name, err))
 		}
 	}
-	return errors.Join(failures...)
+	return summary, errors.Join(failures...)
 }
 
 func (r *executionRetentionService) executionHistory(ctx context.Context, namespace string, target workspacesv1alpha1.WorkspaceExecTargetReference) ([]workspacesv1alpha1.WorkspaceExec, error) {

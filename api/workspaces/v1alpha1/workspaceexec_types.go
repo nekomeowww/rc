@@ -235,6 +235,7 @@ type WorkspaceExecStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Exit",type=integer,JSONPath=".status.exitCode"
 // +kubebuilder:printcolumn:name="Started",type=date,JSONPath=".status.startedAt"
+// +kubebuilder:printcolumn:name="Completed",type=date,JSONPath=".status.completedAt"
 
 // WorkspaceExec is the Schema for the workspaceexecs API
 type WorkspaceExec struct {

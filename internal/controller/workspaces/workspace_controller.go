@@ -105,6 +105,19 @@ type resolvedWorkspace struct {
 	initializers         []workspaceInitializer
 	beforeStop           []lifecycle.Action
 	homeHostPath         string
+	// storageReady is published as StorageReady once home storage has been
+	// evaluated in this pass; nil leaves the previous condition unchanged.
+	storageReady *metav1.Condition
+}
+
+func (resolved *resolvedWorkspace) setStorage(status metav1.ConditionStatus, reason, message string) {
+	resolved.storageReady = storageReadyCondition(status, reason, message)
+}
+
+// storageReadyCondition is the StorageReady condition shared by Workspace and
+// WorkspaceEnvironment; callers stamp ObservedGeneration when writing it.
+func storageReadyCondition(status metav1.ConditionStatus, reason, message string) *metav1.Condition {
+	return &metav1.Condition{Type: workspacesv1alpha1.ConditionStorageReady, Status: status, Reason: reason, Message: message}
 }
 
 type workspaceInitializer struct {
@@ -195,13 +208,22 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if resolved.runtime.OS() != rcplatform.Darwin {
 		claimName, home, resolveErr := volumeclaim.Resolve(ctx, r.APIReader, workspace, volumeclaim.WorkspaceHome, 0, workspace.Status.HomeVolumeClaimName)
 		if volumeclaim.IsConflict(resolveErr) {
-			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "VolumeClaimConflict", resolveErr.Error())
+			resolved.setStorage(metav1.ConditionFalse, workspacesv1alpha1.ReasonVolumeClaimConflict, resolveErr.Error())
+			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, workspacesv1alpha1.ReasonVolumeClaimConflict, resolveErr.Error())
 		}
 		if resolveErr != nil {
 			return ctrl.Result{}, fmt.Errorf("get Workspace home PersistentVolumeClaim: %w", resolveErr)
 		}
 		resolved.homeClaimName = claimName
+		if home == nil && workspace.Status.HomeVolumeClaimName != "" {
+			// A recorded home is durable creation evidence. Recreating it would
+			// silently replace home state and transcripts with an empty or newer clone.
+			message := fmt.Sprintf("Workspace home PVC %s is missing; restore it or recreate the Workspace", claimName)
+			resolved.setStorage(metav1.ConditionFalse, workspacesv1alpha1.ReasonVolumeClaimLost, message)
+			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, workspacesv1alpha1.ReasonVolumeClaimLost, message)
+		}
 		if home == nil {
+			resolved.setStorage(metav1.ConditionFalse, "Provisioning", "Workspace home volume is provisioning")
 			home = workspaceHomeVolumeClaim(workspace, resolved)
 			if err := controllerutil.SetControllerReference(workspace, home, r.Scheme); err != nil {
 				return ctrl.Result{}, fmt.Errorf("set Workspace owner on home PersistentVolumeClaim: %w", err)
@@ -231,10 +253,13 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			if failureReason, failureMessage, failureErr := r.persistentVolumeClaimFailure(ctx, home); failureErr != nil {
 				return ctrl.Result{}, failureErr
 			} else if failureReason != "" {
+				resolved.setStorage(metav1.ConditionFalse, failureReason, failureMessage)
 				return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, failureReason, failureMessage)
 			}
+			resolved.setStorage(metav1.ConditionFalse, "Provisioning", "Workspace home volume is provisioning")
 			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Provisioning", "Workspace home volume is provisioning")
 		}
+		resolved.setStorage(metav1.ConditionTrue, workspacesv1alpha1.ReasonVolumeClaimBound, fmt.Sprintf("Workspace home PVC %s is bound", home.Name))
 	}
 	resolved, reason, message, err = r.resolveWorkspaceDependencies(ctx, workspace, resolved)
 	if err != nil {
@@ -277,6 +302,12 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	pod := new(corev1.Pod)
 	err = r.APIReader.Get(ctx, req.NamespacedName, pod)
 	if errors.IsNotFound(err) {
+		// A runtime that was Ready vanished without the controller deleting it.
+		// Publish the loss once; the next pass creates the replacement.
+		if meta.IsStatusConditionTrue(workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady) && workspace.Status.RuntimePodName != "" {
+			message := fmt.Sprintf("Workspace runtime Pod %s is missing; creating a replacement", workspace.Status.RuntimePodName)
+			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, workspacesv1alpha1.WorkspaceReasonRuntimeMissing, message)
+		}
 		if removed, err := r.removeHotMounts(ctx, workspace); err != nil {
 			return ctrl.Result{}, err
 		} else if !removed {
@@ -444,17 +475,18 @@ func (r *WorkspaceReconciler) finalizeWorkspace(ctx context.Context, workspace *
 	if !controllerutil.ContainsFinalizer(workspace, workspaceFinalizer) {
 		return ctrl.Result{}, nil
 	}
+	waitResult := ctrl.Result{RequeueAfter: workspaceDependencyRequeue}
 	processes := new(workspacesv1alpha1.WorkspaceExecList)
 	if err := r.List(ctx, processes, client.InNamespace(workspace.Namespace)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("list processes while finalizing Workspace: %w", err)
 	}
-	waiting := false
+	var waiting []string
 	for index := range processes.Items {
 		process := &processes.Items[index]
 		if process.Spec.TargetRef.Kind != workspacesv1alpha1.WorkspaceExecTargetWorkspace || process.Spec.TargetRef.Name != workspace.Name {
 			continue
 		}
-		waiting = true
+		waiting = append(waiting, process.Name)
 		if process.Status.Phase.Terminal() {
 			if err := r.Delete(ctx, process); err != nil && !errors.IsNotFound(err) {
 				return ctrl.Result{}, fmt.Errorf("delete terminal process while finalizing Workspace: %w", err)
@@ -466,13 +498,14 @@ func (r *WorkspaceReconciler) finalizeWorkspace(ctx context.Context, workspace *
 			}
 		}
 	}
-	if waiting {
-		return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, nil
+	if len(waiting) > 0 {
+		message := "Waiting for WorkspaceExecs to stop and be removed: " + namedList(waiting)
+		return waitResult, r.setDeletionBlocked(ctx, workspace, workspacesv1alpha1.WorkspaceReasonWaitingForExecutions, message)
 	}
 	if removed, err := r.removeHotMounts(ctx, workspace); err != nil {
 		return ctrl.Result{}, err
 	} else if !removed {
-		return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, nil
+		return waitResult, r.setDeletionBlocked(ctx, workspace, workspacesv1alpha1.WorkspaceReasonWaitingForHotMounts, "Waiting for Worktree hot-mount helper Pods to stop")
 	}
 	pod := new(corev1.Pod)
 	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(workspace), pod); err == nil {
@@ -480,7 +513,7 @@ func (r *WorkspaceReconciler) finalizeWorkspace(ctx context.Context, workspace *
 			if err := r.Delete(ctx, pod); err != nil && !errors.IsNotFound(err) {
 				return ctrl.Result{}, fmt.Errorf("delete runtime Pod while finalizing Workspace: %w", err)
 			}
-			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, nil
+			return waitResult, r.setDeletionBlocked(ctx, workspace, workspacesv1alpha1.WorkspaceReasonWaitingForPods, fmt.Sprintf("Waiting for runtime Pod %s to terminate", pod.Name))
 		}
 	} else if !errors.IsNotFound(err) {
 		return ctrl.Result{}, fmt.Errorf("get runtime Pod while finalizing Workspace: %w", err)
@@ -488,10 +521,15 @@ func (r *WorkspaceReconciler) finalizeWorkspace(ctx context.Context, workspace *
 	if gone, err := r.hotMountsGone(ctx, workspace); err != nil {
 		return ctrl.Result{}, err
 	} else if !gone {
-		return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, nil
+		return waitResult, r.setDeletionBlocked(ctx, workspace, workspacesv1alpha1.WorkspaceReasonWaitingForHotMounts, "Waiting for Worktree hot-mount cleanup Pods to finish")
 	}
 
 	if err := r.releaseClaims(ctx, workspace); err != nil {
+		return ctrl.Result{}, err
+	}
+	// Another finalizer may keep the object after ours is gone; do not leave a
+	// stale blocker behind.
+	if err := r.setDeletionBlocked(ctx, workspace, "", ""); err != nil {
 		return ctrl.Result{}, err
 	}
 	controllerutil.RemoveFinalizer(workspace, workspaceFinalizer)
@@ -500,6 +538,38 @@ func (r *WorkspaceReconciler) finalizeWorkspace(ctx context.Context, workspace *
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// setDeletionBlocked publishes why the cleanup finalizer waits. An empty
+// reason removes the condition. It writes only on change, under an optimistic
+// lock, and updates workspace in place so a later Update uses its version.
+func (r *WorkspaceReconciler) setDeletionBlocked(ctx context.Context, workspace *workspacesv1alpha1.Workspace, reason, message string) error {
+	before := workspace.DeepCopy()
+	if reason == "" {
+		meta.RemoveStatusCondition(&workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionDeletionBlocked)
+	} else {
+		meta.SetStatusCondition(&workspace.Status.Conditions, metav1.Condition{
+			Type: workspacesv1alpha1.WorkspaceConditionDeletionBlocked, Status: metav1.ConditionTrue,
+			ObservedGeneration: workspace.Generation, Reason: reason, Message: message,
+		})
+	}
+	if apiequality.Semantic.DeepEqual(before.Status, workspace.Status) {
+		return nil
+	}
+	if err := r.Status().Patch(ctx, workspace, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+		return fmt.Errorf("update Workspace DeletionBlocked condition: %w", err)
+	}
+	return nil
+}
+
+// namedList renders a stable, bounded list of object names for a message.
+func namedList(names []string) string {
+	const shown = 5
+	sorted := slices.Sorted(slices.Values(names))
+	if len(sorted) <= shown {
+		return strings.Join(sorted, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(sorted[:shown], ", "), len(sorted)-shown)
 }
 
 func (r *WorkspaceReconciler) acquireWriteClaims(ctx context.Context, workspace *workspacesv1alpha1.Workspace, claims []workspaceWriteClaim) (bool, string, error) {
@@ -1066,29 +1136,41 @@ func runtimePlatformCondition(err error) (string, string) {
 }
 
 func workspaceProcessState(ctx context.Context, kubeClient client.Reader, workspace *workspacesv1alpha1.Workspace) (bool, bool, *metav1.Time, error) {
+	processes, err := listWorkspaceProcesses(ctx, kubeClient, workspace)
+	return processes.active > 0, processes.any, processes.lastCompletion, err
+}
+
+// workspaceProcesses summarizes the WorkspaceExecs that target one Workspace.
+type workspaceProcesses struct {
+	// active counts nonterminal executions.
+	active int32
+	// any is true when an execution exists or has ever completed.
+	any bool
+	// lastCompletion is the latest completion, including collected history.
+	lastCompletion *metav1.Time
+}
+
+func listWorkspaceProcesses(ctx context.Context, kubeClient client.Reader, workspace *workspacesv1alpha1.Workspace) (workspaceProcesses, error) {
 	processes := new(workspacesv1alpha1.WorkspaceExecList)
 	if err := kubeClient.List(ctx, processes, client.InNamespace(workspace.Namespace)); err != nil {
-		return false, false, nil, fmt.Errorf("list Workspace processes: %w", err)
+		return workspaceProcesses{}, fmt.Errorf("list Workspace processes: %w", err)
 	}
-	hasProcesses := workspace.Status.LastExecutionCompletedAt != nil
-	active := false
-	lastCompletion := workspace.Status.LastExecutionCompletedAt.DeepCopy()
+	summary := workspaceProcesses{any: workspace.Status.LastExecutionCompletedAt != nil, lastCompletion: workspace.Status.LastExecutionCompletedAt.DeepCopy()}
 	for index := range processes.Items {
 		process := &processes.Items[index]
 		if process.Spec.TargetRef.Kind != workspacesv1alpha1.WorkspaceExecTargetWorkspace || process.Spec.TargetRef.Name != workspace.Name {
 			continue
 		}
-		hasProcesses = true
+		summary.any = true
 		if !process.Status.Phase.Terminal() {
-			active = true
+			summary.active++
 		}
-		if process.Status.CompletedAt != nil && (lastCompletion == nil || process.Status.CompletedAt.After(lastCompletion.Time)) {
-			completion := process.Status.CompletedAt.DeepCopy()
-			lastCompletion = completion
+		if process.Status.CompletedAt != nil && (summary.lastCompletion == nil || process.Status.CompletedAt.After(summary.lastCompletion.Time)) {
+			summary.lastCompletion = process.Status.CompletedAt.DeepCopy()
 		}
 	}
 
-	return active, hasProcesses, lastCompletion, nil
+	return summary, nil
 }
 
 func podReady(pod *corev1.Pod) bool {
@@ -1260,6 +1342,11 @@ func (r *WorkspaceReconciler) setWorkspaceStatus(ctx context.Context, key types.
 			Type: workspacesv1alpha1.WorkspaceConditionDegraded, Status: metav1.ConditionFalse,
 			ObservedGeneration: current.Generation, Reason: reason, Message: message,
 		})
+	}
+	if resolved != nil && resolved.storageReady != nil {
+		storage := *resolved.storageReady
+		storage.ObservedGeneration = current.Generation
+		meta.SetStatusCondition(&current.Status.Conditions, storage)
 	}
 	meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 		Type: workspacesv1alpha1.WorkspaceConditionReady, Status: readyStatus,

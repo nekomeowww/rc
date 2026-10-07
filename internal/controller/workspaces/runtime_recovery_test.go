@@ -74,9 +74,10 @@ func TestWorkspaceTerminalRuntimeRecovery(t *testing.T) {
 				if phase == corev1.PodSucceeded {
 					reason = "RuntimeCompleted"
 				}
-				require.Equal(t, reason, condition.Reason, "terminal runtime must leave Starting with its actual exit diagnosis")
+				require.Equal(t, workspacesv1alpha1.WorkspaceReasonRuntimeTerminal, condition.Reason, "terminal runtime must leave Starting")
 				require.Equal(t, metav1.ConditionFalse, condition.Status)
 				require.True(t, meta.IsStatusConditionTrue(workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionDegraded))
+				require.Equal(t, reason, meta.FindStatusCondition(workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionDegraded).Reason, "Degraded carries the actual exit diagnosis")
 				require.Contains(t, condition.Message, "exitCode=0")
 				if active {
 					fixture.restart()
@@ -299,7 +300,8 @@ func TestTerminalRuntimeRecoveryPrecedesUnavailableDependencies(t *testing.T) {
 	fixture.workspace.Spec.Mounts = []workspacesv1alpha1.WorkspaceMount{{Name: missingMount, Path: missingMount, WorktreeRef: &workspacesv1alpha1.LocalReference{Name: "missing-worktree"}}}
 	require.NoError(t, fixture.client.Update(fixture.ctx, fixture.workspace))
 	fixture.reconcile(t)
-	require.Equal(t, "RuntimeCompleted", meta.FindStatusCondition(fixture.workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady).Reason)
+	require.Equal(t, workspacesv1alpha1.WorkspaceReasonRuntimeTerminal, meta.FindStatusCondition(fixture.workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady).Reason)
+	require.Equal(t, "RuntimeCompleted", meta.FindStatusCondition(fixture.workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionDegraded).Reason)
 	require.True(t, apierrors.IsNotFound(fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.pod), new(corev1.Pod))))
 	fixture.reconcile(t)
 	require.Equal(t, "WorktreeNotFound", meta.FindStatusCondition(fixture.workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady).Reason)
@@ -369,7 +371,7 @@ func TestTerminalRecoveryResumesAfterFailedWrite(t *testing.T) {
 				faults.Delete = func(ctx context.Context, c client.WithWatch, _ client.Object, _ ...client.DeleteOption) error {
 					current := new(workspacesv1alpha1.Workspace)
 					require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(fixture.workspace), current))
-					require.Equal(t, "RuntimeFailed", meta.FindStatusCondition(current.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady).Reason, "persist exit before requesting deletion")
+					require.Equal(t, "RuntimeFailed", meta.FindStatusCondition(current.Status.Conditions, workspacesv1alpha1.WorkspaceConditionDegraded).Reason, "persist exit before requesting deletion")
 					return interrupted
 				}
 			}

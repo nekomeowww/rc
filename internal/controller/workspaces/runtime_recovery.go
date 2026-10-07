@@ -100,9 +100,11 @@ func (r *WorkspaceReconciler) persistTerminalRuntimePlan(ctx context.Context, wo
 	}
 	previous := current.DeepCopy()
 	current.Status.ObservedGeneration = current.Generation
+	// Ready carries the stable RuntimeTerminal reason; Degraded tells whether
+	// the runtime completed or failed.
 	meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 		Type: workspacesv1alpha1.WorkspaceConditionReady, Status: metav1.ConditionFalse,
-		ObservedGeneration: current.Generation, Reason: plan.reason, Message: plan.message,
+		ObservedGeneration: current.Generation, Reason: workspacesv1alpha1.WorkspaceReasonRuntimeTerminal, Message: plan.message,
 	})
 	meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 		Type: workspacesv1alpha1.WorkspaceConditionDegraded, Status: metav1.ConditionTrue,

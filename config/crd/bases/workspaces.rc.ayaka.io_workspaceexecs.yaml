@@ -30,6 +30,9 @@ spec:
     - jsonPath: .status.startedAt
       name: Started
       type: date
+    - jsonPath: .status.completedAt
+      name: Completed
+      type: date
     name: v1alpha1
     schema:
       openAPIV3Schema:

@@ -1034,6 +1034,14 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 	if workspace.Spec.Lifecycle != nil {
 		lifecycle = fmt.Sprintf("%d initialize, %d before-stop", len(workspace.Spec.Lifecycle.Initialize), len(workspace.Spec.Lifecycle.BeforeStop))
 	}
+	status := workspace.Status.Lifecycle
+	if status == nil {
+		status = &workspacesv1alpha1.WorkspaceLifecycleStatus{}
+	}
+	history := "-"
+	if h := workspace.Status.ExecutionHistory; h != nil {
+		history = fmt.Sprintf("%d retained, %d pending cleanup", h.Retained, h.PendingCleanup)
+	}
 
 	return []clioutput.Field{
 		{Name: "Name", Value: workspace.Name},
@@ -1056,6 +1064,10 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 		{Name: "Idle timeout", Value: durationOrDisabled(workspace.Spec.IdleTimeout)},
 		{Name: "Delete after suspended", Value: durationOrDisabled(workspace.Spec.DeleteAfterSuspended)},
 		{Name: "Suspended at", Value: clioutput.OptionalTimestamp(workspace.Status.SuspendedAt)},
+		{Name: "Active executions", Value: status.ActiveExecutions},
+		{Name: "Idle suspend at", Value: clioutput.OptionalTimestamp(status.IdleSuspendAt)},
+		{Name: "Delete at", Value: clioutput.OptionalTimestamp(status.DeleteAt)},
+		{Name: "Execution history", Value: history},
 		{Name: "Mounts", Value: workspaceMountSummary(workspace.Spec.Mounts)},
 		{Name: "Agent credentials", Value: workspaceReferenceNames(workspace.Spec.AgentCredentialRefs)},
 		{Name: "Credentials", Value: workspaceReferenceNames(workspace.Spec.CredentialRefs)},

@@ -69,6 +69,7 @@ The controller and Repository jobs run on Linux.
 | Lifecycle scripts | ✅ | ✅ | ✅ |
 | GPU | ✅ | ✅ | ✅ |
 | GUI applications | ✅ | ✅ | ✅ |
+| Computer Use ready (powered by [AUV](https://github.com/moeru-ai/auv)) | ✅ | 🚧 | ✅ |
 | Repository / Worktree mounts | ✅ | ✅ | 🚧 |
 | Workspace Environments | ✅ | ✅ | 🚧 |
 | ConfigMap / Secret mounts | ✅ | ✅ | 🚧 |
@@ -76,7 +77,7 @@ The controller and Repository jobs run on Linux.
 | Logs while suspended | ✅ | ✅ | 🚧 |
 | Worktree hot-mount without restart | ✅ | ❌ | 🚧 |
 
-🚧 Not yet supported on macOS.
+🚧 Not yet supported on this platform.
 
 See the [Windows](docs/guides/windows-workspaces.md),
 [macOS](docs/guides/darwin-workspaces.md), and

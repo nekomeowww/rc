@@ -69,7 +69,6 @@ The controller and Repository jobs run on Linux.
 | Lifecycle scripts | ✅ | ✅ | ✅ |
 | GPU | ✅ | ✅ | ✅ |
 | GUI applications | ✅ | ✅ | ✅ |
-| Computer Use ready (powered by [AUV](https://github.com/moeru-ai/auv)) | ✅ | ✅ | ✅ |
 | Repository / Worktree mounts | ✅ | ✅ | 🚧 |
 | Workspace Environments | ✅ | ✅ | 🚧 |
 | ConfigMap / Secret mounts | ✅ | ✅ | 🚧 |

@@ -35,8 +35,10 @@ experiment, not a compatibility promise.
 
 rc now has an explicit Windows runtime path. Use `spec.os: windows`, a Windows
 runner image, and Windows-compatible storage; see [Windows Workspaces](windows-workspaces.md).
-The Linux runner image is still the default for Linux Workspaces and repository
-jobs. Existing Repository/Worktree Git mounts remain Linux-specific.
+The Linux runner image is still the default for Linux Workspaces. Repository
+sync and Worktree bootstrap Jobs still run on Linux; Windows Workspaces can
+mount their Repositories and Worktrees when the StorageClass supports both
+Linux and Windows mounts and CSI PVC cloning.
 
 Keep the Windows taint and add an explicit toleration to intended workloads.
 The native runtime covers process trees, named-pipe IPC, ConPTY, PowerShell
@@ -550,5 +552,5 @@ the join.
   compatibility.
 - A successful service restart is not a substitute for a controlled reboot
   test before relying on the node for unattended development.
-- Windows Workspaces require a dedicated Windows image and compatible storage;
-  existing Repository/Worktree mounts remain Linux-specific.
+- Windows Workspaces require a dedicated Windows image and storage that
+  supports both Linux and Windows mounts for Repository/Worktree volumes.

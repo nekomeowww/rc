@@ -55,6 +55,34 @@ This gives each task an ordinary Git branch and working tree without repeatedly 
 
 Because Worktrees and prepared Workspace Environments use Kubernetes PVC cloning, the selected StorageClass must support volume cloning. The default `local-path` StorageClass in a standard Kind cluster does not provide that capability. For local development on macOS or Linux, rc uses the SIG Storage `csi-driver-host-path` with a single-node Kind cluster. It is a sample/CI driver, not a production storage system, and implements cloning as a full file copy.
 
+## Platform support
+
+Each Workspace runs a native `rc-kube` supervisor built for its operating system.
+The controller and Repository jobs run on Linux.
+
+| Capability | Linux | Windows | macOS |
+| --- | :---: | :---: | :---: |
+| Persistent Workspace home | ✅ | ✅ | ✅ |
+| Interactive terminal (attach / resize) | ✅ | ✅ | ✅ |
+| Process tree cleanup | ✅ | ✅ | ✅ |
+| Agent and Git credentials | ✅ | ✅ | ✅ |
+| Lifecycle scripts | ✅ | ✅ | ✅ |
+| GPU | ✅ | ✅ | ✅ |
+| GUI applications | ✅ | ✅ | ✅ |
+| Computer Use ready (powered by [AUV](https://github.com/moeru-ai/auv)) | ✅ | ✅ | ✅ |
+| Repository / Worktree mounts | ✅ | ✅ | 🚧 |
+| Workspace Environments | ✅ | ✅ | 🚧 |
+| ConfigMap / Secret mounts | ✅ | ✅ | 🚧 |
+| Port forwarding | ✅ | ✅ | 🚧 |
+| Logs while suspended | ✅ | ✅ | 🚧 |
+| Worktree hot-mount without restart | ✅ | ❌ | 🚧 |
+
+🚧 Not yet supported on macOS.
+
+See the [Windows](docs/guides/windows-workspaces.md),
+[macOS](docs/guides/darwin-workspaces.md), and
+[GUI](docs/guides/run-gui-applications.md) guides for setup and current limits.
+
 ## Install
 
 ### Deploy the operator
@@ -438,12 +466,8 @@ Removing the CRDs deletes all rc custom resources from the cluster. Review the a
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the Kind development loop, tests, generated-file rules, and pull request checklist.
 
 Design decisions and the detailed runtime model live under [`docs/`](docs/).
-
-Experimental platform guides:
-
-- [Attach a native Windows 11 Kubernetes worker](docs/guides/experimental-windows-11-worker.md)
-- [Run Windows Workspaces](docs/guides/windows-workspaces.md)
-- [Run Darwin Workspaces with macOS-vz-kubelet](docs/guides/darwin-workspaces.md)
+To attach a Windows 11 development node, see the
+[experimental Windows 11 worker guide](docs/guides/experimental-windows-11-worker.md).
 
 ## License
 

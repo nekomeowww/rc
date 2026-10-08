@@ -1068,7 +1068,7 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 func runtimePlatformCondition(err error) (string, string) {
 	switch {
 	case stderrors.Is(err, rcplatform.ErrUnsupportedOS):
-		return "UnsupportedOS", "Workspace OS must be linux or windows"
+		return "UnsupportedOS", "Workspace OS must be linux, windows, or darwin"
 	case stderrors.Is(err, rcplatform.ErrPlacementConflict):
 		return "OSPlacementConflict", "Node selector operating system conflicts with the runtime OS"
 	default:

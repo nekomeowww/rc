@@ -33,8 +33,11 @@ func TestFailure(t *testing.T) {
 			Status: repositories.RepositoryStatus{
 				ObservedGeneration: observed,
 				Conditions: []metav1.Condition{{
-					Type: repositories.RepositoryConditionStorageReady, Status: status, Reason: reason,
-					Message: "fetch failed", ObservedGeneration: observed,
+					Type:               repositories.RepositoryConditionStorageReady,
+					Status:             status,
+					Reason:             reason,
+					Message:            "fetch failed",
+					ObservedGeneration: observed,
 				}},
 			},
 		}

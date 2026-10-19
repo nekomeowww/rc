@@ -33,8 +33,13 @@ const FailedReason = "RepositoryFailed"
 // action: a new RepositorySync, a Credential, or a spec fix. Other False
 // reasons describe provisioning, bootstrap, sync, or expansion in progress.
 var failedStorageReasons = map[string]struct{}{
-	"SyncFailed": {}, "BootstrapFailed": {}, "BootstrapJobConflict": {}, "CredentialNotFound": {},
-	"VolumeClaimConflict": {}, "StorageClassChangeUnsupported": {}, "VolumeShrinkUnsupported": {},
+	"SyncFailed":                    {},
+	"BootstrapFailed":               {},
+	"BootstrapJobConflict":          {},
+	"CredentialNotFound":            {},
+	"VolumeClaimConflict":           {},
+	"StorageClassChangeUnsupported": {},
+	"VolumeShrinkUnsupported":       {},
 }
 
 // Failure reports why a Repository's parent volume cannot become ready on its

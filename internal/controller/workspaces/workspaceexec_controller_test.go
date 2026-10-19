@@ -309,8 +309,9 @@ func TestTerminalWorkspaceExecReleasesOnlyItsOwnEnvironmentSecret(t *testing.T) 
 			process := &workspacesv1alpha1.WorkspaceExec{
 				ObjectMeta: metav1.ObjectMeta{Name: "codex-done", Namespace: testNamespace, UID: types.UID("process-uid"), Finalizers: []string{executionFinalizer}},
 				Spec: workspacesv1alpha1.WorkspaceExecSpec{
-					TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: testWorkspaceName},
-					Command:   []string{agentTypeCodex}, EnvSecretRef: &workspacesv1alpha1.LocalReference{Name: testProcessEnvSecret},
+					TargetRef:    workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: testWorkspaceName},
+					Command:      []string{agentTypeCodex},
+					EnvSecretRef: &workspacesv1alpha1.LocalReference{Name: testProcessEnvSecret},
 				},
 				Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, CompletedAt: &now},
 			}

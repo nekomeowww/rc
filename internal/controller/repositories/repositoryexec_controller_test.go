@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	"github.com/nekomeowww/rc/internal/repositoryaccess"
 )
 
 var _ = Describe("RepositoryExec Controller", func() {
@@ -106,6 +107,43 @@ var _ = Describe("RepositoryExec Controller", func() {
 		Expect(succeeded).NotTo(BeNil())
 		Expect(succeeded.Status).To(Equal(metav1.ConditionTrue))
 		Expect(persisted.Status.JobName).To(Equal(execName))
+	})
+
+	It("fails fast instead of waiting on a failed Repository", func() {
+		const (
+			execName       = "repository-exec-failed-parent"
+			repositoryName = "repository-failed-for-exec"
+		)
+		ctx := context.Background()
+		repository := readyRepository(repositoryName)
+		Expect(k8sClient.Create(ctx, repository)).To(Succeed())
+		repository.Status = failedRepositoryStatus(repositoryName)
+		Expect(k8sClient.Status().Update(ctx, repository)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, repository)).To(Succeed()) })
+
+		exec := &repositoriesv1alpha1.RepositoryExec{
+			ObjectMeta: metav1.ObjectMeta{Name: execName, Namespace: testNamespace},
+			Spec: repositoriesv1alpha1.RepositoryExecSpec{
+				RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: repositoryName},
+				Command:       []string{testGitExecutable, testStatusArgument},
+			},
+		}
+		Expect(k8sClient.Create(ctx, exec)).To(Succeed())
+		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, exec))).To(Succeed()) })
+
+		reconciler := &RepositoryExecReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: testRunnerImage}
+		execKey := types.NamespacedName{Name: execName, Namespace: testNamespace}
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: execKey})
+		Expect(err).NotTo(HaveOccurred())
+
+		persisted := new(repositoriesv1alpha1.RepositoryExec)
+		Expect(k8sClient.Get(ctx, execKey, persisted)).To(Succeed())
+		succeeded := meta.FindStatusCondition(persisted.Status.Conditions, repositoriesv1alpha1.RepositoryExecConditionSucceeded)
+		Expect(succeeded).NotTo(BeNil())
+		Expect(succeeded.Status).To(Equal(metav1.ConditionFalse))
+		Expect(succeeded.Reason).To(Equal(repositoryaccess.FailedReason))
+		Expect(succeeded.Message).To(ContainSubstring("not our ref"))
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, execKey, new(batchv1.Job)))).To(BeTrue(), "never run the command")
 	})
 
 	It("rejects an empty command", func() {
@@ -260,4 +298,13 @@ func readyRepositoryStatus(name string) repositoriesv1alpha1.RepositoryStatus {
 			Message:            "Parent volume is bound",
 		}},
 	}
+}
+
+func failedRepositoryStatus(name string) repositoriesv1alpha1.RepositoryStatus {
+	status := readyRepositoryStatus(name)
+	status.Conditions[0].Status = metav1.ConditionFalse
+	status.Conditions[0].Reason = "SyncFailed"
+	status.Conditions[0].Message = "fatal: remote error: upload-pack: not our ref c545def"
+
+	return status
 }

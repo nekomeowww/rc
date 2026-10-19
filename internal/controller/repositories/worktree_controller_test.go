@@ -74,7 +74,7 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(k8sClient.Create(ctx, worktree)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, worktree)).To(Succeed()) })
 		key := types.NamespacedName{Name: worktreeName, Namespace: testNamespace}
-		reconciler := &WorktreeReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: "ghcr.io/example/rc/runner:test"}
+		reconciler := &WorktreeReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: testRunnerImage}
 
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		Expect(err).NotTo(HaveOccurred())
@@ -137,6 +137,53 @@ var _ = Describe("Worktree Controller", func() {
 		Expect(action.Command).To(ContainElement(worktree.Spec.Branch))
 		Expect(action.Command[2]).To(ContainSubstring("checkout -b"))
 		Expect(action.Command[2]).NotTo(ContainSubstring("worktree add"))
+	})
+
+	It("reports a failed Repository and resumes once it recovers", func() {
+		ctx := context.Background()
+		const (
+			repositoryName = "worktree-failed-parent"
+			worktreeName   = "worktree-failed-child"
+		)
+		repository := readyRepository(repositoryName)
+		Expect(k8sClient.Create(ctx, repository)).To(Succeed())
+		repository.Status = failedRepositoryStatus(repositoryName)
+		Expect(k8sClient.Status().Update(ctx, repository)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, repository)).To(Succeed()) })
+		source := parentVolumeClaim(repository, repository.Status.VolumeClaimName)
+		Expect(k8sClient.Create(ctx, source)).To(Succeed())
+		source.Status = corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound, Capacity: source.Spec.Resources.Requests.DeepCopy()}
+		Expect(k8sClient.Status().Update(ctx, source)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, source)).To(Succeed()) })
+
+		worktree := &repositoriesv1alpha1.Worktree{
+			ObjectMeta: metav1Object(worktreeName),
+			Spec:       repositoriesv1alpha1.WorktreeSpec{RepositoryRef: repositoriesv1alpha1.RepositoryReference{Name: repositoryName}, Branch: "feature/failed"},
+		}
+		Expect(k8sClient.Create(ctx, worktree)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, worktree)).To(Succeed()) })
+
+		reconciler := &WorktreeReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: testRunnerImage}
+		key := types.NamespacedName{Name: worktreeName, Namespace: testNamespace}
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		persisted := new(repositoriesv1alpha1.Worktree)
+		Expect(k8sClient.Get(ctx, key, persisted)).To(Succeed())
+		ready := meta.FindStatusCondition(persisted.Status.Conditions, repositoriesv1alpha1.WorktreeConditionReady)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(repositoryaccess.FailedReason))
+		Expect(ready.Message).To(ContainSubstring("not our ref"))
+		claimKey := types.NamespacedName{Namespace: testNamespace, Name: "worktree-" + worktreeName}
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, claimKey, new(corev1.PersistentVolumeClaim)))).To(BeTrue(), "create no clone from a failed parent")
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(repository), repository)).To(Succeed())
+		repository.Status = readyRepositoryStatus(repositoryName)
+		Expect(k8sClient.Status().Update(ctx, repository)).To(Succeed())
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, claimKey, new(corev1.PersistentVolumeClaim))).To(Succeed(), "clone once the parent recovers")
 	})
 
 	It("clones the Repository PVC and checks out the requested branch in its root", func() {

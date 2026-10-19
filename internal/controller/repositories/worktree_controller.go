@@ -161,6 +161,15 @@ func (r *WorktreeReconciler) reconcileWorktree(ctx context.Context, req ctrl.Req
 			return ctrl.Result{}, fmt.Errorf("get Repository: %w", err)
 		}
 
+		// A failed parent needs a user action. Report it instead of waiting, and
+		// drop any reservation so it cannot block the RepositorySync that fixes it.
+		// The Repository watch resumes creation once the parent recovers.
+		if message, failed := repositoryaccess.Failure(repository); failed {
+			if err := r.releaseClone(ctx, worktree); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, r.setWorktreeStatus(ctx, worktree, metav1.ConditionFalse, repositoryaccess.FailedReason, message, "", repository.Status.VolumeClaimName, worktreePath)
+		}
 		admission, err := r.cloneGate().Acquire(ctx, repository, cloneHolder(worktree), true)
 		if err != nil {
 			return ctrl.Result{}, err

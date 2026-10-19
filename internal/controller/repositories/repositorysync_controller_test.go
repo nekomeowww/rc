@@ -28,7 +28,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-const syncTestRunnerImage = "sync-runner:test"
+const (
+	syncTestRunnerImage = "sync-runner:test"
+	testSyncPodName     = "sync-pod"
+)
 
 func syncFixture(t *testing.T) (client.Client, *repositoriesv1alpha1.Repository, *repositoriesv1alpha1.RepositorySync) {
 	t.Helper()
@@ -74,7 +77,7 @@ func TestSyncRetainsResultAndBlocksExecAndClones(t *testing.T) {
 	require.Len(t, jobs.Items, 1)
 	commit := strings.Repeat("a", 40)
 	completed := metav1.Now()
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "sync-pod", Namespace: repository.Namespace, Labels: map[string]string{batchv1.JobNameLabel: job.Name}}, Status: corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{{Name: job.Spec.Template.Spec.Containers[0].Name, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: commit + "\n"}}}}}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: testSyncPodName, Namespace: repository.Namespace, Labels: map[string]string{batchv1.JobNameLabel: job.Name}}, Status: corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{{Name: job.Spec.Template.Spec.Containers[0].Name, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: commit + "\n"}}}}}}
 	require.NoError(t, controllerutil.SetControllerReference(job, pod, c.Scheme()))
 	require.NoError(t, c.Create(t.Context(), pod))
 	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
@@ -96,6 +99,85 @@ func TestSyncRetainsResultAndBlocksExecAndClones(t *testing.T) {
 	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(request), request))
 	require.Equal(t, commit, request.Status.Commit)
 	require.True(t, meta.IsStatusConditionTrue(request.Status.Conditions, repositoriesv1alpha1.RepositorySyncConditionSucceeded))
+}
+
+func TestSyncKeepsParentReadyAndReportsFailedSubmodules(t *testing.T) {
+	t.Parallel()
+	c, repository, request := syncFixture(t)
+	repository.Spec.Submodules = &repositoriesv1alpha1.RepositorySubmodulesSpec{FailurePolicy: repositoriesv1alpha1.RepositorySubmoduleFailurePolicyContinue}
+	require.NoError(t, c.Update(t.Context(), repository))
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(repository), repository))
+	repository.Status.ObservedGeneration = repository.Generation
+	repository.Status.Conditions[0].ObservedGeneration = repository.Generation
+	require.NoError(t, c.Status().Update(t.Context(), repository))
+	reconcileSync(t, c, request)
+	job := new(batchv1.Job)
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(request), job))
+
+	commit := strings.Repeat("b", 40)
+	message := commit + "\n" + repositorySubmoduleFailurePrefix + "c545def0000000000000000000000000000000000 lobehub\n"
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: testSyncPodName, Namespace: repository.Namespace, Labels: map[string]string{batchv1.JobNameLabel: job.Name}}, Status: corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{{Name: job.Spec.Template.Spec.Containers[0].Name, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: message}}}}}}
+	require.NoError(t, controllerutil.SetControllerReference(job, pod, c.Scheme()))
+	require.NoError(t, c.Create(t.Context(), pod))
+	completed := metav1.Now()
+	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+	job.Status.CompletionTime = &completed
+	require.NoError(t, c.Status().Update(t.Context(), job))
+	reconcileSync(t, c, request)
+
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(request), request))
+	require.Equal(t, commit, request.Status.Commit, "parse the commit before submodule results")
+	succeeded := meta.FindStatusCondition(request.Status.Conditions, repositoriesv1alpha1.RepositorySyncConditionSucceeded)
+	require.NotNil(t, succeeded)
+	require.Equal(t, metav1.ConditionTrue, succeeded.Status)
+	require.Contains(t, succeeded.Message, "lobehub at c545def", "warn the sync caller")
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(repository), repository))
+	require.True(t, meta.IsStatusConditionTrue(repository.Status.Conditions, repositoriesv1alpha1.RepositoryConditionStorageReady), "keep the parent usable")
+	submodules := meta.FindStatusCondition(repository.Status.Conditions, repositoriesv1alpha1.RepositoryConditionSubmodulesReady)
+	require.NotNil(t, submodules)
+	require.Equal(t, metav1.ConditionFalse, submodules.Status)
+	require.Equal(t, "SubmoduleUpdateFailed", submodules.Reason)
+	require.Contains(t, submodules.Message, "lobehub at c545def")
+}
+
+func TestSyncFailurePolicyFailNamesFailedSubmodules(t *testing.T) {
+	t.Parallel()
+	c, repository, request := syncFixture(t)
+	repository.Spec.Submodules = &repositoriesv1alpha1.RepositorySubmodulesSpec{}
+	require.NoError(t, c.Update(t.Context(), repository))
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(repository), repository))
+	repository.Status.ObservedGeneration = repository.Generation
+	repository.Status.Conditions[0].ObservedGeneration = repository.Generation
+	require.NoError(t, c.Status().Update(t.Context(), repository))
+	reconcileSync(t, c, request)
+	job := new(batchv1.Job)
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(request), job))
+
+	message := strings.Repeat("b", 40) + "\n" + repositorySubmoduleFailurePrefix + "c545def0000000000000000000000000000000000 lobehub\n"
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: testSyncPodName, Namespace: repository.Namespace, Labels: map[string]string{batchv1.JobNameLabel: job.Name}}, Status: corev1.PodStatus{Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{{Name: job.Spec.Template.Spec.Containers[0].Name, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 65, Message: message}}}}}}
+	require.NoError(t, controllerutil.SetControllerReference(job, pod, c.Scheme()))
+	require.NoError(t, c.Create(t.Context(), pod))
+	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "BackoffLimitExceeded", Message: "Job has reached the specified backoff limit"}}
+	require.NoError(t, c.Status().Update(t.Context(), job))
+	reconcileSync(t, c, request)
+
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(repository), repository))
+	ready := meta.FindStatusCondition(repository.Status.Conditions, repositoriesv1alpha1.RepositoryConditionStorageReady)
+	require.NotNil(t, ready)
+	require.Equal(t, metav1.ConditionFalse, ready.Status, "keep the ADR 0002 default")
+	require.Equal(t, repositorySyncFailed, ready.Reason)
+	require.Contains(t, ready.Message, "lobehub at c545def", "replace the generic Job message")
+	require.Contains(t, ready.Message, "failurePolicy to Continue")
+	require.True(t, meta.IsStatusConditionFalse(repository.Status.Conditions, repositoriesv1alpha1.RepositoryConditionSubmodulesReady))
+}
+
+func TestParseCheckoutResult(t *testing.T) {
+	t.Parallel()
+	commit := strings.Repeat("c", 40)
+	result := parseCheckoutResult(commit + "\nsubmodule-failed " + strings.Repeat("d", 40) + " path with space\nnoise\n")
+	require.Equal(t, commit, result.commit)
+	require.Equal(t, []string{"path with space at " + strings.Repeat("d", 40)}, result.submoduleFailures)
+	require.Empty(t, parseCheckoutResult("not a commit").commit)
 }
 
 func TestSyncWaitsForAdmittedCloneAndRetryUsesNewRequest(t *testing.T) {

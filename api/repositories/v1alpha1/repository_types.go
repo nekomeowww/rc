@@ -30,6 +30,12 @@ const (
 	// accept an exec request.
 	RepositoryConditionStorageReady = "StorageReady"
 
+	// RepositoryConditionSubmodulesReady reports whether the last checkout
+	// updated every submodule to its recorded commit. It is present only when
+	// submodules are enabled, and a False message names each failed path.
+	// StorageReady stays True only with failurePolicy Continue.
+	RepositoryConditionSubmodulesReady = "SubmodulesReady"
+
 	// RepositoryConditionDeletionBlocked is True only while a Repository with a
 	// deletionTimestamp is still present and rc observes what it waits on. It
 	// is absent otherwise. rc holds no finalizer on Repository, so it reports
@@ -94,7 +100,28 @@ type RepositorySubmodulesSpec struct {
 	// recursive initializes nested submodules in addition to direct submodules.
 	// +optional
 	Recursive bool `json:"recursive,omitempty"`
+
+	// failurePolicy decides what a submodule that cannot be updated, such as
+	// one whose recorded commit no longer exists upstream, does to a checkout.
+	// Fail, the default, leaves the Repository not ready rather than publishing
+	// incomplete source state. Continue keeps the parent checkout ready and
+	// reports each failed path on the SubmodulesReady condition.
+	// +kubebuilder:default=Fail
+	// +optional
+	FailurePolicy RepositorySubmoduleFailurePolicy `json:"failurePolicy,omitempty"`
 }
+
+// RepositorySubmoduleFailurePolicy selects how a checkout treats a submodule
+// that cannot be updated.
+// +kubebuilder:validation:Enum=Fail;Continue
+type RepositorySubmoduleFailurePolicy string
+
+const (
+	// RepositorySubmoduleFailurePolicyFail fails the checkout.
+	RepositorySubmoduleFailurePolicyFail RepositorySubmoduleFailurePolicy = "Fail"
+	// RepositorySubmoduleFailurePolicyContinue keeps the parent checkout ready.
+	RepositorySubmoduleFailurePolicyContinue RepositorySubmoduleFailurePolicy = "Continue"
+)
 
 // RepositoryStorageSpec describes the persistent parent volume.
 // +kubebuilder:validation:XValidation:rule="quantity(self.size).isGreaterThan(quantity('0'))",message="size must be greater than zero"

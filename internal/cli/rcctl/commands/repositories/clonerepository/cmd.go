@@ -24,6 +24,7 @@ type cloneOptions struct {
 	credentialRef       string
 	withSubmodules      bool
 	recursiveSubmodules bool
+	continueSubmodules  bool
 	wait                bool
 }
 
@@ -49,6 +50,7 @@ func NewCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	flags.StringVar(&options.credentialRef, "credential-ref", "", "Credential resource name for the Git remote")
 	flags.BoolVar(&options.withSubmodules, "with-submodules", false, "Initialize direct Git submodules")
 	flags.BoolVar(&options.recursiveSubmodules, "recursive-submodules", false, "Initialize Git submodules recursively; implies --with-submodules")
+	flags.BoolVar(&options.continueSubmodules, "continue-on-submodule-failure", false, "Keep the parent checkout ready when a submodule cannot be updated")
 	flags.BoolVar(&options.wait, "wait", true, "Wait for Repository bootstrap to complete")
 	_ = command.MarkFlagRequired("storage-class")
 
@@ -60,6 +62,9 @@ func (options cloneOptions) validate() error {
 		if errors := validation.IsDNS1123Subdomain(options.name); len(errors) > 0 {
 			return fmt.Errorf("invalid Repository name %q: %s", options.name, errors[0])
 		}
+	}
+	if options.continueSubmodules && !options.withSubmodules && !options.recursiveSubmodules {
+		return fmt.Errorf("--continue-on-submodule-failure requires --with-submodules or --recursive-submodules")
 	}
 	_, err := parseSize(options.size)
 	return err
@@ -88,6 +93,7 @@ func run(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, options cloneOpt
 		CredentialRef:       options.credentialRef,
 		WithSubmodules:      options.withSubmodules,
 		RecursiveSubmodules: options.recursiveSubmodules,
+		ContinueSubmodules:  options.continueSubmodules,
 	})
 	if err != nil {
 		return err

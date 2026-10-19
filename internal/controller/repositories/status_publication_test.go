@@ -300,7 +300,7 @@ func TestRepositoryDeletionBlockedReportsGarbageCollectionWaits(t *testing.T) {
 	require.NoError(t, controllerutil.SetControllerReference(repository, claim, scheme))
 	claim.Finalizers = []string{"kubernetes.io/pvc-protection"}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "sync-pod", Namespace: ownershipNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testSyncPodName, Namespace: ownershipNamespace},
 		Spec:       corev1.PodSpec{Volumes: []corev1.Volume{{Name: workerVolumeName, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: statusParentName}}}}},
 		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 	}

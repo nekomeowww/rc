@@ -19,6 +19,7 @@ package repositories
 import (
 	"context"
 	"strconv"
+	"strings"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
@@ -37,7 +38,56 @@ const (
 	repositorySubmoduleModeNone      = "none"
 	repositorySubmoduleModeDirect    = "direct"
 	repositorySubmoduleModeRecursive = "recursive"
+	repositorySubmoduleFailurePrefix = "submodule-failed "
 )
+
+// checkoutResult is the checkout container's termination message: the
+// resolved commit, then one line per submodule the script could not update.
+type checkoutResult struct {
+	commit            string
+	submoduleFailures []string
+}
+
+func parseCheckoutResult(message string) checkoutResult {
+	lines := strings.Split(strings.TrimSpace(message), "\n")
+	result := checkoutResult{}
+	if commit := strings.TrimSpace(lines[0]); resolvedCommitPattern.MatchString(commit) {
+		result.commit = commit
+	}
+	for _, line := range lines[1:] {
+		failure, ok := strings.CutPrefix(strings.TrimSpace(line), repositorySubmoduleFailurePrefix)
+		if !ok {
+			continue
+		}
+		if commit, path, ok := strings.Cut(failure, " "); ok {
+			result.submoduleFailures = append(result.submoduleFailures, path+" at "+commit)
+		}
+	}
+
+	return result
+}
+
+// readCheckoutResult reads the result of a checkout Job's terminated container.
+// A failed checkout still reports the submodules that failed it. found is
+// false when its Pod is gone, for example after Job TTL cleanup.
+func readCheckoutResult(ctx context.Context, reader client.Reader, job *batchv1.Job) (checkoutResult, bool, error) {
+	pods := new(corev1.PodList)
+	if err := reader.List(ctx, pods, client.InNamespace(job.Namespace), client.MatchingLabels{batchv1.JobNameLabel: job.Name}); err != nil {
+		return checkoutResult{}, false, err
+	}
+	for _, pod := range pods.Items {
+		if !metav1.IsControlledBy(&pod, job) {
+			continue
+		}
+		for _, container := range pod.Status.ContainerStatuses {
+			if end := container.State.Terminated; container.Name == repositoryCheckoutContainer && end != nil {
+				return parseCheckoutResult(end.Message), true, nil
+			}
+		}
+	}
+
+	return checkoutResult{}, false, nil
+}
 
 // repositoryCredential resolves only the credential selected by the Repository.
 func repositoryCredential(ctx context.Context, reader client.Reader, repository *repositoriesv1alpha1.Repository) (*configsv1alpha1.Credential, error) {
@@ -66,7 +116,7 @@ func repositoryCheckoutJob(
 	credential *configsv1alpha1.Credential,
 ) *batchv1.Job {
 	auth := repositoryCheckoutAuth(credential)
-	args := make([]string, 0, 8+len(auth.headerArgs))
+	args := make([]string, 0, 9+len(auth.headerArgs))
 	args = append(args,
 		"-ceu",
 		repositoryCheckoutScript,
@@ -74,6 +124,7 @@ func repositoryCheckoutJob(
 		repository.Spec.Remote.URL,
 		repository.Spec.Ref,
 		repositorySubmoduleMode(repository),
+		string(repositorySubmoduleFailurePolicy(repository)),
 		auth.mode,
 		strconv.Itoa(len(auth.headerArgs)/2),
 	)
@@ -181,6 +232,14 @@ func repositoryCheckoutAuth(credential *configsv1alpha1.Credential) repositoryCh
 	return auth
 }
 
+func repositorySubmoduleFailurePolicy(repository *repositoriesv1alpha1.Repository) repositoriesv1alpha1.RepositorySubmoduleFailurePolicy {
+	if repository.Spec.Submodules == nil || repository.Spec.Submodules.FailurePolicy == "" {
+		return repositoriesv1alpha1.RepositorySubmoduleFailurePolicyFail
+	}
+
+	return repository.Spec.Submodules.FailurePolicy
+}
+
 func repositorySubmoduleMode(repository *repositoriesv1alpha1.Repository) string {
 	if repository.Spec.Submodules == nil {
 		return repositorySubmoduleModeNone
@@ -196,9 +255,10 @@ const repositoryCheckoutScript = `
 remote="$1"
 ref="$2"
 submodule_mode="$3"
-auth_mode="$4"
-header_count="$5"
-shift 5
+submodule_failure_policy="$4"
+auth_mode="$5"
+header_count="$6"
+shift 6
 
 case "$auth_mode" in
 none|ssh)
@@ -267,16 +327,36 @@ fi
 
 git -C /repository reset --hard "$target"
 git -C /repository clean -ffdx
+# Update each top-level submodule on its own so one result names every path
+# that failed, for example because an upstream dropped the recorded commit.
+failures=/repository/.git/rc-submodule-failures
+rm -f "$failures"
 case "$submodule_mode" in
 none)
   ;;
-direct)
-  git -C /repository submodule sync
-  git -C /repository submodule update --init
-  ;;
-recursive)
-  git -C /repository submodule sync --recursive
-  git -C /repository submodule update --init --recursive
+direct|recursive)
+  recursive=""
+  if [ "$submodule_mode" = recursive ]; then
+    recursive=--recursive
+  fi
+  git -C /repository submodule sync $recursive
+  tab="$(printf '\t')"
+  git -C /repository -c core.quotePath=false ls-files --stage | while IFS="$tab" read -r entry path; do
+    case "$entry" in
+    "160000 "*)
+      ;;
+    *)
+      continue
+      ;;
+    esac
+    gitlink="${entry#160000 }"
+    gitlink="${gitlink%% *}"
+    # Keep ssh and credential prompts off the ls-files stream.
+    if ! git -C /repository submodule update --init $recursive -- "$path" </dev/null; then
+      echo "warning: submodule $path could not be updated to $gitlink" >&2
+      printf '%s %s\n' "$gitlink" "$path" >> "$failures"
+    fi
+  done
   ;;
 *)
   echo "unsupported Repository submodule mode" >&2
@@ -285,5 +365,16 @@ recursive)
 esac
 commit="$(git -C /repository rev-parse --verify HEAD)"
 printf '%s\n' "$commit"
-printf '%s\n' "$commit" > /dev/termination-log
+{
+  printf '%s\n' "$commit"
+  if [ -s "$failures" ]; then
+    head -n 20 "$failures" | sed 's/^/submodule-failed /'
+  fi
+} > /dev/termination-log
+if [ -s "$failures" ] && [ "$submodule_failure_policy" != Continue ]; then
+  rm -f "$failures"
+  echo "submodules could not be updated; set spec.submodules.failurePolicy to Continue to keep the parent checkout usable" >&2
+  exit 65
+fi
+rm -f "$failures"
 `

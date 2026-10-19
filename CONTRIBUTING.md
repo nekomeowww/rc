@@ -263,6 +263,31 @@ before changing Workspace lifecycle, credential projection, process retention,
 or PVC cloning behavior. The ADRs under [`docs/adr/`](docs/adr/) record the
 Repository and Worktree storage decisions.
 
+## Code style
+
+`make lint-fix` covers formatting, but not how a long literal wraps. When a
+composite literal (map, slice, or struct) does not fit on one line, put each
+element or field on its own line. Do not pack several elements onto lines that
+also wrap:
+
+```go
+// Avoid: several entries per line, wrapped.
+var failedReasons = map[string]struct{}{
+	"SyncFailed": {}, "BootstrapFailed": {},
+	"CredentialNotFound": {},
+}
+
+// Prefer: one entry per line once the literal wraps.
+var failedReasons = map[string]struct{}{
+	"SyncFailed":         {},
+	"BootstrapFailed":    {},
+	"CredentialNotFound": {},
+}
+```
+
+A literal that fits on one line may stay on one line. Some older code still
+packs entries; reformat it when you change it.
+
 ## Pull requests
 
 Before opening a pull request:

@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	"github.com/nekomeowww/rc/internal/repositoryaccess"
 	"github.com/nekomeowww/rc/internal/volumeclaim"
 	"github.com/nekomeowww/rc/internal/worktreestorage"
 )
@@ -52,6 +53,9 @@ func (c *WorktreeClient) Start(ctx context.Context, request WorktreeAddRequest) 
 	repository, err := ResolveRepository(ctx, c.Client, request.Namespace, request.Repository)
 	if err != nil {
 		return nil, err
+	}
+	if message, failed := repositoryaccess.Failure(repository); failed {
+		return nil, errors.New(message)
 	}
 
 	name := request.Name
@@ -110,7 +114,7 @@ func (c *WorktreeClient) Wait(ctx context.Context, worktree *repositoriesv1alpha
 			switch condition.Reason {
 			// Planner rejections of immutable Worktree input cannot recover.
 			case worktreestorage.SizeTooSmall, worktreestorage.StorageInvalid,
-				"RepositoryNotFound", "VolumeClaimConflict", "VolumeClaimSpecChanged", "VolumeClaimLost", bootstrapFailedReason, "BootstrapJobConflict":
+				"RepositoryNotFound", repositoryaccess.FailedReason, "VolumeClaimConflict", "VolumeClaimSpecChanged", "VolumeClaimLost", bootstrapFailedReason, "BootstrapJobConflict":
 				result = current
 				return true, nil
 			}

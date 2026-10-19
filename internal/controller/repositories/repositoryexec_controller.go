@@ -140,6 +140,11 @@ func (r *RepositoryExecReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, fmt.Errorf("get Repository: %w", err)
 	}
 
+	// A command must not run later against a parent that recovers after the
+	// caller gave up, so a failed parent ends this one-shot execution.
+	if message, failed := repositoryaccess.Failure(repository); failed {
+		return ctrl.Result{}, r.setSucceeded(ctx, exec, metav1.ConditionFalse, repositoryaccess.FailedReason, message, "")
+	}
 	if !conditions.ReadyAtGeneration(repository.Status.Conditions, repositoriesv1alpha1.RepositoryConditionStorageReady, repository.Generation, repository.Status.ObservedGeneration) || repository.Status.VolumeClaimName == "" {
 		err := r.setSucceeded(ctx, exec, metav1.ConditionUnknown, "RepositoryNotReady", "Referenced Repository parent volume is not ready", "")
 		if err != nil {

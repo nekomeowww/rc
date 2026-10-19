@@ -42,7 +42,7 @@ var excludedCallerEnvironment = map[string]struct{}{
 }
 
 var excludedCallerEnvironmentPrefixes = []string{
-	"ATUIN_", "CODELLDB_", "CODEX_", "COPILOT_", "GEMINI_CLI_IDE_", "GHOSTTY_",
+	"ATUIN_", "CLAUDE_CODE_", "CODELLDB_", "CODEX_", "COPILOT_", "GEMINI_CLI_IDE_", "GHOSTTY_",
 	"HOMEBREW_", "MISE_", "NIX_", "NODE_REPL_TRUSTED_", "STARSHIP_", "SWIFTLY_",
 	"TERM_", "VSCODE_", "VOLTA_", "XDG_", "XPC_",
 }

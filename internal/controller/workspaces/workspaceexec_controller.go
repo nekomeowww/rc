@@ -145,6 +145,9 @@ func (r *WorkspaceExecReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	if process.Status.Phase == workspacesv1alpha1.WorkspaceExecPhaseRunning {
+		if err := r.releaseProcessEnvironment(ctx, process); err != nil {
+			return ctrl.Result{}, err
+		}
 		target, lost, err := runtimeProcessTarget(process, runtimePod)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -247,8 +250,36 @@ func (r *WorkspaceExecReconciler) startProcess(ctx context.Context, key types.Na
 		return ctrl.Result{}, fmt.Errorf("start process through rc-kube: %w", err)
 	}
 	logf.FromContext(ctx).Info("Started process", "name", process.Name, "runtimePod", target.runtime.Pod)
+	if err := r.applyRuntimeState(ctx, key, target, state); err != nil {
+		return ctrl.Result{}, err
+	}
 
-	return ctrl.Result{RequeueAfter: processTargetRequeueDelay}, r.applyRuntimeState(ctx, key, target, state)
+	return ctrl.Result{RequeueAfter: processTargetRequeueDelay}, r.releaseProcessEnvironment(ctx, process)
+}
+
+// releaseProcessEnvironment deletes the environment Secret once rc-kube owns
+// the process. Only the start path reads it, and a Running or terminal
+// execution is never started again, so caller values need not outlive the
+// start. A Secret the execution does not control may belong to a direct API
+// client and is left alone.
+func (r *WorkspaceExecReconciler) releaseProcessEnvironment(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) error {
+	if process.Spec.EnvSecretRef == nil {
+		return nil
+	}
+	secret := new(corev1.Secret)
+	key := types.NamespacedName{Name: process.Spec.EnvSecretRef.Name, Namespace: process.Namespace}
+	if err := r.Get(ctx, key, secret); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(secret, process) || !secret.DeletionTimestamp.IsZero() {
+		return nil
+	}
+	if err := r.Delete(ctx, secret, client.Preconditions{UID: &secret.UID}); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	logf.FromContext(ctx).Info("Deleted process environment Secret", "name", secret.Name)
+
+	return nil
 }
 
 func (r *WorkspaceExecReconciler) handleWorkspaceExecLifecycle(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) (ctrl.Result, bool, error) {
@@ -258,6 +289,9 @@ func (r *WorkspaceExecReconciler) handleWorkspaceExecLifecycle(ctx context.Conte
 	}
 	if controllerutil.ContainsFinalizer(process, executionFinalizer) {
 		if process.Status.Phase.Terminal() {
+			if err := r.releaseProcessEnvironment(ctx, process); err != nil {
+				return ctrl.Result{}, true, err
+			}
 			return ctrl.Result{}, true, r.ensureExecutionCompletedAt(ctx, process)
 		}
 		return ctrl.Result{}, false, nil

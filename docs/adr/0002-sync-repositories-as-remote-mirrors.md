@@ -17,6 +17,14 @@ submodules. Submodule fetches inherit the Repository Credential; a failed
 requested submodule leaves the Repository not ready rather than publishing
 incomplete source state.
 
+`spec.submodules.failurePolicy: Continue` is an explicit opt-out for a parent
+whose submodule upstream no longer serves a recorded commit, for example after
+a force-push. The parent checkout is already reset and consistent, so it stays
+ready; the `SubmodulesReady` condition stays False and names each failed path
+until a later checkout updates it. The default, `Fail`, keeps the decision
+above. Either way, each top-level submodule is updated separately so one result
+names every failed path.
+
 This deliberately discards local changes in the parent instead of merging or
 rebasing them. Repository Exec remains the explicit mechanism for arbitrary Git
 workflows. Existing Worktrees are independent child PVCs and are not changed by

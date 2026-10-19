@@ -259,18 +259,39 @@ func (r *RepositoryReconciler) reconcileRepository(ctx context.Context, req ctrl
 		}
 	}
 	if condition := jobCondition(job, batchv1.JobFailed); condition != nil && condition.Status == corev1.ConditionTrue {
+		result, found, err := readCheckoutResult(ctx, r.APIReader, job)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
 		message := condition.Message
+		if len(result.submoduleFailures) > 0 {
+			message = submoduleCheckoutFailedMessage(result.submoduleFailures)
+		}
 		if message == "" {
 			message = "Repository bootstrap Job failed"
 		}
 		if err := setRepositoryStorageReady(ctx, r.Client, repository, metav1.ConditionFalse, "BootstrapFailed", message, claim.Name, nil); err != nil {
 			return ctrl.Result{}, err
 		}
+		if found {
+			if err := setRepositorySubmodulesReady(ctx, r.Client, repository, result.submoduleFailures); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		return ctrl.Result{}, gate.Release(ctx, repository, holder.Key())
 	}
 	if condition := jobCondition(job, batchv1.JobComplete); condition != nil && condition.Status == corev1.ConditionTrue {
+		result, found, err := readCheckoutResult(ctx, r.APIReader, job)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
 		if err := setRepositoryStorageReady(ctx, r.Client, repository, metav1.ConditionTrue, "RepositoryReady", "Repository Git content is ready", claim.Name, job.Status.CompletionTime); err != nil {
 			return ctrl.Result{}, err
+		}
+		if found {
+			if err := setRepositorySubmodulesReady(ctx, r.Client, repository, result.submoduleFailures); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 		return ctrl.Result{}, gate.Release(ctx, repository, holder.Key())
 	}

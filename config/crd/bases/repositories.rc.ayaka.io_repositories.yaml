@@ -129,6 +129,18 @@ spec:
                   submodules configures optional Git submodule initialization. When omitted,
                   the Repository synchronizes only the parent checkout.
                 properties:
+                  failurePolicy:
+                    default: Fail
+                    description: |-
+                      failurePolicy decides what a submodule that cannot be updated, such as
+                      one whose recorded commit no longer exists upstream, does to a checkout.
+                      Fail, the default, leaves the Repository not ready rather than publishing
+                      incomplete source state. Continue keeps the parent checkout ready and
+                      reports each failed path on the SubmodulesReady condition.
+                    enum:
+                    - Fail
+                    - Continue
+                    type: string
                   recursive:
                     description: recursive initializes nested submodules in addition
                       to direct submodules.

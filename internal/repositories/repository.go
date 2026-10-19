@@ -31,6 +31,9 @@ type CloneRequest struct {
 	// implies WithSubmodules and also initializes nested submodules.
 	WithSubmodules      bool
 	RecursiveSubmodules bool
+	// ContinueSubmodules keeps the parent checkout ready when a submodule
+	// cannot be updated, instead of failing the Repository.
+	ContinueSubmodules bool
 }
 
 // RepositoryClient creates Repository resources and observes their bootstrap
@@ -76,6 +79,9 @@ func (c *RepositoryClient) Clone(ctx context.Context, request CloneRequest) (*re
 	if request.WithSubmodules || request.RecursiveSubmodules {
 		repository.Spec.Submodules = &repositoriesv1alpha1.RepositorySubmodulesSpec{
 			Recursive: request.RecursiveSubmodules,
+		}
+		if request.ContinueSubmodules {
+			repository.Spec.Submodules.FailurePolicy = repositoriesv1alpha1.RepositorySubmoduleFailurePolicyContinue
 		}
 	}
 

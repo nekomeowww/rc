@@ -288,7 +288,7 @@ Fetch remote changes and reset the parent to its configured ref before creating 
 rcctl -n development repo sync rc
 ```
 
-`sync` uses the Repository Credential and submodule policy. It removes untracked files from the parent and prints the resolved commit. Existing Worktrees keep their commits and local changes. Add `--wait=false` to print the request name immediately. Inspect its result with `kubectl get repositorysync <name> -o yaml`.
+`sync` uses the Repository Credential and submodule policy. It removes untracked files from the parent and prints the resolved commit. A submodule that cannot be updated, for example because its upstream dropped the recorded commit, fails the sync and names the path. Set `spec.submodules.failurePolicy: Continue` (or clone with `--continue-on-submodule-failure`) to keep the parent ready and report the path on the `SubmodulesReady` condition instead. Existing Worktrees keep their commits and local changes. Add `--wait=false` to print the request name immediately. Inspect its result with `kubectl get repositorysync <name> -o yaml`.
 
 Completed sync requests are automatically deleted after 3 days, whether they succeed or fail. Set `spec.ttlSecondsAfterFinished` when creating a `RepositorySync` to change retention.
 

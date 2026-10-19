@@ -228,11 +228,12 @@ var _ = Describe("Repository Controller", func() {
 		args := job.Spec.Template.Spec.Containers[0].Args
 		script := args[1]
 		resetIndex := strings.Index(script, "git -C /repository reset --hard")
-		syncIndex := strings.Index(script, "git -C /repository submodule sync --recursive")
-		updateIndex := strings.Index(script, "git -C /repository submodule update --init --recursive")
+		syncIndex := strings.Index(script, "git -C /repository submodule sync $recursive")
+		updateIndex := strings.Index(script, "git -C /repository submodule update --init $recursive")
 		verifyIndex := strings.Index(script, "git -C /repository rev-parse --verify HEAD")
 
 		Expect(args[5]).To(Equal(repositorySubmoduleModeRecursive))
+		Expect(args[6]).To(Equal(string(repositoriesv1alpha1.RepositorySubmoduleFailurePolicyFail)), "fail on a submodule by default")
 		Expect(resetIndex).To(BeNumerically(">=", 0), "reset the parent checkout")
 		Expect(syncIndex).To(BeNumerically(">", resetIndex), "sync nested submodule URLs after reset")
 		Expect(updateIndex).To(BeNumerically(">", syncIndex), "initialize nested submodules after syncing URLs")

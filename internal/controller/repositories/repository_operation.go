@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
@@ -125,4 +126,59 @@ func setRepositoryStorageReady(
 		}
 		return nil
 	})
+}
+
+// setRepositorySubmodulesReady records the submodule outcome of a checkout of
+// the captured Repository UID and generation. The condition is removed when
+// the Repository has no submodule policy.
+func setRepositorySubmodulesReady(ctx context.Context, c client.Client, repository *repositoriesv1alpha1.Repository, failures []string) error {
+	key := client.ObjectKeyFromObject(repository)
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := new(repositoriesv1alpha1.Repository)
+		if err := c.Get(ctx, key, current); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if current.UID != repository.UID || current.Generation != repository.Generation {
+			return nil
+		}
+		before := current.DeepCopy()
+		switch {
+		case current.Spec.Submodules == nil:
+			meta.RemoveStatusCondition(&current.Status.Conditions, repositoriesv1alpha1.RepositoryConditionSubmodulesReady)
+		case len(failures) == 0:
+			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+				Type:               repositoriesv1alpha1.RepositoryConditionSubmodulesReady,
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: current.Generation,
+				Reason:             "SubmodulesUpdated",
+				Message:            "Every submodule is at its recorded commit",
+			})
+		default:
+			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+				Type:               repositoriesv1alpha1.RepositoryConditionSubmodulesReady,
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: current.Generation,
+				Reason:             "SubmoduleUpdateFailed",
+				Message:            submoduleFailureMessage(failures),
+			})
+		}
+		if slices.Equal(current.Status.Conditions, before.Status.Conditions) {
+			return nil
+		}
+		if err := c.Status().Patch(ctx, current, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+			return fmt.Errorf("patch Repository submodule status: %w", err)
+		}
+		return nil
+	})
+}
+
+func submoduleFailureMessage(failures []string) string {
+	return fmt.Sprintf("%d submodule(s) could not be updated (the recorded commit may no longer exist upstream): %s",
+		len(failures), strings.Join(failures, ", "))
+}
+
+// submoduleCheckoutFailedMessage explains a checkout that failurePolicy Fail
+// stopped, and how to keep the parent usable instead.
+func submoduleCheckoutFailedMessage(failures []string) string {
+	return submoduleFailureMessage(failures) + "; set spec.submodules.failurePolicy to Continue to keep the parent checkout usable"
 }

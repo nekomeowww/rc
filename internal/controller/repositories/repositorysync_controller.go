@@ -4,13 +4,11 @@ import (
 	"context"
 	"fmt"
 	"regexp"
-	"strings"
 	"time"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
 	batchv1 "k8s.io/api/batch/v1"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -183,24 +181,15 @@ var resolvedCommitPattern = regexp.MustCompile(`^(?:[a-f0-9]{40}|[a-f0-9]{64})$`
 
 func (r *RepositorySyncReconciler) complete(ctx context.Context, request *repositoriesv1alpha1.RepositorySync, repository *repositoriesv1alpha1.Repository, job *batchv1.Job) error {
 	status, reason, message, _ := terminalJobOutcome(job)
+	result, found, err := readCheckoutResult(ctx, r.APIReader, job)
+	if err != nil {
+		return err
+	}
+	if status != metav1.ConditionTrue && len(result.submoduleFailures) > 0 {
+		message = submoduleCheckoutFailedMessage(result.submoduleFailures)
+	}
 	if status == metav1.ConditionTrue {
-		pods := new(corev1.PodList)
-		if err := r.APIReader.List(ctx, pods, client.InNamespace(job.Namespace), client.MatchingLabels{batchv1.JobNameLabel: job.Name}); err != nil {
-			return err
-		}
-		for _, pod := range pods.Items {
-			if !metav1.IsControlledBy(&pod, job) {
-				continue
-			}
-			for _, container := range pod.Status.ContainerStatuses {
-				if end := container.State.Terminated; container.Name == repositoryCheckoutContainer && end != nil && end.ExitCode == 0 {
-					commit := strings.TrimSpace(end.Message)
-					if resolvedCommitPattern.MatchString(commit) {
-						request.Status.Commit = commit
-					}
-				}
-			}
-		}
+		request.Status.Commit = result.commit
 		if request.Status.Commit == "" {
 			status = metav1.ConditionFalse
 			reason = "ResultUnavailable"
@@ -220,6 +209,16 @@ func (r *RepositorySyncReconciler) complete(ctx context.Context, request *reposi
 	}
 	if err := r.setParent(ctx, request, repository, status, parentReason, message, completed); err != nil {
 		return err
+	}
+	if found && string(repository.UID) == request.Status.RepositoryUID {
+		captured := repository.DeepCopy()
+		captured.Generation = request.Status.RepositoryGeneration
+		if err := setRepositorySubmodulesReady(ctx, r.Client, captured, result.submoduleFailures); err != nil {
+			return err
+		}
+	}
+	if status == metav1.ConditionTrue && len(result.submoduleFailures) > 0 {
+		message += "; " + submoduleFailureMessage(result.submoduleFailures)
 	}
 	if err := r.setResult(ctx, request, status, reason, message, completed); err != nil {
 		return err

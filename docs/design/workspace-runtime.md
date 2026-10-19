@@ -726,6 +726,10 @@ Repository clone does not initialize submodules by default.
 `--recursive-submodules` initializes nested submodules and implies
 `--with-submodules`. These map to an optional `spec.submodules` object whose
 `recursive` field controls traversal depth.
+A submodule that cannot be updated leaves the Repository not ready by default.
+`--continue-on-submodule-failure` sets `spec.submodules.failurePolicy` to
+`Continue`, which keeps the parent checkout ready and reports each failed path
+on the `SubmodulesReady` condition.
 `repo delete` (also available as `repo remove` and `repo rm`) deletes the
 Repository resource; Kubernetes garbage collection deletes its owned parent
 PVC and bootstrap Jobs.

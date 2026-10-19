@@ -82,11 +82,15 @@ func TestRepositoryClientCloneMapsSubmoduleOptions(t *testing.T) {
 		name                string
 		withSubmodules      bool
 		recursiveSubmodules bool
+		continueSubmodules  bool
 		wantSubmodules      *repositoriesv1alpha1.RepositorySubmodulesSpec
 	}{
 		{name: "Disabled"},
 		{name: "Direct", withSubmodules: true, wantSubmodules: &repositoriesv1alpha1.RepositorySubmodulesSpec{}},
 		{name: "RecursiveImpliesEnabled", recursiveSubmodules: true, wantSubmodules: &repositoriesv1alpha1.RepositorySubmodulesSpec{Recursive: true}},
+		{name: "Continue", withSubmodules: true, continueSubmodules: true, wantSubmodules: &repositoriesv1alpha1.RepositorySubmodulesSpec{
+			FailurePolicy: repositoriesv1alpha1.RepositorySubmoduleFailurePolicyContinue,
+		}},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -106,6 +110,7 @@ func TestRepositoryClientCloneMapsSubmoduleOptions(t *testing.T) {
 				Size:                resource.MustParse("10Gi"),
 				WithSubmodules:      testCase.withSubmodules,
 				RecursiveSubmodules: testCase.recursiveSubmodules,
+				ContinueSubmodules:  testCase.continueSubmodules,
 			})
 
 			require.NoError(t, err)

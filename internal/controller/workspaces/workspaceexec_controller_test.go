@@ -49,6 +49,7 @@ const (
 	testAPINamespace         = "default"
 	testRuntimeImage         = "workspace:test"
 	testWorkspaceReadyReason = "WorkspaceReady"
+	testProcessEnvSecret     = "process-env"
 )
 
 type recordingProcessRuntime struct {
@@ -117,14 +118,15 @@ func TestWorkspaceExecReconcileStartsCommandAtReadyWorkspace(t *testing.T) {
 			TTY:          true,
 			DesiredState: workspacesv1alpha1.WorkspaceExecDesiredStateRunning,
 			AgentType:    agentTypeCodex,
-			EnvSecretRef: &workspacesv1alpha1.LocalReference{Name: "process-env"},
+			EnvSecretRef: &workspacesv1alpha1.LocalReference{Name: testProcessEnvSecret},
 			Env:          []workspacesv1alpha1.ProcessEnvironmentVariable{{Name: "CI", Key: "CI"}},
 		},
 	}
 	processEnvironment := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "process-env", Namespace: testNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testProcessEnvSecret, Namespace: testNamespace},
 		Data:       map[string][]byte{"CI": []byte(testTrueValue)},
 	}
+	requirements.NoError(controllerutil.SetControllerReference(process, processEnvironment, scheme), "own environment Secret")
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).
 		WithStatusSubresource(workspace, pod, process).
 		WithObjects(workspace, pod, process, processEnvironment).
@@ -155,6 +157,8 @@ func TestWorkspaceExecReconcileStartsCommandAtReadyWorkspace(t *testing.T) {
 	assertions.Equal(testWorkspaceName, persisted.Status.RuntimePodName, "publish runtime Pod name")
 	assertions.NotNil(persisted.Status.StartedAt, "record start time")
 	assertions.Equal(".rc/processes/codex-01k2example/transcript.log", persisted.Status.TranscriptPath, "publish transcript index")
+	err = kubeClient.Get(ctx, types.NamespacedName{Name: processEnvironment.Name, Namespace: testNamespace}, new(corev1.Secret))
+	assertions.True(apierrors.IsNotFound(err), "delete caller environment values once rc-kube owns the process")
 	persistedWorkspace := new(workspacesv1alpha1.Workspace)
 	requirements.NoError(kubeClient.Get(ctx, types.NamespacedName{Name: workspace.Name, Namespace: workspace.Namespace}, persistedWorkspace), "get unchanged Workspace")
 	assertions.Equal("workspace-default", persistedWorkspace.Spec.Env[0].Value, "process override does not mutate Workspace defaults")
@@ -287,6 +291,46 @@ func testRCPlatform(t *testing.T) rcplatform.Runtime {
 	platform, err := rcplatform.Resolve(rcplatform.Target{})
 	require.NoError(t, err)
 	return platform
+}
+
+func TestTerminalWorkspaceExecReleasesOnlyItsOwnEnvironmentSecret(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name  string
+		owned bool
+	}{{"Owned", true}, {"External", false}} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			requirements := require.New(t)
+			scheme := runtime.NewScheme()
+			requirements.NoError(corev1.AddToScheme(scheme), "register core API types")
+			requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
+			now := metav1.Now()
+			process := &workspacesv1alpha1.WorkspaceExec{
+				ObjectMeta: metav1.ObjectMeta{Name: "codex-done", Namespace: testNamespace, UID: types.UID("process-uid"), Finalizers: []string{executionFinalizer}},
+				Spec: workspacesv1alpha1.WorkspaceExecSpec{
+					TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: testWorkspaceName},
+					Command:   []string{agentTypeCodex}, EnvSecretRef: &workspacesv1alpha1.LocalReference{Name: testProcessEnvSecret},
+				},
+				Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, CompletedAt: &now},
+			}
+			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testProcessEnvSecret, Namespace: testNamespace}}
+			if test.owned {
+				requirements.NoError(controllerutil.SetControllerReference(process, secret, scheme), "own environment Secret")
+			}
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(process).WithObjects(process, secret).Build()
+			reconciler := &WorkspaceExecReconciler{Client: kubeClient, APIReader: kubeClient, Scheme: scheme, Runtime: &recordingProcessRuntime{}}
+
+			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(process)})
+			requirements.NoError(err, "reconcile terminal process")
+			err = kubeClient.Get(context.Background(), client.ObjectKeyFromObject(secret), new(corev1.Secret))
+			if test.owned {
+				requirements.True(apierrors.IsNotFound(err), "delete the Secret rcctl created for this execution")
+			} else {
+				requirements.NoError(err, "keep a Secret the execution does not control")
+			}
+		})
+	}
 }
 
 func TestRunningWorkspaceExecBecomesLostWhenOriginalPodDisappears(t *testing.T) {

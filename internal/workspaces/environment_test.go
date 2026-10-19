@@ -67,7 +67,7 @@ func TestBuildProcessEnvironmentExcludesHostRuntimeAndFilesystemValues(t *testin
 			"GIT_ASKPASS=/Applications/Editor.app/askpass", "PYTHONSTARTUP=/Users/person/.pythonrc",
 			"NODE_OPTIONS=--require /Users/person/runtime-hook.js",
 			"VSCODE_GIT_IPC_HANDLE=/var/folders/host/vscode.sock", "GEMINI_CLI_IDE_AUTH_TOKEN=local-token",
-			"CODEX_THREAD_ID=local-thread", "ATUIN_SESSION=local-session", "__MISE_DIFF=local-state",
+			"CODEX_THREAD_ID=local-thread", "CLAUDE_CODE_MESSAGING_TOKEN=local-token", "ATUIN_SESSION=local-session", "__MISE_DIFF=local-state",
 			"AWS_PROFILE=development", "HTTP_PROXY=http://proxy.example:8080",
 		},
 	})
@@ -76,7 +76,7 @@ func TestBuildProcessEnvironmentExcludesHostRuntimeAndFilesystemValues(t *testin
 	for _, name := range []string{
 		"TMPDIR", "TMP", "TEMP", "HOMEBREW_PREFIX", "PNPM_HOME", "CUSTOM_CONFIG_FILE",
 		"XDG_DATA_DIRS", "GIT_ASKPASS", "PYTHONSTARTUP", "NODE_OPTIONS", "VSCODE_GIT_IPC_HANDLE",
-		"GEMINI_CLI_IDE_AUTH_TOKEN", "CODEX_THREAD_ID", "ATUIN_SESSION", "__MISE_DIFF",
+		"GEMINI_CLI_IDE_AUTH_TOKEN", "CODEX_THREAD_ID", "CLAUDE_CODE_MESSAGING_TOKEN", "ATUIN_SESSION", "__MISE_DIFF",
 	} {
 		assertions.NotContains(values, name, "exclude host-only environment variable %s", name)
 	}

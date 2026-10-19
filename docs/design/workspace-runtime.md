@@ -574,6 +574,7 @@ TERM_*
 LINES
 COLUMNS
 ATUIN_*
+CLAUDE_CODE_*
 CODEX_*
 GEMINI_CLI_IDE_*
 GHOSTTY_*
@@ -605,8 +606,11 @@ process identity and supervisor control never depend on environment variables
 that a caller can override.
 
 Passed values are stored in a temporary Secret owned by the WorkspaceExec rather
-than inline in the CR. The controller reads that Secret when starting the
-process. Its OwnerReference removes it with the WorkspaceExec record.
+than inline in the CR. The controller reads that Secret only when starting the
+process and deletes it once the execution is Running or terminal; a started
+execution is never started again. A referenced Secret that the WorkspaceExec
+does not control is left in place. The OwnerReference still removes a Secret
+whose execution never started.
 
 ## Kubernetes access from a Workspace
 

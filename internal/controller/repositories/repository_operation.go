@@ -147,13 +147,19 @@ func setRepositorySubmodulesReady(ctx context.Context, c client.Client, reposito
 			meta.RemoveStatusCondition(&current.Status.Conditions, repositoriesv1alpha1.RepositoryConditionSubmodulesReady)
 		case len(failures) == 0:
 			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-				Type: repositoriesv1alpha1.RepositoryConditionSubmodulesReady, Status: metav1.ConditionTrue, ObservedGeneration: current.Generation,
-				Reason: "SubmodulesUpdated", Message: "Every submodule is at its recorded commit",
+				Type:               repositoriesv1alpha1.RepositoryConditionSubmodulesReady,
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: current.Generation,
+				Reason:             "SubmodulesUpdated",
+				Message:            "Every submodule is at its recorded commit",
 			})
 		default:
 			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-				Type: repositoriesv1alpha1.RepositoryConditionSubmodulesReady, Status: metav1.ConditionFalse, ObservedGeneration: current.Generation,
-				Reason: "SubmoduleUpdateFailed", Message: submoduleFailureMessage(failures),
+				Type:               repositoriesv1alpha1.RepositoryConditionSubmodulesReady,
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: current.Generation,
+				Reason:             "SubmoduleUpdateFailed",
+				Message:            submoduleFailureMessage(failures),
 			})
 		}
 		if slices.Equal(current.Status.Conditions, before.Status.Conditions) {

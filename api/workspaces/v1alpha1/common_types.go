@@ -40,6 +40,11 @@ const (
 const (
 	// ReasonVolumeClaimBound means StorageReady=True.
 	ReasonVolumeClaimBound = "VolumeClaimBound"
+	// ReasonWaitForFirstConsumerUnsupported means StorageReady=False because the
+	// PVC's StorageClass, such as local-path, binds a volume only once a Pod
+	// uses it. rc creates the runtime only after its home volume is bound, so
+	// the Workspace needs a StorageClass with Immediate binding.
+	ReasonWaitForFirstConsumerUnsupported = "WaitForFirstConsumerUnsupported"
 	// ReasonVolumeClaimLost means a previously recorded PVC no longer exists. The
 	// controller does not recreate it, because that would silently discard state.
 	ReasonVolumeClaimLost = "VolumeClaimLost"

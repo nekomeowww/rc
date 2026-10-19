@@ -53,7 +53,7 @@ A `Repository` is the synchronized, authoritative mirror of a Git remote. A `Wor
 
 This gives each task an ordinary Git branch and working tree without repeatedly downloading the same remote. Worktrees remain inspectable after a process exits, and a disconnected terminal does not stop the process it started.
 
-Because Worktrees and prepared Workspace Environments use Kubernetes PVC cloning, the selected StorageClass must support volume cloning. The default `local-path` StorageClass in a standard Kind cluster does not provide that capability. For local development on macOS or Linux, rc uses the SIG Storage `csi-driver-host-path` with a single-node Kind cluster. It is a sample/CI driver, not a production storage system, and implements cloning as a full file copy.
+Because Worktrees and prepared Workspace Environments use Kubernetes PVC cloning, the selected StorageClass must support volume cloning. The default `local-path` StorageClass in a standard Kind cluster does not provide that capability. Workspace storage also needs a StorageClass that binds volumes immediately. rc creates the runtime Pod only after its home volume is bound, so a `WaitForFirstConsumer` class such as `local-path` reports `StorageReady=False` with reason `WaitForFirstConsumerUnsupported` instead of starting. For local development on macOS or Linux, rc uses the SIG Storage `csi-driver-host-path` with a single-node Kind cluster. It is a sample/CI driver, not a production storage system, and implements cloning as a full file copy.
 
 ## Platform support
 

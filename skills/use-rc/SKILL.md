@@ -214,6 +214,34 @@ rcctl -n <namespace> rm <completed-execution-id>
 Lost command. `rm` deletes a completed execution record. Deleting the Workspace
 is a separate operation through `workspace delete`.
 
+## Storage and expected durations
+
+Use a StorageClass that binds volumes immediately. Repositories, Worktrees, and
+Environments also need one that supports cloning. Do not use `local-path` or any
+other `WaitForFirstConsumer` class: rc reports `WaitForFirstConsumerUnsupported`
+and does not start the Workspace. Check the binding mode first:
+
+```sh
+kubectl get storageclass -o custom-columns=NAME:.metadata.name,BINDING:.volumeBindingMode
+```
+
+Workspace volumes are network storage, so file-heavy work is slow. This is
+expected; plan for it instead of treating it as a failure. Durations measured on
+a large pnpm monorepo with iSCSI storage:
+
+| Operation | Expect |
+| --- | --- |
+| Each `rcctl exec`, even `true` | 4-6 s of fixed overhead |
+| `pnpm install` | about 10 min |
+| `grep -r` over the checkout | more than 2 min |
+| First dev-server page load | about 80 s; Vite may return `504 Outdated Optimize Dep` until it finishes |
+
+- Start commands that take minutes with `exec -d`, then read `rcctl logs <id>`.
+  Do not hold a foreground exec past your own tool timeout.
+- Put several small commands in one script per exec instead of one exec each.
+- Search with `git grep` and `git ls-files`, not recursive `grep` or `find`.
+- Wrap probes that touch many files in `timeout`.
+
 ## pnpm caches in Linux Workspaces
 
 Keep source on PVC and rebuildable dependencies in local storage. Updated Linux
@@ -231,6 +259,9 @@ rcctl -n <namespace> exec --cwd /workspace/<mount> <workspace> -- pnpm install -
   pnpm 11+ does not read store settings from `.npmrc`.
 - Serialize dependency changes per Worktree. All consuming processes must see
   the same virtual-store path.
+- Next.js Turbopack does not resolve packages from a virtual store outside the
+  project root. For a Turbopack app, set `turbopack.root` to a directory that
+  contains both, or keep that Worktree's virtual store inside the Worktree.
 - Local caches can disappear when the runtime is replaced. Keep credentials out
   of them and never clear dependencies while processes are using them.
 

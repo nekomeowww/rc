@@ -164,6 +164,7 @@ type WorkspaceReconciler struct {
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims;pods;serviceaccounts;configmaps;secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods/exec;pods/log;pods/portforward,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch
+// +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaceexecs/status,verbs=get;list;watch;create;update;patch;delete
@@ -257,6 +258,14 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			} else if failureReason != "" {
 				resolved.setStorage(metav1.ConditionFalse, failureReason, failureMessage)
 				return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, failureReason, failureMessage)
+			}
+			// Report a class that would wait forever instead of Provisioning.
+			if unsupported, err := bindsOnFirstConsumer(ctx, r.APIReader, home); err != nil {
+				return ctrl.Result{}, err
+			} else if unsupported {
+				message := fmt.Sprintf("StorageClass %s binds a volume only when a Pod uses it (WaitForFirstConsumer); recreate the Workspace with a StorageClass that binds immediately", *home.Spec.StorageClassName)
+				resolved.setStorage(metav1.ConditionFalse, workspacesv1alpha1.ReasonWaitForFirstConsumerUnsupported, message)
+				return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, workspacesv1alpha1.ReasonWaitForFirstConsumerUnsupported, message)
 			}
 			resolved.setStorage(metav1.ConditionFalse, "Provisioning", "Workspace home volume is provisioning")
 			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Provisioning", "Workspace home volume is provisioning")

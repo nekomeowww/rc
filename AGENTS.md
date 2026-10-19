@@ -52,6 +52,9 @@ Do not move files around. The CLI expects files in specific locations.
 ### Always Use CLI Commands
 Always use `kubebuilder create api` and `kubebuilder create webhook` to scaffold. Do NOT create files manually.
 
+### One Element per Line in Wrapped Literals
+When a map, slice, or struct literal spans several lines, put each element or field on its own line. Never pack several entries onto wrapped lines. See "Code style" in `CONTRIBUTING.md`.
+
 ### E2E Tests Require an Isolated Kind Cluster
 The e2e tests are designed to validate the solution in an isolated environment (similar to GitHub Actions CI).
 Ensure you run them against a dedicated [Kind](https://kind.sigs.k8s.io/) cluster (not your “real” dev/prod cluster).

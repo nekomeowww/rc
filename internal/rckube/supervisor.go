@@ -62,6 +62,8 @@ type attachClient struct {
 	data     chan []byte
 	done     chan struct{}
 	lossless bool
+	// closeInputOnEOF closes the process input once this client's input ends.
+	closeInputOnEOF bool
 }
 
 // removeClientLocked forgets a client once. The caller holds process.mu.
@@ -420,7 +422,7 @@ func (supervisor *Supervisor) openAttach(id string, clientID string, options pro
 	if _, exists := process.clients[clientID]; exists {
 		return nil, processruntime.State{}, errors.New("attach client ID is already connected")
 	}
-	client := &attachClient{data: make(chan []byte, 128), done: make(chan struct{}), lossless: options.Lossless}
+	client := &attachClient{data: make(chan []byte, 128), done: make(chan struct{}), lossless: options.Lossless, closeInputOnEOF: options.CloseInputOnEOF}
 	process.clients[clientID] = client
 	if process.foregroundClient == "" {
 		process.foregroundClient = clientID
@@ -459,7 +461,12 @@ func (session *attachSession) stream(ctx context.Context, input io.Reader, outpu
 	}
 	if input != nil {
 		go func() {
-			_, _ = io.Copy(foregroundWriter{process: process, clientID: session.clientID, target: session.input}, input)
+			_, err := io.Copy(foregroundWriter{process: process, clientID: session.clientID, target: session.input}, input)
+			// Every byte before the end is written first, so a pipe never loses
+			// its tail. A failed copy is a disconnect, not end of input.
+			if err == nil && client.closeInputOnEOF {
+				_ = process.closeInput()
+			}
 		}()
 	}
 	for {
@@ -488,13 +495,9 @@ func (session *attachSession) stream(ctx context.Context, input io.Reader, outpu
 	}
 }
 
-// CloseInput ends a non-TTY process's standard input, as closing a pipe does.
+// closeInput ends a non-TTY process's standard input, as closing a pipe does.
 // Repeated requests are safe.
-func (supervisor *Supervisor) CloseInput(id string) error {
-	process, err := supervisor.process(id)
-	if err != nil {
-		return err
-	}
+func (process *supervisedProcess) closeInput() error {
 	process.inputMu.Lock()
 	defer process.inputMu.Unlock()
 	process.mu.Lock()

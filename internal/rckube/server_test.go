@@ -237,10 +237,11 @@ func TestAttachClosesInputAtEndOfFile(t *testing.T) {
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
+	input := bytes.Repeat([]byte("0123456789abcdef"), 1<<16)
 	var output bytes.Buffer
-	err = client.Attach(ctx, request.ID, "pipe", bytes.NewBufferString("hello\n"), &output, processruntime.AttachOptions{Lossless: true, CloseInputOnEOF: true})
+	err = client.Attach(ctx, request.ID, "pipe", bytes.NewReader(input), &output, processruntime.AttachOptions{Lossless: true, CloseInputOnEOF: true})
 	require.NoError(t, err, "the process sees end of file and exits")
-	require.Equal(t, "hello\nfinished\n", output.String())
+	require.Equal(t, string(input)+"finished\n", output.String(), "deliver every input byte before closing input")
 }
 
 type slowWriter struct {

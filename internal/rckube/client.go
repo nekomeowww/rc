@@ -95,10 +95,18 @@ func (client *Client) Logs(ctx context.Context, id string, output io.Writer) err
 }
 
 // Attach streams process output to output and forwards input. With
-// CloseInputOnEOF, the end of input closes the process's standard input
-// through a separate request, so the attach connection keeps streaming output.
+// CloseInputOnEOF, input travels as frames and its end closes the process's
+// standard input after every byte before it, while output keeps streaming.
 func (client *Client) Attach(ctx context.Context, id string, clientID string, input io.Reader, output io.Writer, options processruntime.AttachOptions) error {
-	connection, reader, response, err := client.open(ctx, protocolRequest{Action: "attach", ID: id, ClientID: clientID, Rows: options.Rows, Columns: options.Columns, Lossless: options.Lossless})
+	connection, reader, response, err := client.open(ctx, protocolRequest{
+		Action:          "attach",
+		ID:              id,
+		ClientID:        clientID,
+		Rows:            options.Rows,
+		Columns:         options.Columns,
+		Lossless:        options.Lossless,
+		CloseInputOnEOF: options.CloseInputOnEOF,
+	})
 	if err != nil {
 		return err
 	}
@@ -108,9 +116,11 @@ func (client *Client) Attach(ctx context.Context, id string, clientID string, in
 	}
 	if input != nil {
 		go func() {
-			if _, err := io.Copy(connection, input); err == nil && options.CloseInputOnEOF {
-				_ = client.CloseInput(ctx, id)
+			if options.CloseInputOnEOF {
+				_ = writeInputFrames(connection, input)
+				return
 			}
+			_, _ = io.Copy(connection, input)
 		}()
 	}
 	_, err = io.Copy(output, reader)
@@ -123,12 +133,6 @@ func (client *Client) Attach(ctx context.Context, id string, clientID string, in
 		return processruntime.ErrTranscriptTruncated
 	}
 
-	return err
-}
-
-// CloseInput ends a non-TTY process's standard input.
-func (client *Client) CloseInput(ctx context.Context, id string) error {
-	_, err := client.stateRequest(ctx, protocolRequest{Action: "close-input", ID: id})
 	return err
 }
 

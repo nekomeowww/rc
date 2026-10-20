@@ -723,9 +723,13 @@ rcctl cp <src> <workspace>:<path> | rcctl cp <workspace>:<path> <dst>
 ```
 
 Standard input follows a pipe. Without `-i` (`spec.stdin` false) a non-TTY
-command reads end of file at once. With `-i`, the attach bridge forwards input
-and, when it ends, sends `close-input` on a separate connection, which closes
-the command's input while the attach connection keeps streaming output. A
+command reads end of file at once. With `-i`, the attach bridge sends input as
+length-prefixed frames on the attach connection and ends them with a zero-length
+frame. The supervisor writes every byte to the command and then closes its
+input, while the same connection keeps streaming output. Carrying the end
+in-band keeps its order with the data and works on Windows named pipes, which
+support half-close only in message mode. A connection that drops before the end
+frame ends the attach without closing the input. A
 foreground `run` or `exec` attaches losslessly: the supervisor applies
 backpressure to that client instead of disconnecting it, so the command waits
 for a slow reader. Other clients, such as `rcctl attach`, are still dropped

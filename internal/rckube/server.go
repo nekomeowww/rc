@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -112,8 +113,6 @@ func (server *Server) handle(serverContext context.Context, connection net.Conn)
 		}
 		_, err := server.supervisor.PruneHistory(*request.History, time.Now())
 		server.writeState(connection, processruntime.State{}, err)
-	case "close-input":
-		server.writeState(connection, processruntime.State{}, server.supervisor.CloseInput(request.ID))
 	case "list":
 		entries, err := server.supervisor.List()
 		if err != nil {
@@ -137,7 +136,12 @@ func (server *Server) handle(serverContext context.Context, connection net.Conn)
 		}
 		_ = server.supervisor.Logs(request.ID, connection)
 	case "attach":
-		options := processruntime.AttachOptions{Rows: request.Rows, Columns: request.Columns, Lossless: request.Lossless}
+		options := processruntime.AttachOptions{
+			Rows:            request.Rows,
+			Columns:         request.Columns,
+			Lossless:        request.Lossless,
+			CloseInputOnEOF: request.CloseInputOnEOF,
+		}
 		session, state, err := server.supervisor.openAttach(request.ID, request.ClientID, options)
 		if err != nil {
 			server.writeState(connection, state, err)
@@ -150,7 +154,13 @@ func (server *Server) handle(serverContext context.Context, connection net.Conn)
 		}
 		attachContext, cancel := context.WithCancel(serverContext)
 		defer cancel()
-		if err := session.stream(attachContext, &cancelOnEOFReader{reader: reader, cancel: cancel}, connection); errors.Is(err, ErrSlowClient) {
+		// A closed connection ends the attach. With frames, only the end marker
+		// is end of input; the connection closing first still ends the attach.
+		var input io.Reader = &cancelOnEOFReader{reader: reader, cancel: cancel}
+		if request.CloseInputOnEOF {
+			input = &inputFrameReader{reader: input}
+		}
+		if err := session.stream(attachContext, input, connection); errors.Is(err, ErrSlowClient) {
 			_, _ = fmt.Fprintf(connection, "\r\n[rc-kube: %s]\r\n", err)
 		}
 	default:

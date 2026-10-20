@@ -52,7 +52,7 @@ func TestSupervisorRecordsFinishedProcessAcrossRestart(t *testing.T) {
 		WorkingDirectory: t.TempDir(),
 		Environment:      map[string]string{"SECRET_TOKEN": "never-recorded"},
 	}
-	first := NewSupervisor(stateDirectory, 100*time.Millisecond)
+	first := newTestSupervisor(t, stateDirectory, 100*time.Millisecond)
 	_, err := first.Start(t.Context(), request)
 	requirements.NoError(err)
 	waitForExit(t, first, request.ID)
@@ -61,7 +61,7 @@ func TestSupervisorRecordsFinishedProcessAcrossRestart(t *testing.T) {
 	requirements.NoError(err, "write record.json next to the transcript")
 	assertions.NotContains(string(data), "never-recorded", "never record environment values")
 
-	second := NewSupervisor(stateDirectory, 100*time.Millisecond)
+	second := newTestSupervisor(t, stateDirectory, 100*time.Millisecond)
 	requirements.NoError(second.RecoverHistory(time.Now()))
 	state, err := second.Inspect(request.ID)
 	requirements.NoError(err, "report a finished process after a supervisor restart")
@@ -87,12 +87,12 @@ func TestSupervisorRecordsStartFailure(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
 	stateDirectory := t.TempDir()
-	supervisor := NewSupervisor(stateDirectory, 100*time.Millisecond)
+	supervisor := newTestSupervisor(t, stateDirectory, 100*time.Millisecond)
 	request := processruntime.StartRequest{ID: "missing", UID: testProcessUID, Command: []string{"/definitely/missing"}}
 	_, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err)
 
-	entries, err := NewSupervisor(stateDirectory, time.Second).List()
+	entries, err := newTestSupervisor(t, stateDirectory, time.Second).List()
 	requirements.NoError(err)
 	requirements.Len(entries, 1)
 	requirements.Equal(phaseExited, entries[0].Phase)
@@ -107,12 +107,12 @@ func TestRecoverHistoryMarksUnfinishedRecordsLost(t *testing.T) {
 	requirements := require.New(t)
 	stateDirectory := t.TempDir()
 	request := processruntime.StartRequest{ID: "orphaned", UID: testProcessUID, Command: []string{"sleep", "30"}}
-	first := NewSupervisor(stateDirectory, 100*time.Millisecond)
+	first := newTestSupervisor(t, stateDirectory, 100*time.Millisecond)
 	_, err := first.Start(t.Context(), request)
 	requirements.NoError(err)
 	t.Cleanup(func() { _, _ = first.Stop(request.ID) })
 
-	second := NewSupervisor(stateDirectory, 100*time.Millisecond)
+	second := newTestSupervisor(t, stateDirectory, 100*time.Millisecond)
 	recovered := time.Now()
 	requirements.NoError(second.RecoverHistory(recovered))
 	entries, err := second.List()
@@ -131,7 +131,7 @@ func TestListOrdersNewestStartFirstWithLiveState(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
 	stateDirectory := t.TempDir()
-	supervisor := NewSupervisor(stateDirectory, 100*time.Millisecond)
+	supervisor := newTestSupervisor(t, stateDirectory, 100*time.Millisecond)
 	older := processruntime.StartRequest{ID: "older", UID: testProcessUID, Command: []string{testTrueCommand}}
 	_, err := supervisor.Start(t.Context(), older)
 	requirements.NoError(err)
@@ -178,7 +178,7 @@ func TestPruneHistoryAppliesAgeCountAndTranscriptBounds(t *testing.T) {
 	requirements.NoError(os.MkdirAll(filepath.Join(stateDirectory, "legacy"), 0o700))
 	requirements.NoError(os.WriteFile(filepath.Join(stateDirectory, "legacy", "owner.uid"), []byte(testProcessUID), 0o600))
 
-	supervisor := NewSupervisor(stateDirectory, time.Second)
+	supervisor := newTestSupervisor(t, stateDirectory, time.Second)
 	removed, err := supervisor.PruneHistory(processruntime.HistoryPolicy{
 		TTLAfterFinished: 90 * day,
 		MaxEntries:       2,

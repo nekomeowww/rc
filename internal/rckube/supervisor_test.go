@@ -45,7 +45,7 @@ func TestSupervisorRunsCommandOnceAndPersistsTranscript(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	stateDirectory := t.TempDir()
-	supervisor := NewSupervisor(stateDirectory, 100*time.Millisecond)
+	supervisor := newTestSupervisor(t, stateDirectory, 100*time.Millisecond)
 	request := processruntime.StartRequest{
 		ID: "process-01", UID: "uid-01", Command: []string{"sh", "-c", "printf 'supervised output'; exit 7"},
 		WorkingDirectory: t.TempDir(),
@@ -83,7 +83,7 @@ func TestSupervisorRunsCommandOnceAndPersistsTranscript(t *testing.T) {
 func TestSupervisorRejectsProcessIDReusedWithAnotherUID(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
-	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
+	supervisor := newTestSupervisor(t, t.TempDir(), 100*time.Millisecond)
 	request := processruntime.StartRequest{ID: "same-id", UID: "first-uid", Command: []string{"sh", "-c", "exit 0"}}
 	_, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "start original process")
@@ -96,7 +96,7 @@ func TestSupervisorRejectsProcessIDReusedWithAnotherUID(t *testing.T) {
 
 func TestSupervisorRejectsProcessIDThatEscapesStateDirectory(t *testing.T) {
 	t.Parallel()
-	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
+	supervisor := newTestSupervisor(t, t.TempDir(), 100*time.Millisecond)
 	_, err := supervisor.Start(t.Context(), processruntime.StartRequest{ID: "../escape", UID: testProcessUID, Command: []string{testTrueCommand}})
 	require.EqualError(t, err, "process ID must be one safe path segment")
 }
@@ -115,7 +115,7 @@ func TestSupervisorDoesNotConsumeIdentityWhenRequestFailsBeforeLaunch(t *testing
 	runtimeRoot := t.TempDir()
 	blocked := filepath.Join(runtimeRoot, "processes")
 	requirements.NoError(os.WriteFile(blocked, nil, 0o600))
-	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond, WithRoots(t.TempDir(), t.TempDir(), runtimeRoot))
+	supervisor := newTestSupervisor(t, t.TempDir(), 100*time.Millisecond, WithRoots(t.TempDir(), t.TempDir(), runtimeRoot))
 	request := processruntime.StartRequest{ID: "retryable", UID: testProcessUID, Command: []string{testTrueCommand}}
 	_, err := supervisor.Start(t.Context(), request)
 	requirements.Error(err, "report pre-launch failure")
@@ -129,7 +129,7 @@ func TestSupervisorRecordsMissingExecutableAsTerminalCommandFailure(t *testing.T
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	stateDirectory := t.TempDir()
-	supervisor := NewSupervisor(stateDirectory, 100*time.Millisecond)
+	supervisor := newTestSupervisor(t, stateDirectory, 100*time.Millisecond)
 	request := processruntime.StartRequest{
 		ID: "missing-command", UID: testProcessUID, Command: []string{"/definitely/missing/command"},
 	}
@@ -152,7 +152,7 @@ func TestSupervisorRecordsMissingExecutableAsTerminalCommandFailure(t *testing.T
 func TestSupervisorBoundsPersistentTranscript(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
-	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond, WithMaxTranscriptBytes(16))
+	supervisor := newTestSupervisor(t, t.TempDir(), 100*time.Millisecond, WithMaxTranscriptBytes(16))
 	request := processruntime.StartRequest{ID: "bounded", UID: testProcessUID, Command: []string{"sh", "-c", "printf 12345678901234567890"}}
 	_, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "start output producer")
@@ -172,7 +172,7 @@ func TestSupervisorKeepsCredentialsOutOfPersistentState(t *testing.T) {
 	runtimeRoot := t.TempDir()
 	runtimeDirectory := filepath.Join(runtimeRoot, "processes", "credential-scope")
 	credentialsRoot := filepath.Join(runtimeRoot, "credentials")
-	supervisor := NewSupervisor(stateDirectory, 100*time.Millisecond, WithRoots(t.TempDir(), t.TempDir(), runtimeRoot))
+	supervisor := newTestSupervisor(t, stateDirectory, 100*time.Millisecond, WithRoots(t.TempDir(), t.TempDir(), runtimeRoot))
 	request := processruntime.StartRequest{
 		ID: "credential-scope", UID: testProcessUID, Command: []string{"sh", "-c", "cat \"$RC_CREDENTIALS_DIR/github/token\""},
 		Environment:       map[string]string{testCredentialsVariable: credentialsRoot},
@@ -201,7 +201,7 @@ func TestSupervisorProjectsGenericCredentialsWithPrivatePermissions(t *testing.T
 	requirements := require.New(t)
 	runtimeRoot := t.TempDir()
 	credentialsRoot := filepath.Join(runtimeRoot, "credentials")
-	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond, WithRoots(t.TempDir(), t.TempDir(), runtimeRoot))
+	supervisor := newTestSupervisor(t, t.TempDir(), 100*time.Millisecond, WithRoots(t.TempDir(), t.TempDir(), runtimeRoot))
 	request := processruntime.StartRequest{
 		ID: "private-credentials", UID: testProcessUID, Command: []string{"sh", "-c", "sleep 30"},
 		ExposeCredentials: true,
@@ -246,7 +246,7 @@ func TestSupervisorProjectsSSHConfigAndPreservesUserConfiguration(t *testing.T) 
 	sshConfigPath := filepath.Join(sshDirectory, "config")
 	requirements.NoError(os.MkdirAll(sshDirectory, 0o700), "create SSH directory")
 	requirements.NoError(os.WriteFile(sshConfigPath, []byte("Host existing\n  User existing\n"), 0o600), "create user SSH config")
-	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond, WithRoots(home, t.TempDir(), runtimeRoot))
+	supervisor := newTestSupervisor(t, t.TempDir(), 100*time.Millisecond, WithRoots(home, t.TempDir(), runtimeRoot))
 	request := processruntime.StartRequest{
 		ID: "ssh-config", UID: testProcessUID,
 		Command: []string{"sh", "-c", "cat \"$SSH_CONFIG\"; cat \"$SSH_FRAGMENT\"; cat \"$RC_CREDENTIALS_DIR/github/id\""},
@@ -296,7 +296,7 @@ func TestSupervisorProjectsWritableCredentialFileForProcessLifetime(t *testing.T
 	runtimeRoot := t.TempDir()
 	runtimeDirectory := filepath.Join(runtimeRoot, "processes", "credential-consumer")
 	mountPath := filepath.Join(t.TempDir(), ".tool", "credentials.json")
-	supervisor := NewSupervisor(stateDirectory, 100*time.Millisecond, WithRoots(t.TempDir(), t.TempDir(), runtimeRoot))
+	supervisor := newTestSupervisor(t, stateDirectory, 100*time.Millisecond, WithRoots(t.TempDir(), t.TempDir(), runtimeRoot))
 	request := processruntime.StartRequest{
 		ID: "credential-consumer", UID: testProcessUID,
 		Command:          []string{"sh", "-c", "cat \"$CREDENTIAL_FILE\"; printf rotated > \"$CREDENTIAL_FILE\""},
@@ -327,7 +327,7 @@ func TestSupervisorDoesNotReplaceExistingCredentialMountTarget(t *testing.T) {
 	requirements.NoError(os.WriteFile(mountPath, []byte("user-data"), 0o600), "create existing target")
 	runtimeRoot := t.TempDir()
 	runtimeDirectory := filepath.Join(runtimeRoot, "processes", "credential-conflict")
-	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond, WithRoots(t.TempDir(), t.TempDir(), runtimeRoot))
+	supervisor := newTestSupervisor(t, t.TempDir(), 100*time.Millisecond, WithRoots(t.TempDir(), t.TempDir(), runtimeRoot))
 	request := processruntime.StartRequest{
 		ID: "credential-conflict", UID: testProcessUID, Command: []string{testTrueCommand},
 		CredentialFiles:  map[string][]byte{testCredentialDataPath: []byte("credential")},
@@ -351,7 +351,7 @@ func TestSharedCredentialProjectionSurvivesAnotherProcessExit(t *testing.T) {
 	stateDirectory := t.TempDir()
 	runtimeRoot := t.TempDir()
 	credentialsRoot := filepath.Join(runtimeRoot, "credentials")
-	supervisor := NewSupervisor(stateDirectory, 100*time.Millisecond, WithRoots(t.TempDir(), t.TempDir(), runtimeRoot))
+	supervisor := newTestSupervisor(t, stateDirectory, 100*time.Millisecond, WithRoots(t.TempDir(), t.TempDir(), runtimeRoot))
 	t.Cleanup(supervisor.Shutdown)
 	credentialFiles := map[string][]byte{testGitHubCredentialPath: []byte("secret")}
 	first := processruntime.StartRequest{
@@ -386,14 +386,14 @@ func TestSupervisorRestartNeverRerunsPersistedProcessIdentity(t *testing.T) {
 	requirements := require.New(t)
 	stateDirectory := t.TempDir()
 	request := processruntime.StartRequest{ID: "restart-safe", UID: testProcessUID, Command: []string{testTrueCommand}}
-	first := NewSupervisor(stateDirectory, 100*time.Millisecond)
+	first := newTestSupervisor(t, stateDirectory, 100*time.Millisecond)
 	_, err := first.Start(t.Context(), request)
 	requirements.NoError(err, "start original process")
 	requirements.Eventually(func() bool {
 		state, inspectErr := first.Inspect(request.ID)
 		return inspectErr == nil && state.Phase == phaseExited
 	}, 3*time.Second, 10*time.Millisecond, "wait for original process")
-	second := NewSupervisor(stateDirectory, 100*time.Millisecond)
+	second := newTestSupervisor(t, stateDirectory, 100*time.Millisecond)
 	_, err = second.Start(t.Context(), request)
 	requirements.ErrorIs(err, processruntime.ErrNotFound, "persisted UID becomes lost instead of running twice")
 }
@@ -422,7 +422,7 @@ func TestSupervisorDerivesPathsFromLogicalRequest(t *testing.T) {
 	home := t.TempDir()
 	workspace := t.TempDir()
 	runtimeRoot := t.TempDir()
-	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond, WithRoots(home, workspace, runtimeRoot))
+	supervisor := newTestSupervisor(t, t.TempDir(), 100*time.Millisecond, WithRoots(home, workspace, runtimeRoot))
 	t.Cleanup(supervisor.Shutdown)
 	request := processruntime.StartRequest{
 		ID: "logical", UID: testProcessUID,
@@ -472,7 +472,7 @@ func (recordingTerminal) Resize(int, int) error { return nil }
 func TestTerminalAttachStreamsRawPTYBytes(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
-	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
+	supervisor := newTestSupervisor(t, t.TempDir(), 100*time.Millisecond)
 	request := processruntime.StartRequest{
 		ID: "raw-terminal", UID: testProcessUID,
 		Command: []string{"sh", "-c", "sleep 0.1; printf '\\033[31mraw-color\\033[0m'"}, TTY: true,
@@ -487,7 +487,7 @@ func TestTerminalAttachStreamsRawPTYBytes(t *testing.T) {
 func TestTerminalAttachAppliesInitialSizeBeforeForwardingInput(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
-	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
+	supervisor := newTestSupervisor(t, t.TempDir(), 100*time.Millisecond)
 	request := processruntime.StartRequest{
 		ID: "initial-size", UID: testProcessUID,
 		Command: []string{"sh", "-c", "read line; stty size"}, TTY: true,
@@ -503,7 +503,7 @@ func TestTerminalAttachAppliesInitialSizeBeforeForwardingInput(t *testing.T) {
 func TestTerminalProcessDrainsPTYOutputBeforeExit(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
-	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
+	supervisor := newTestSupervisor(t, t.TempDir(), 100*time.Millisecond)
 	request := processruntime.StartRequest{
 		ID: "drain-terminal", UID: testProcessUID,
 		Command: []string{"sh", "-c", "i=0; while [ $i -lt 4096 ]; do printf '0123456789abcdef'; i=$((i+1)); done; printf 'tail-marker'"}, TTY: true,

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -33,8 +34,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
-	processruntime "github.com/nekomeowww/rc/internal/execution"
-	"github.com/nekomeowww/rc/internal/executionretention"
 	"github.com/nekomeowww/rc/internal/workspaceadmission"
 )
 
@@ -50,16 +49,21 @@ type WorkspaceRetentionReconciler struct {
 	// APIReader is required. It bypasses the informer cache for destructive
 	// lifecycle decisions.
 	APIReader client.Reader
-	Runtime   processruntime.Runtime
+	// History prunes each running supervisor's finished process records.
+	History HistoryPruner
 	// Now allows deterministic deadline and restart tests; defaults to time.Now.
 	Now func() time.Time
+
+	retention     *historyRetention
+	retentionOnce sync.Once
 }
 
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces,verbs=get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaceexecs,verbs=get;list;watch
 
-// Reconcile advances command cleanup or the idle -> suspended -> deleted policy.
+// Reconcile advances the idle -> suspended -> deleted policy and history
+// retention on the running supervisor.
 // It reads process state independently of runtime dependencies, and persists
 // clocks in status so controller restarts do not reset the recovery window.
 func (r *WorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, returnedErr error) {
@@ -112,8 +116,9 @@ func (r *WorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctrl.R
 	default:
 		lifecycleResult = ctrl.Result{RequeueAfter: deadlines.requeueAfter(now)}
 	}
-	executionResult, executionErr := r.reconcileExecutions(ctx, workspace)
-	return earlierResult(lifecycleResult, executionResult), executionErr
+	r.retentionOnce.Do(func() { r.retention = newHistoryRetention(r.APIReader, r.History, r.Now) })
+	historyResult := ctrl.Result{RequeueAfter: r.retention.reconcile(ctx, workspace, workspace.Status.RuntimePodName, workspace.Spec.ExecutionRetention)}
+	return earlierResult(lifecycleResult, historyResult), nil
 }
 
 // recordActivity advances the durable clocks and publishes status.lifecycle
@@ -158,18 +163,6 @@ func (r *WorkspaceRetentionReconciler) recordActivity(ctx context.Context, works
 		return deadlines, nil
 	}
 	return deadlines, r.Status().Patch(ctx, workspace, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
-}
-
-func (r *WorkspaceRetentionReconciler) reconcileExecutions(ctx context.Context, workspace *workspacesv1alpha1.Workspace) (ctrl.Result, error) {
-	result, err := (&executionRetentionService{Client: r.Client, APIReader: r.APIReader, Runtime: r.Runtime}).reconcileTarget(ctx, workspace)
-	// Reconcile has already returned for a deleting Workspace, so ok is false
-	// only for a temporary Workspace, which keeps the periodic requeue.
-	if policy, ok := executionretention.PolicyFor(workspace); ok && policy == nil {
-		// Without a policy nothing expires by time: explicitly deleted executions
-		// are discharged through WorkspaceExec and worker Pod events instead.
-		result = ctrl.Result{}
-	}
-	return result, err
 }
 
 func earlierResult(a, b ctrl.Result) ctrl.Result {

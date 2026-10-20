@@ -1,6 +1,5 @@
 // Package audit correlates rc lifecycle intent with live Kubernetes evidence.
-// Every entry point is read-only: Scan backs rcctl doctor and ExecutionHistory
-// backs rcctl prune. Deleting terminal execution history is the controller's job.
+// Every entry point is read-only: Scan backs rcctl doctor.
 package audit
 
 import (

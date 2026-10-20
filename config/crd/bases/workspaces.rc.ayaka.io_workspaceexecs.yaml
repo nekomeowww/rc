@@ -129,11 +129,6 @@ spec:
                 required:
                 - name
                 type: object
-              retain:
-                description: |-
-                  retain exempts this execution and transcript from automatic retention.
-                  Explicit deletion still removes both. Default false.
-                type: boolean
               targetRef:
                 description: targetRef selects the owning runtime.
                 properties:
@@ -299,14 +294,6 @@ spec:
                 type: string
               transcriptPath:
                 description: transcriptPath is relative to the target persistent home.
-                type: string
-              transcriptVolumeClaimName:
-                description: transcriptVolumeClaimName pins the original volume across
-                  Environment commits.
-                type: string
-              transcriptVolumeClaimUID:
-                description: transcriptVolumeClaimUID prevents cleaning a replacement
-                  PVC with the same name.
                 type: string
             type: object
         required:

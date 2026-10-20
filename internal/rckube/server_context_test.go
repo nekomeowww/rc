@@ -14,7 +14,7 @@ func TestServerCancellationClosesIncompleteRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	connection, peer := net.Pipe()
-	server := NewServer(NewSupervisor(t.TempDir(), time.Second))
+	server := NewServer(newTestSupervisor(t, t.TempDir(), time.Second))
 	done := make(chan struct{})
 	go func() { defer close(done); server.handle(ctx, connection) }()
 	t.Cleanup(func() { _ = peer.Close(); _ = connection.Close(); <-done })

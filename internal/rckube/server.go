@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	processruntime "github.com/nekomeowww/rc/internal/execution"
 )
@@ -104,6 +105,13 @@ func (server *Server) handle(serverContext context.Context, connection net.Conn)
 	case "stop":
 		state, err := server.supervisor.Stop(request.ID)
 		server.writeState(connection, state, err)
+	case "prune-history":
+		if request.History == nil {
+			_ = writeProtocolResponse(connection, protocolResponse{Error: "history policy is required", Code: protocolCodeBadRequest})
+			return
+		}
+		_, err := server.supervisor.PruneHistory(*request.History, time.Now())
+		server.writeState(connection, processruntime.State{}, err)
 	case "list":
 		entries, err := server.supervisor.List()
 		if err != nil {
@@ -111,9 +119,6 @@ func (server *Server) handle(serverContext context.Context, connection net.Conn)
 			return
 		}
 		_ = writeProtocolResponse(connection, protocolResponse{Entries: entries})
-	case "prune":
-		err := server.supervisor.PruneTranscript(request.ID, request.UID)
-		server.writeState(connection, processruntime.State{}, err)
 	case "resize":
 		err := server.supervisor.Resize(request.ID, request.ClientID, request.Rows, request.Columns)
 		server.writeState(connection, processruntime.State{}, err)

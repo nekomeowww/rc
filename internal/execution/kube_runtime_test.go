@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -99,14 +100,6 @@ func TestKubeRuntimeUsesWindowsTargetFromAnyHost(t *testing.T) {
 	assert.Equal(t, `\\.\pipe\rc-kube`, executor.command[5])
 }
 
-func TestKubeRuntimePrunesByImmutableUID(t *testing.T) {
-	t.Parallel()
-	executor := &recordingPodExecutor{}
-	runtime := NewKubeRuntime(executor)
-	require.NoError(t, runtime.PruneTranscript(t.Context(), Target{}, testProcessID, "uid"))
-	require.Equal(t, []string{runtimeBridgeCommand, runtimeProcessGroup, "prune", testProcessID, "--uid", "uid", runtimeSocketFlag, DefaultSocketPath}, executor.command)
-}
-
 type historyPodExecutor struct {
 	command []string
 	entries []HistoryEntry
@@ -124,4 +117,18 @@ func TestKubeRuntimeListsHistoryThroughRcKubeBridge(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, executor.entries, entries)
 	require.Equal(t, []string{runtimeBridgeCommand, runtimeProcessGroup, "list", runtimeSocketFlag, DefaultSocketPath}, executor.command)
+}
+
+func TestKubeRuntimePrunesHistoryWithPolicy(t *testing.T) {
+	t.Parallel()
+	executor := &recordingPodExecutor{}
+	policy := HistoryPolicy{TTLAfterFinished: 2160 * time.Hour, MaxEntries: 15000, TranscriptTTL: 336 * time.Hour}
+	require.NoError(t, NewKubeRuntime(executor).PruneHistory(t.Context(), Target{}, policy))
+	require.Equal(t, []string{
+		runtimeBridgeCommand, runtimeProcessGroup, "prune-history",
+		"--ttl-after-finished", "2160h0m0s",
+		"--max-entries", "15000",
+		"--transcript-ttl", "336h0m0s",
+		runtimeSocketFlag, DefaultSocketPath,
+	}, executor.command)
 }

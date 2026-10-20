@@ -1,12 +1,9 @@
 package rcplatform
 
 import (
-	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
-
-	processruntime "github.com/nekomeowww/rc/internal/execution"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -304,30 +301,4 @@ func affinityClone(input *corev1.Affinity) *corev1.Affinity {
 		return nil
 	}
 	return input.DeepCopy()
-}
-
-// TranscriptCleanupPod compiles a narrowly scoped, writable offline helper.
-// It preserves placement and security policy while disabling API credentials.
-func (runtime Runtime) TranscriptCleanupPod(intent TranscriptPodIntent, batch []processruntime.TranscriptIdentity) (*corev1.Pod, error) {
-	if runtime.OS() == Darwin {
-		return nil, fmt.Errorf("darwin transcript cleanup requires a running Workspace")
-	}
-	if len(batch) == 0 {
-		return nil, fmt.Errorf("transcript cleanup batch is empty")
-	}
-	intent.ProcessID = batch[0].ID
-	pod, err := runtime.TranscriptReaderPod(intent)
-	if err != nil {
-		return nil, err
-	}
-	pod.Spec.Containers[0].Name = "cleaner"
-	payload, err := json.Marshal(batch)
-	if err != nil {
-		return nil, err
-	}
-	pod.Spec.Containers[0].Command = []string{runtime.layout.executable, "prune-transcripts"}
-	pod.Spec.Containers[0].Args = []string{string(payload)}
-	pod.Spec.Containers[0].VolumeMounts[0].ReadOnly = false
-	pod.Spec.Volumes[0].PersistentVolumeClaim.ReadOnly = false
-	return pod, nil
 }

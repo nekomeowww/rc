@@ -2,100 +2,118 @@ package workspaces
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	processruntime "github.com/nekomeowww/rc/internal/execution"
+	"github.com/nekomeowww/rc/internal/executionretention"
 )
 
-// A retained Workspace must not implicitly retain opted-in execution history forever.
-func TestRetainedWorkspaceExecHistoryExpires(t *testing.T) {
+func TestTerminalWorkspaceExecExpiresAfterResultWindow(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 	scheme := runtime.NewScheme()
 	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
-	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "retained", Namespace: testNamespace, UID: "retained-uid"}}
-	// Decode the intended policy through the API seam so the pre-fix test compiles.
-	require.NoError(t, json.Unmarshal([]byte(`{"retentionPolicy":"Retain","executionRetention":{"ttlAfterFinished":"24h","maxEntries":200}}`), &workspace.Spec))
-	completed := metav1.NewTime(time.Now().Add(-72 * time.Hour))
+	completed := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
+	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "result-window", Namespace: testNamespace, UID: "result-window-uid"}}
 	process := &workspacesv1alpha1.WorkspaceExec{
-		ObjectMeta: metav1.ObjectMeta{Name: "old-history", Namespace: testNamespace, Finalizers: []string{executionFinalizer}},
-		Spec:       workspacesv1alpha1.WorkspaceExecSpec{TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: workspace.Name}, Command: []string{"true"}},
-		Status:     workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, CompletedAt: &completed},
+		ObjectMeta: metav1.ObjectMeta{Name: "result-window-exec", Namespace: testNamespace, UID: "result-window-exec-uid", Finalizers: []string{executionFinalizer}},
+		Spec: workspacesv1alpha1.WorkspaceExecSpec{
+			TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: workspace.Name},
+			Command:   []string{"true"},
+		},
+		Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, CompletedAt: &metav1.Time{Time: completed}},
 	}
 	require.NoError(t, controllerutil.SetControllerReference(workspace, process, scheme))
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, process).WithObjects(workspace, process).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
-	r := &WorkspaceExecReconciler{Client: kube, APIReader: kube, Scheme: scheme}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(workspace, process).WithObjects(workspace, process).
+		WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
+	now := completed.Add(4 * time.Minute)
+	r := &WorkspaceExecReconciler{Client: kube, APIReader: kube, Scheme: scheme, Now: func() time.Time { return now }}
 	key := client.ObjectKeyFromObject(process)
-	retention := &WorkspaceRetentionReconciler{Client: kube, APIReader: kube}
-	_, err := retention.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
+
+	result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 	require.NoError(t, err)
-	for range 3 {
-		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+	require.Equal(t, 6*time.Minute, result.RequeueAfter, "wait for the rest of the result window")
+	require.NoError(t, kube.Get(ctx, key, process), "keep the record while its caller may read the result")
+
+	now = completed.Add(executionResultWindow)
+	for range 2 {
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		require.NoError(t, err)
 	}
-	persisted := new(workspacesv1alpha1.WorkspaceExec)
-	err = kube.Get(ctx, key, persisted)
-	require.True(t, err != nil || !persisted.DeletionTimestamp.IsZero(), "expired terminal execution must be collected while Workspace remains Retain")
-	require.NoError(t, kube.Get(ctx, client.ObjectKeyFromObject(workspace), new(workspacesv1alpha1.Workspace)))
+	require.True(t, apierrors.IsNotFound(kube.Get(ctx, key, new(workspacesv1alpha1.WorkspaceExec))), "delete the record once the window ends")
+	require.NoError(t, kube.Get(ctx, client.ObjectKeyFromObject(workspace), workspace))
+	require.NotNil(t, workspace.Status.LastExecutionCompletedAt, "the finalizer keeps the idle clock")
 }
 
-func TestTerminalWorkspaceExecRetainsCleanupFinalizer(t *testing.T) {
+type recordingHistoryPruner struct {
+	calls    int
+	policies []processruntime.HistoryPolicy
+}
+
+func (pruner *recordingHistoryPruner) PruneHistory(_ context.Context, _ processruntime.Target, policy processruntime.HistoryPolicy) error {
+	pruner.calls++
+	pruner.policies = append(pruner.policies, policy)
+	return nil
+}
+
+func TestHistoryRetentionPrunesRunningSupervisorHourly(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
-	process := &workspacesv1alpha1.WorkspaceExec{
-		ObjectMeta: metav1.ObjectMeta{Name: "terminal-with-transcript", Namespace: testNamespace, Finalizers: []string{executionFinalizer}},
-		Status:     workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, TranscriptPath: ".rc/processes/terminal-with-transcript/transcript.log"},
+	running := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "runtime", Namespace: testNamespace, UID: "history-runtime-uid"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 	}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(process).WithObjects(process).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
-	r := &WorkspaceExecReconciler{Client: kube, APIReader: kube, Scheme: scheme}
-	_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(process)})
-	require.NoError(t, err)
-	require.NoError(t, kube.Get(ctx, client.ObjectKeyFromObject(process), process))
-	require.Contains(t, process.Finalizers, executionFinalizer, "direct CR deletion must retain a durable transcript cleanup obligation")
-}
+	pending := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: testNamespace},
+		Status:     corev1.PodStatus{Phase: corev1.PodPending},
+	}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(running, pending).Build()
+	now := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
+	pruner := &recordingHistoryPruner{}
+	retention := newHistoryRetention(kube, pruner, func() time.Time { return now })
+	workspace := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "ws", Namespace: testNamespace, UID: "ws-uid"}}
 
-func TestRetentionBoundsOutstandingDeletions(t *testing.T) {
-	t.Parallel()
-	kube, workspace, original := retentionFixture(t)
-	for i := range 30 {
-		process := original.DeepCopy()
-		process.Name = fmt.Sprintf("history-%02d", i)
-		process.UID = types.UID(process.Name)
-		process.ResourceVersion = ""
-		require.NoError(t, kube.Create(t.Context(), process))
+	require.Equal(t, historyPruneInterval, retention.reconcile(t.Context(), workspace, running.Name, nil))
+	require.Equal(t, 1, pruner.calls)
+	require.Equal(t, executionretention.Policy(nil), pruner.policies[0], "retention is on by default")
+
+	now = now.Add(20 * time.Minute)
+	require.Equal(t, 40*time.Minute, retention.reconcile(t.Context(), workspace, running.Name, nil))
+	require.Equal(t, 1, pruner.calls, "prune at most once per interval")
+
+	now = now.Add(time.Hour)
+	maxEntries := int32(10)
+	retention.reconcile(t.Context(), workspace, running.Name, &workspacesv1alpha1.ExecutionRetentionPolicy{MaxEntries: maxEntries})
+	require.Equal(t, 2, pruner.calls)
+	require.Equal(t, 10, pruner.policies[1].MaxEntries, "send the current spec")
+
+	replacement := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "replacement", Namespace: testNamespace, UID: "replacement-uid"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 	}
-	r := &executionRetentionService{Client: kube, APIReader: kube}
-	for range 2 {
-		err := r.reconcileExecutionHistory(t.Context(), workspace.Namespace, executionTargetReference(workspace), workspace.UID, workspace.Spec.ExecutionRetention)
-		require.NoError(t, err)
-	}
-	list := new(workspacesv1alpha1.WorkspaceExecList)
-	require.NoError(t, kube.List(t.Context(), list))
-	deleting := 0
-	for _, process := range list.Items {
-		if !process.DeletionTimestamp.IsZero() {
-			deleting++
-			require.Contains(t, process.Finalizers, executionFinalizer)
-		}
-	}
-	require.Equal(t, executionCleanupBatch, deleting)
+	require.NoError(t, kube.Create(t.Context(), replacement))
+	retention.reconcile(t.Context(), workspace, replacement.Name, nil)
+	require.Equal(t, 3, pruner.calls, "prune a replaced runtime at once")
+
+	stopped := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "stopped", Namespace: testNamespace, UID: "stopped-uid"}}
+	require.Zero(t, retention.reconcile(t.Context(), stopped, "", nil), "a stopped machine has nothing to prune")
+	require.Zero(t, retention.reconcile(t.Context(), stopped, pending.Name, nil))
+	require.Equal(t, 3, pruner.calls)
 }
 
 // Execution history is not the idle clock: removing the last CR must not

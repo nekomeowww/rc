@@ -997,10 +997,6 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 	if status == nil {
 		status = &workspacesv1alpha1.WorkspaceLifecycleStatus{}
 	}
-	history := "-"
-	if h := workspace.Status.ExecutionHistory; h != nil {
-		history = fmt.Sprintf("%d retained, %d pending cleanup", h.Retained, h.PendingCleanup)
-	}
 
 	return []clioutput.Field{
 		{Name: "Name", Value: workspace.Name},
@@ -1026,7 +1022,6 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 		{Name: "Active executions", Value: status.ActiveExecutions},
 		{Name: "Idle suspend at", Value: clioutput.OptionalTimestamp(status.IdleSuspendAt)},
 		{Name: "Delete at", Value: clioutput.OptionalTimestamp(status.DeleteAt)},
-		{Name: "Execution history", Value: history},
 		{Name: "Mounts", Value: workspaceMountSummary(workspace.Spec.Mounts)},
 		{Name: "Agent credentials", Value: workspaceReferenceNames(workspace.Spec.AgentCredentialRefs)},
 		{Name: "Credentials", Value: workspaceReferenceNames(workspace.Spec.CredentialRefs)},

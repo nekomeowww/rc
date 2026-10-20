@@ -6,7 +6,6 @@ import (
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/rcplatform"
-	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -14,16 +13,10 @@ import (
 type TranscriptVolume struct {
 	Claim, Image string
 	Runtime      rcplatform.Runtime
-	// ClaimUID and ClaimDeleting describe the pinned PVC read during
-	// resolution. ClaimUID is empty when no PVC was read, for example for a
-	// legacy execution that only follows its target's current claim.
-	ClaimUID      string
-	ClaimDeleting bool
 }
 
-// ResolveTranscriptVolume shares volume resolution between logs and cleanup.
-// New executions pin the original PVC; legacy executions retain the historical
-// target-based fallback. PVC UID mismatches must never touch replacement data.
+// ResolveTranscriptVolume finds the volume holding a process transcript when
+// its runtime is not running: the target's current home or draft volume.
 func ResolveTranscriptVolume(ctx context.Context, reader client.Reader, process *workspacesv1alpha1.WorkspaceExec) (TranscriptVolume, error) {
 	key := client.ObjectKey{Namespace: process.Namespace, Name: process.Spec.TargetRef.Name}
 	volume := TranscriptVolume{}
@@ -48,17 +41,6 @@ func ResolveTranscriptVolume(ctx context.Context, reader client.Reader, process 
 		target = rcplatform.Target{OS: environment.Spec.OS, Placement: rcplatform.Placement{NodeSelector: environment.Spec.NodeSelector, Tolerations: environment.Spec.Tolerations}}
 	default:
 		return volume, fmt.Errorf("unsupported transcript target kind %s", process.Spec.TargetRef.Kind)
-	}
-	if process.Status.TranscriptVolumeClaimName != "" {
-		volume.Claim = process.Status.TranscriptVolumeClaimName
-		claim := new(corev1.PersistentVolumeClaim)
-		if err := reader.Get(ctx, client.ObjectKey{Namespace: process.Namespace, Name: volume.Claim}, claim); err != nil {
-			return volume, err
-		}
-		if process.Status.TranscriptVolumeClaimUID != "" && string(claim.UID) != process.Status.TranscriptVolumeClaimUID {
-			return volume, fmt.Errorf("original transcript PVC was replaced")
-		}
-		volume.ClaimUID, volume.ClaimDeleting = string(claim.UID), !claim.DeletionTimestamp.IsZero()
 	}
 	platform, err := rcplatform.Resolve(target)
 	volume.Runtime = platform

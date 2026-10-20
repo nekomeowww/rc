@@ -39,7 +39,6 @@ const (
 	WorkspaceConditionReady                                                   = ConditionReady
 	WorkspaceConditionOutdated                                                = ConditionOutdated
 	WorkspaceConditionStorageReady                                            = ConditionStorageReady
-	WorkspaceConditionExecutionHistoryCompliant                               = ConditionExecutionHistoryCompliant
 	// WorkspaceConditionDeletionBlocked is True only while the Workspace is
 	// deleting and its cleanup finalizer waits; the reason names the first blocker.
 	WorkspaceConditionDeletionBlocked = "DeletionBlocked"
@@ -288,11 +287,6 @@ type WorkspaceStatus struct {
 	// lifecycle publishes the automatic suspension and deletion deadlines.
 	// +optional
 	Lifecycle *WorkspaceLifecycleStatus `json:"lifecycle,omitempty"`
-
-	// executionHistory summarizes WorkspaceExec history under
-	// spec.executionRetention. It is empty for temporary Workspaces.
-	// +optional
-	ExecutionHistory *ExecutionHistoryStatus `json:"executionHistory,omitempty"`
 
 	// lastExecutionCompletedAt preserves the idle clock after execution history
 	// is collected. It only moves forward.

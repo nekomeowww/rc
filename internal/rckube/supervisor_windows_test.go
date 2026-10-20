@@ -23,7 +23,7 @@ func TestWindowsJobStopsDescendants(t *testing.T) {
 	executable, err := os.Executable()
 	requirements.NoError(err)
 	marker := filepath.Join(t.TempDir(), "child.pid")
-	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
+	supervisor := newTestSupervisor(t, t.TempDir(), 100*time.Millisecond)
 	t.Cleanup(supervisor.Shutdown)
 	request := processruntime.StartRequest{ID: "tree", UID: "tree-uid", Command: []string{executable, "-test.run=^TestWindowsSubprocess$"}, Environment: map[string]string{"RC_TEST_CHILD": "parent", "RC_TEST_MARKER": marker}}
 	state, err := supervisor.Start(t.Context(), request)
@@ -51,7 +51,7 @@ func TestWindowsConPTYAndNamedPipe(t *testing.T) {
 	directory := t.TempDir()
 	address := `\\.\pipe\rc-test-` + filepath.Base(directory) + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	ctx, cancel := context.WithCancel(context.Background())
-	server := NewServer(NewSupervisor(t.TempDir(), 100*time.Millisecond))
+	server := NewServer(newTestSupervisor(t, t.TempDir(), 100*time.Millisecond))
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(ctx, address) }()
 	t.Cleanup(func() { cancel(); require.NoError(t, <-done) })
@@ -116,7 +116,7 @@ func TestWindowsAgentCredentialLifetime(t *testing.T) {
 	home := t.TempDir()
 	agentHome := filepath.Join(home, ".rc", "agents", "codex", "default")
 	marker := filepath.Join(t.TempDir(), "credential-read")
-	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond, WithRoots(home, t.TempDir(), t.TempDir()))
+	supervisor := newTestSupervisor(t, t.TempDir(), 100*time.Millisecond, WithRoots(home, t.TempDir(), t.TempDir()))
 	t.Cleanup(supervisor.Shutdown)
 	request := processruntime.StartRequest{
 		ID: "credential", UID: "credential-uid", Agent: &processruntime.AgentRef{Type: "codex"},

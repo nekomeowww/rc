@@ -73,10 +73,6 @@ func TestPartialVisibilityIsUnknown(t *testing.T) {
 	for _, finding := range report.Findings {
 		assert.NotEqual(t, "UnreferencedWorktree", finding.Code)
 	}
-	history, err := ExecutionHistory(t.Context(), kube, testNamespace, auditNow)
-	require.NoError(t, err)
-	assert.False(t, history.Complete)
-	assert.Empty(t, history.Targets)
 }
 
 func TestWorktreeSafetyExcludesRecentExecLocksHoldersAndMounts(t *testing.T) {

@@ -94,6 +94,7 @@ func Register(root *cobra.Command, kubeconfigFlags *kubeconfig.Flags) {
 		newAttachCommand(kubeconfigFlags), newListCommand(kubeconfigFlags),
 		newInspectCommand(kubeconfigFlags), newLogsCommand(kubeconfigFlags),
 		newStopCommand(kubeconfigFlags), newRemoveCommand(kubeconfigFlags),
+		newCopyCommand(kubeconfigFlags),
 	}
 	for _, cmd := range commands {
 		cmd.GroupID = command.ExecutionsGroup
@@ -894,6 +895,3 @@ func processClient(kubeconfigFlags *kubeconfig.Flags) (*workspaceservice.Process
 func boolPointer(value bool) *bool {
 	return &value
 }
-
-// processListSelectors pushes supported filters to the API server so default
-// ps transfers running processes instead of the entire retained history.

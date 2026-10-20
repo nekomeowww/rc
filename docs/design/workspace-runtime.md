@@ -719,7 +719,15 @@ rcctl inspect <id> [-o table|json|yaml]
 rcctl logs <id>
 rcctl stop <id>
 rcctl rm <id>
+rcctl cp <src> <workspace>:<path> | rcctl cp <workspace>:<path> <dst>
 ```
+
+`cp` streams a tar archive through `rc-kube copy-from` and `rc-kube copy-to` over
+Pod exec, so it needs no tar in the runner image, bypasses process transcripts,
+and has no size limit. A relative remote path starts at the Workspace directory.
+An existing destination directory receives the source inside it; otherwise the
+copy takes the destination name. Unpacking goes through `os.Root`, so archive
+entries and links cannot write outside the destination's parent.
 
 Repository clone does not initialize submodules by default.
 `--with-submodules` initializes direct submodules;

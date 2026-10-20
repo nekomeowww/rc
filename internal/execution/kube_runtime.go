@@ -136,6 +136,33 @@ func (runtime *KubeRuntime) PruneHistory(ctx context.Context, target Target, pol
 	return err
 }
 
+// CopyFrom streams path in the target runtime to output as a tar stream.
+// A relative path is resolved against the runtime's Workspace directory.
+func (runtime *KubeRuntime) CopyFrom(ctx context.Context, target Target, path string, output io.Writer) error {
+	return runtime.copy(ctx, target, "copy-from", path, nil, output)
+}
+
+// CopyTo unpacks a tar stream from input at path in the target runtime.
+func (runtime *KubeRuntime) CopyTo(ctx context.Context, target Target, path string, input io.Reader) error {
+	return runtime.copy(ctx, target, "copy-to", path, input, io.Discard)
+}
+
+func (runtime *KubeRuntime) copy(ctx context.Context, target Target, action, path string, input io.Reader, output io.Writer) error {
+	executable := target.Executable
+	if executable == "" {
+		executable = runtimeBridgeCommand
+	}
+	stderr := new(bytes.Buffer)
+	if err := runtime.executor.Exec(ctx, target, []string{executable, action, path}, input, output, stderr, false); err != nil {
+		if message := strings.TrimSpace(stderr.String()); message != "" {
+			return fmt.Errorf("%s %s: %w: %s", action, path, err, message)
+		}
+		return fmt.Errorf("%s %s: %w", action, path, err)
+	}
+
+	return nil
+}
+
 // List returns every process the target supervisor has recorded, newest first.
 func (runtime *KubeRuntime) List(ctx context.Context, target Target) ([]HistoryEntry, error) {
 	stdout := new(bytes.Buffer)

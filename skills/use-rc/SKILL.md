@@ -214,6 +214,20 @@ rcctl -n <namespace> rm <completed-execution-id>
 Lost command. `rm` deletes a completed execution record. Deleting the Workspace
 is a separate operation through `workspace delete`.
 
+### Copy files
+
+Use `rcctl cp` to move files, scripts, screenshots, or build output. Do not
+pass file contents through command arguments or `exec` output: arguments are
+limited to about 128 KiB, and `exec` output is not binary safe.
+
+```sh
+rcctl -n <namespace> cp ./script.sh <workspace>:/workspace/<mount>/script.sh
+rcctl -n <namespace> cp <workspace>:/workspace/<mount>/screenshots ./screenshots
+```
+
+The Workspace must be running. A relative remote path starts at `/workspace`,
+which only holds mounts; copy into a mount or the home directory.
+
 ## Storage and expected durations
 
 Use a StorageClass that binds volumes immediately. Repositories, Worktrees, and

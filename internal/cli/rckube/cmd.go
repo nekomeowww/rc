@@ -28,6 +28,7 @@ import (
 	"github.com/spf13/cobra"
 
 	processruntime "github.com/nekomeowww/rc/internal/execution"
+	"github.com/nekomeowww/rc/internal/filecopy"
 	"github.com/nekomeowww/rc/internal/lifecycle"
 	runtime "github.com/nekomeowww/rc/internal/rckube"
 	"github.com/nekomeowww/rc/internal/rcnative"
@@ -41,9 +42,47 @@ func NewCommand() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
-	root.AddCommand(newServeCommand(), newProcessCommand(), newLifecycleCommand(), newHealthCommand(), newTranscriptCommand())
+	root.AddCommand(newServeCommand(), newProcessCommand(), newLifecycleCommand(), newHealthCommand(), newTranscriptCommand(), newCopyFromCommand(), newCopyToCommand())
 
 	return root
+}
+
+// copyPath resolves a relative copy path against the Workspace directory, the
+// default working directory of processes.
+func copyPath(name string) string {
+	if filepath.IsAbs(name) {
+		return name
+	}
+
+	return filepath.Join(rcnative.Current().Workspace, name)
+}
+
+func newCopyFromCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "copy-from PATH",
+		Short: "Write a file or directory to standard output as a tar stream",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(command *cobra.Command, arguments []string) error {
+			return filecopy.Pack(command.OutOrStdout(), copyPath(arguments[0]))
+		},
+	}
+}
+
+func newCopyToCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "copy-to PATH",
+		Short: "Unpack a tar stream from standard input at PATH",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(command *cobra.Command, arguments []string) error {
+			err := filecopy.Unpack(command.InOrStdin(), copyPath(arguments[0]))
+			if err != nil {
+				// Read the rest of the stream so the sender's Pod exec can finish
+				// and report this error instead of blocking on unread input.
+				_, _ = io.Copy(io.Discard, command.InOrStdin())
+			}
+			return err
+		},
+	}
 }
 
 func newLifecycleCommand() *cobra.Command {

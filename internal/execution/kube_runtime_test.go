@@ -132,3 +132,15 @@ func TestKubeRuntimePrunesHistoryWithPolicy(t *testing.T) {
 		runtimeSocketFlag, DefaultSocketPath,
 	}, executor.command)
 }
+
+func TestKubeRuntimeCopiesThroughRcKube(t *testing.T) {
+	t.Parallel()
+	executor := &recordingPodExecutor{}
+	runtime := NewKubeRuntime(executor)
+	target := Target{Executable: "copy-bridge"}
+	require.NoError(t, runtime.CopyTo(t.Context(), target, "artifacts", bytes.NewReader([]byte("tar"))))
+	require.Equal(t, []string{"copy-bridge", "copy-to", "artifacts"}, executor.command)
+	require.Equal(t, []byte("tar"), executor.input, "stream the archive on standard input")
+	require.NoError(t, runtime.CopyFrom(t.Context(), Target{}, "/home/agent/out", io.Discard))
+	require.Equal(t, []string{runtimeBridgeCommand, "copy-from", "/home/agent/out"}, executor.command)
+}

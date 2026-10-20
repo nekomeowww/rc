@@ -190,6 +190,7 @@ The top-level command groups follow the rc resource model:
 | `rcctl workspace` | Create persistent development machines and manage their mounts |
 | `rcctl run` / `rcctl exec` | Run commands in a new / existing Workspace |
 | `rcctl ps` / `attach` / `logs` / `stop` / `inspect` / `rm` | List and manage processes |
+| `rcctl cp` | Copy files and directories to and from a running Workspace |
 
 For read-only diagnostics, see [Doctor](docs/doctor.md).
 

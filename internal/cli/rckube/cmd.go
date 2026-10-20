@@ -74,6 +74,8 @@ func newServeCommand() *cobra.Command {
 	var stopGrace time.Duration
 	var maxTranscriptBytes int64
 	var initializeActions string
+	var historyPolicy processruntime.HistoryPolicy
+	var historyPruneInterval time.Duration
 	command := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the Workspace process supervisor",
@@ -102,6 +104,10 @@ func newServeCommand() *cobra.Command {
 				runtime.WithRoots(native.Home, native.Workspace, native.Run),
 				runtime.WithMaxTranscriptBytes(maxTranscriptBytes),
 			)
+			if err := supervisor.RecoverHistory(time.Now()); err != nil {
+				return fmt.Errorf("recover process history: %w", err)
+			}
+			go pruneHistory(command.Context(), command.ErrOrStderr(), supervisor, historyPolicy, historyPruneInterval)
 			return runtime.NewServer(supervisor).Serve(command.Context(), socketPath)
 		},
 	}
@@ -111,13 +117,37 @@ func newServeCommand() *cobra.Command {
 	command.Flags().StringVar(&initializeActions, "initialize-actions", "", "Lifecycle actions run in the runtime container before readiness")
 	command.Flags().DurationVar(&stopGrace, "stop-grace", 10*time.Second, "Process stop grace period before forced tree termination")
 	command.Flags().Int64Var(&maxTranscriptBytes, "max-transcript-bytes", 64<<20, "Maximum durable bytes retained per process; zero disables")
+	command.Flags().DurationVar(&historyPolicy.TTLAfterFinished, "history-ttl", 0, "Remove a finished process record after this age; zero disables")
+	command.Flags().IntVar(&historyPolicy.MaxEntries, "history-max-entries", 0, "Keep at most this many finished process records; zero disables")
+	command.Flags().DurationVar(&historyPolicy.TranscriptTTL, "history-transcript-ttl", 0, "Remove a finished process transcript after this age; zero disables")
+	command.Flags().DurationVar(&historyPruneInterval, "history-prune-interval", time.Hour, "Interval between history retention passes")
 
 	return command
 }
 
+// pruneHistory applies the history policy at startup and then periodically.
+// A failed pass is reported and retried on the next interval.
+func pruneHistory(ctx context.Context, output io.Writer, supervisor *runtime.Supervisor, policy processruntime.HistoryPolicy, interval time.Duration) {
+	if policy == (processruntime.HistoryPolicy{}) || interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if _, err := supervisor.PruneHistory(policy, time.Now()); err != nil {
+			_, _ = fmt.Fprintf(output, "rc-kube: prune process history: %v\n", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 func newProcessCommand() *cobra.Command {
 	command := &cobra.Command{Use: "process", Short: "Bridge one request to the local supervisor"}
-	command.AddCommand(newStartCommand(), newStateCommand("inspect"), newStateCommand("stop"), newAttachCommand(), newLogsCommand(), newResizeCommand(), newPruneProcessCommand())
+	command.AddCommand(newStartCommand(), newStateCommand("inspect"), newStateCommand("stop"), newListCommand(), newAttachCommand(), newLogsCommand(), newResizeCommand(), newPruneProcessCommand())
 
 	return command
 }
@@ -139,6 +169,26 @@ func newStartCommand() *cobra.Command {
 			}
 
 			return json.NewEncoder(command.OutOrStdout()).Encode(state)
+		},
+	}
+	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
+
+	return command
+}
+
+func newListCommand() *cobra.Command {
+	var socketPath string
+	command := &cobra.Command{
+		Use:   "list",
+		Short: "List recorded processes as JSON, newest first",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			entries, err := runtime.NewClient(socketPath).List(command.Context())
+			if err != nil {
+				return err
+			}
+
+			return json.NewEncoder(command.OutOrStdout()).Encode(entries)
 		},
 	}
 	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")

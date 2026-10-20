@@ -132,6 +132,33 @@ func TestUnixServerReportsMissingLogs(t *testing.T) {
 	}, time.Second, 10*time.Millisecond, "missing transcript is a protocol error")
 }
 
+func TestUnixServerListsRecordedProcesses(t *testing.T) {
+	t.Parallel()
+	requirements := require.New(t)
+	ctx := t.Context()
+	socketFile, err := os.CreateTemp("/tmp", "rc-kube-*.sock")
+	requirements.NoError(err, "reserve short Unix socket path")
+	socketPath := socketFile.Name()
+	requirements.NoError(socketFile.Close(), "close socket path placeholder")
+	requirements.NoError(os.Remove(socketPath), "release socket path placeholder")
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
+	go func() { _ = NewServer(supervisor).Serve(ctx, socketPath) }()
+	client := NewClient(socketPath)
+	requirements.Eventually(func() bool { return client.Ping(context.Background()) == nil }, time.Second, 10*time.Millisecond)
+	request := processruntime.StartRequest{ID: "listed", UID: testProcessUID, Command: []string{testTrueCommand}}
+	_, err = client.Start(ctx, request)
+	requirements.NoError(err)
+	waitForExit(t, supervisor, request.ID)
+
+	entries, err := client.List(ctx)
+	requirements.NoError(err)
+	requirements.Len(entries, 1)
+	requirements.Equal(request.ID, entries[0].ID)
+	requirements.Equal(request.Command, entries[0].Command)
+	requirements.Equal(phaseExited, entries[0].Phase)
+}
+
 func TestClientCancellationInterruptsResponseRead(t *testing.T) {
 	t.Parallel()
 	socketFile, err := os.CreateTemp("/tmp", "rc-context-*.sock")

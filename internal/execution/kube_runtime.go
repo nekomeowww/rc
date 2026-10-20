@@ -123,6 +123,24 @@ func (runtime *KubeRuntime) stateCommand(ctx context.Context, target Target, com
 	return state, nil
 }
 
+// List returns every process the target supervisor has recorded, newest first.
+func (runtime *KubeRuntime) List(ctx context.Context, target Target) ([]HistoryEntry, error) {
+	stdout := new(bytes.Buffer)
+	stderr := new(bytes.Buffer)
+	if err := runtime.executor.Exec(ctx, target, bridgeCommand(target, "list"), nil, stdout, stderr, false); err != nil {
+		if message := strings.TrimSpace(stderr.String()); message != "" {
+			return nil, fmt.Errorf("exec rc-kube bridge: %w: %s", err, message)
+		}
+		return nil, fmt.Errorf("exec rc-kube bridge: %w", err)
+	}
+	entries := []HistoryEntry{}
+	if err := json.NewDecoder(stdout).Decode(&entries); err != nil {
+		return nil, fmt.Errorf("decode rc-kube process history: %w", err)
+	}
+
+	return entries, nil
+}
+
 // PruneTranscript requests UID-checked, idempotent terminal transcript cleanup.
 func (runtime *KubeRuntime) PruneTranscript(ctx context.Context, target Target, id, uid string) error {
 	_, err := runtime.stateCommand(ctx, target, bridgeCommand(target, "prune", id, "--uid", uid), nil)

@@ -104,6 +104,13 @@ func (server *Server) handle(serverContext context.Context, connection net.Conn)
 	case "stop":
 		state, err := server.supervisor.Stop(request.ID)
 		server.writeState(connection, state, err)
+	case "list":
+		entries, err := server.supervisor.List()
+		if err != nil {
+			server.writeState(connection, processruntime.State{}, err)
+			return
+		}
+		_ = writeProtocolResponse(connection, protocolResponse{Entries: entries})
 	case "prune":
 		err := server.supervisor.PruneTranscript(request.ID, request.UID)
 		server.writeState(connection, processruntime.State{}, err)

@@ -50,6 +50,20 @@ func (client *Client) Stop(ctx context.Context, id string) (processruntime.State
 	return client.stateRequest(ctx, protocolRequest{Action: "stop", ID: id})
 }
 
+// List returns every process the supervisor has recorded, newest first.
+func (client *Client) List(ctx context.Context) ([]processruntime.HistoryEntry, error) {
+	connection, _, response, err := client.open(ctx, protocolRequest{Action: "list"})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = connection.Close() }()
+	if err := responseError(response); err != nil {
+		return nil, err
+	}
+
+	return response.Entries, nil
+}
+
 func (client *Client) Resize(ctx context.Context, id string, clientID string, rows uint16, columns uint16) error {
 	_, err := client.stateRequest(ctx, protocolRequest{Action: "resize", ID: id, ClientID: clientID, Rows: rows, Columns: columns})
 	return err

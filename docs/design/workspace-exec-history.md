@@ -2,17 +2,17 @@
 
 Status: implemented (see [Rollout](#rollout)).
 
-This design replaced the earlier CR-based retention (T-667). It keeps the
+This design replaced the earlier CR-based retention. It keeps the
 `spec.executionRetention` field and its 90-day / 15000-entry defaults, but moves
 execution history out of the Kubernetes API.
 
 ## Problem
 
 Each command creates one WorkspaceExec, and terminal records stay until a user
-opts in to retention. On the ihome cluster, 3487 WorkspaceExecs existed while 6
-were running. Every record adds etcd data, list/watch work, and `rcctl` output.
-Opt-in retention does not fix this, because the user wants long history: the
-defaults were raised to 90 days and 15000 entries. Long history and one API
+opts in to retention. A long-lived cluster accumulates thousands of terminal
+records for a handful of running processes. Every record adds etcd data,
+list/watch work, and `rcctl` output. Opt-in retention does not fix this,
+because users want long history: the defaults are 90 days and 15000 entries. Long history and one API
 object per command conflict.
 
 Retention also needed a large protocol. Transcripts live on the home PVC, so a

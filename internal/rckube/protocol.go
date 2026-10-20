@@ -32,8 +32,9 @@ type protocolRequest struct {
 }
 
 type protocolResponse struct {
-	Version int                  `json:"version"`
-	State   processruntime.State `json:"state,omitempty"`
-	Error   string               `json:"error,omitempty"`
-	Code    string               `json:"code,omitempty"`
+	Version int                           `json:"version"`
+	State   processruntime.State          `json:"state,omitempty"`
+	Entries []processruntime.HistoryEntry `json:"entries,omitempty"`
+	Error   string                        `json:"error,omitempty"`
+	Code    string                        `json:"code,omitempty"`
 }

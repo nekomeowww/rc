@@ -49,6 +49,7 @@ const (
 	phaseStarting                = "Starting"
 	phaseRunning                 = "Running"
 	phaseExited                  = "Exited"
+	phaseStopped                 = "Stopped"
 	sshIdentityFilePlaceholder   = "${identityFile}"
 	sshKnownHostsFilePlaceholder = "${knownHostsFile}"
 )
@@ -82,6 +83,12 @@ type supervisedProcess struct {
 	agentCredentialLink string
 	supervisor          *Supervisor
 	processID           string
+	// Recorded in record.json; never environment or credential data.
+	command          []string
+	workingDirectory string
+	tty              bool
+	startedAt        *time.Time
+	completedAt      *time.Time
 }
 
 // Supervisor owns child processes independently of attach connections.
@@ -198,11 +205,19 @@ func (supervisor *Supervisor) Start(ctx context.Context, request processruntime.
 		return processruntime.State{}, fmt.Errorf("record persistent process ownership: %w", err)
 	}
 	attempt := &processStart{
-		supervisor: supervisor, ownerPath: ownerPath,
+		supervisor: supervisor,
+		ownerPath:  ownerPath,
 		process: &supervisedProcess{
-			state: processruntime.State{ID: request.ID, UID: request.UID, Phase: phaseStarting},
-			exit:  make(chan struct{}), clients: make(map[string]chan []byte), clientSizes: make(map[string]terminalSize),
-			transcriptMax: supervisor.maxLog, supervisor: supervisor, processID: request.ID,
+			state:            processruntime.State{ID: request.ID, UID: request.UID, Phase: phaseStarting},
+			exit:             make(chan struct{}),
+			clients:          make(map[string]chan []byte),
+			clientSizes:      make(map[string]terminalSize),
+			transcriptMax:    supervisor.maxLog,
+			supervisor:       supervisor,
+			processID:        request.ID,
+			command:          slices.Clone(request.Command),
+			workingDirectory: request.WorkingDirectory,
+			tty:              request.TTY,
 		},
 	}
 	return attempt.runLocked(ctx, request)
@@ -223,6 +238,9 @@ func (supervisor *Supervisor) recordCommandStartFailureLocked(process *supervise
 	process.state.Phase = phaseExited
 	process.state.ExitCode = &exitCode
 	process.state.Reason = startErr.Error()
+	now := time.Now().UTC()
+	process.startedAt, process.completedAt = &now, &now
+	_ = process.recordLocked()
 	close(process.exit)
 	supervisor.processes[process.processID] = process
 	return cloneState(process.state), nil
@@ -239,9 +257,13 @@ func commandStartFailureExitCode(err error) (int32, bool) {
 	return 0, false
 }
 
-// Inspect returns the latest state retained by this supervisor instance.
+// Inspect returns the latest state retained by this supervisor instance, or a
+// finished state that a previous instance recorded.
 func (supervisor *Supervisor) Inspect(id string) (processruntime.State, error) {
 	process, err := supervisor.process(id)
+	if errors.Is(err, processruntime.ErrNotFound) {
+		return supervisor.inspectRecord(id)
+	}
 	if err != nil {
 		return processruntime.State{}, err
 	}
@@ -470,8 +492,8 @@ func (process *supervisedProcess) wait() {
 	process.mu.Lock()
 	process.state.ExitCode = &exitCode
 	if process.stopRequested {
-		process.state.Phase = "Stopped"
-		process.state.Reason = "Stopped"
+		process.state.Phase = phaseStopped
+		process.state.Reason = phaseStopped
 	} else {
 		process.state.Phase = phaseExited
 		if err != nil {
@@ -483,6 +505,9 @@ func (process *supervisedProcess) wait() {
 		_ = process.transcript.Close()
 		process.transcript = nil
 	}
+	completed := time.Now().UTC()
+	process.completedAt = &completed
+	_ = process.recordLocked()
 	close(process.exit)
 	process.mu.Unlock()
 }

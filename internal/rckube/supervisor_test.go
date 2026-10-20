@@ -87,6 +87,7 @@ func TestSupervisorRejectsProcessIDReusedWithAnotherUID(t *testing.T) {
 	request := processruntime.StartRequest{ID: "same-id", UID: "first-uid", Command: []string{"sh", "-c", "exit 0"}}
 	_, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "start original process")
+	waitForExit(t, supervisor, request.ID)
 
 	request.UID = "different-uid"
 	_, err = supervisor.Start(t.Context(), request)

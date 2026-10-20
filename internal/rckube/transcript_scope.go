@@ -49,6 +49,10 @@ func PrepareTranscriptScope(stateDirectory, scope string) error {
 			if err := root.Remove(filepath.Join(entry.Name(), "transcript.log")); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("remove inherited transcript: %w", err)
 			}
+			// An inherited record describes another target's process.
+			if err := root.Remove(filepath.Join(entry.Name(), recordFileName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("remove inherited process record: %w", err)
+			}
 		}
 	}
 	// Publish only after pruning succeeds. A crash before this rename repeats

@@ -19,6 +19,7 @@ package execution
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // ErrNotFound reports that the original supervisor process no longer exists.
@@ -79,6 +80,25 @@ type State struct {
 	ExitCode        *int32 `json:"exitCode,omitempty"`
 	Reason          string `json:"reason,omitempty"`
 	AttachedClients int32  `json:"attachedClients,omitempty"`
+}
+
+// HistoryEntry is one process the supervisor has recorded, live or finished.
+// It never contains environment values or credential data.
+type HistoryEntry struct {
+	State
+	Command          []string   `json:"command"`
+	WorkingDirectory string     `json:"workingDirectory,omitempty"`
+	TTY              bool       `json:"tty,omitempty"`
+	StartedAt        *time.Time `json:"startedAt,omitempty"`
+	CompletedAt      *time.Time `json:"completedAt,omitempty"`
+}
+
+// HistoryPolicy bounds the finished processes a supervisor keeps. A zero field
+// disables that bound.
+type HistoryPolicy struct {
+	TTLAfterFinished time.Duration
+	MaxEntries       int
+	TranscriptTTL    time.Duration
 }
 
 // Runtime controls processes at the Pod exec system boundary.

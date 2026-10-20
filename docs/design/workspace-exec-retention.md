@@ -1,5 +1,8 @@
 # WorkspaceExec and transcript retention (T-667)
 
+> Superseded in stages by [`workspace-exec-history.md`](workspace-exec-history.md),
+> which keeps execution history in the supervisor instead of WorkspaceExec records.
+
 This design replaces T-663's uncommitted implementation at baseline
 `51d9ce86f84d9a704e4a23fde3546712589d9347`. The worktree and branch were verified
 before editing. Nothing is committed, deployed, or applied to ihome.

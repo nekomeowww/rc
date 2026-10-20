@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/osprocess"
@@ -53,6 +54,9 @@ func (attempt *processStart) launchLocked(ctx context.Context, request processru
 	process.mu.Lock()
 	process.state.Phase = phaseRunning
 	process.state.PID = native.PID()
+	startedAt := time.Now().UTC()
+	process.startedAt = &startedAt
+	_ = process.recordLocked()
 	started := cloneState(process.state)
 	process.mu.Unlock()
 	attempt.supervisor.processes[request.ID] = process

@@ -106,3 +106,22 @@ func TestKubeRuntimePrunesByImmutableUID(t *testing.T) {
 	require.NoError(t, runtime.PruneTranscript(t.Context(), Target{}, testProcessID, "uid"))
 	require.Equal(t, []string{runtimeBridgeCommand, runtimeProcessGroup, "prune", testProcessID, "--uid", "uid", runtimeSocketFlag, DefaultSocketPath}, executor.command)
 }
+
+type historyPodExecutor struct {
+	command []string
+	entries []HistoryEntry
+}
+
+func (executor *historyPodExecutor) Exec(_ context.Context, _ Target, command []string, _ io.Reader, output io.Writer, _ io.Writer, _ bool) error {
+	executor.command = append([]string(nil), command...)
+	return json.NewEncoder(output).Encode(executor.entries)
+}
+
+func TestKubeRuntimeListsHistoryThroughRcKubeBridge(t *testing.T) {
+	t.Parallel()
+	executor := &historyPodExecutor{entries: []HistoryEntry{{State: State{ID: testProcessID, Phase: "Exited"}, Command: []string{"pnpm", "test"}}}}
+	entries, err := NewKubeRuntime(executor).List(t.Context(), Target{})
+	require.NoError(t, err)
+	require.Equal(t, executor.entries, entries)
+	require.Equal(t, []string{runtimeBridgeCommand, runtimeProcessGroup, "list", runtimeSocketFlag, DefaultSocketPath}, executor.command)
+}

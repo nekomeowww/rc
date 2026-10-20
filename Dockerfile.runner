@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Build rcctl and rc-kube for Workspace runtime Pods and Repository/Worktree Jobs.
-FROM --platform=$BUILDPLATFORM golang:1.27.1 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.3 AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -19,12 +19,12 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
 FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS tool-downloader
 
 ARG TARGETARCH
-ARG MISE_VERSION=2026.9.7
-ARG MISE_SHA256_AMD64=011e71834ef919c775f8d8ba7a985295a39a3ffe322b5f87a61cc0293eb6567f
-ARG MISE_SHA256_ARM64=3c43ee044bb7d8bdaea800e1796a0b5d983276384f81d477c059a2b910042e16
-ARG PROTO_VERSION=0.62.2
-ARG PROTO_SHA256_AMD64=d240e8c502ae8fdd72aad67348e4481211fa84c7cbb1a6c667993bd02b140c0b
-ARG PROTO_SHA256_ARM64=f4b5b38c1ad47de155e93c4c728fb09ae39f44b650bf04bd825887cbfc638545
+ARG MISE_VERSION=2026.10.15
+ARG MISE_SHA256_AMD64=4cf6fcd45b730e0c48c59b9a056ed6701be14abf44f999d69aa70afd1004fc32
+ARG MISE_SHA256_ARM64=d14b44dffea91562ff0611e4ae33472088224da5778a4d071d60e87d463942ff
+ARG PROTO_VERSION=0.63.1
+ARG PROTO_SHA256_AMD64=f4712f107ab31403ca3454e3cefcc96433f8970dbedc3cb310624ca537a64ea0
+ARG PROTO_SHA256_ARM64=8809a83ebd818aeb34d9144a55c1726dd959212bc745ed9c6c0f9367a153893b
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
@@ -63,10 +63,10 @@ RUN set -eux; \
     install -Dm755 /tmp/proto/proto /out/proto; \
     install -Dm755 /tmp/proto/proto-shim /out/proto-shim
 
-FROM node:26.8.2-bookworm-slim AS runner
+FROM node:26.12.0-bookworm-slim AS runner
 
 ARG COREPACK_VERSION=0.36.0
-ARG LOBEHUB_CLI_VERSION=0.0.54
+ARG LOBEHUB_CLI_VERSION=0.0.66
 
 LABEL org.opencontainers.image.source="https://github.com/nekomeowww/rc" \
     org.opencontainers.image.title="rc runner"

@@ -36,14 +36,14 @@ binaries and run Go tests without building container images.
 
 The release inputs are:
 
-- Node 26 Windows x64. CI uses `26.8.2` from the [official distribution](https://nodejs.org/dist/v26.8.2/).
+- Node 26 Windows x64. CI uses `26.12.0` from the [official distribution](https://nodejs.org/dist/v26.12.0/).
 - Portable Git for Windows; the experiment used the node's `2.51.0.windows.2` installation.
-- Python `3.14.7` x64 from the [official Python distribution](https://www.python.org/ftp/python/3.14.7/).
-- CMake `4.4.3` x64 from the [official Kitware release](https://github.com/Kitware/CMake/releases/tag/v4.4.3).
+- Python `3.14.8` x64 from the [official Python distribution](https://www.python.org/ftp/python/3.14.8/).
+- CMake `4.4.4` x64 from the [official Kitware release](https://github.com/Kitware/CMake/releases/tag/v4.4.4).
 - The [Visual Studio 2022 Build Tools bootstrapper](https://aka.ms/vs/17/release/vs_buildtools.exe), installing `Microsoft.VisualStudio.Workload.VCTools`, the x64/x86 MSVC tools, and Windows SDK 10.0.26100.
 - The [Visual C++ x64 redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe).
 - Arial, Arial Bold, Segoe UI, Segoe UI Bold, Tahoma, Tahoma Bold, and Microsoft Sans Serif from the Windows host's Fonts directory.
-- A dedicated npm prefix containing `@openai/codex@0.154.0`, `pnpm@12.4.1`, and `bun@1.4.2`.
+- A dedicated npm prefix containing `@openai/codex@0.163.0`, `pnpm@12.14.0`, and `bun@1.4.3`.
 
 The caller selects the Node distribution, matching the Linux runner's Node 26
 base-image family. The staging script runs `node.exe --version` to verify that
@@ -53,9 +53,9 @@ patch release. The versions and hashes below match the CI staging defaults.
 The fixed build assets have these SHA-256 hashes:
 
 ```text
-cf02f5d0c06c794b84f277177d5cf3743d0924ca49f6641cd435dd7cb6ee9085  node-v26.8.2-win-x64.zip
-9d9eb2709ef81bf5cd30db3c2096bdbc4ea10087c22e62f27d356b36f6ae9649  python-3.14.7-amd64.exe
-f3b27c83979727b73540db53dbe610967656b4631746a94b17a1dd0329dd7868  cmake-4.4.3-windows-x86_64.msi
+50efaf01a08c520b4bbe499c09a8c5a5c370002c419c0d9da2c6815d3066a453  node-v26.12.0-win-x64.zip
+759be887b96e736a3ca886daf8d575f18fcae1a09efab6902f42d59e8999f8ef  python-3.14.8-amd64.exe
+f7aac962e8eea82c0a1c603bb11ee3514806a43a35147d5b1e9d69926ffd7d7e  cmake-4.4.4-windows-x86_64.msi
 ```
 
 The staging script verifies these three fixed-version assets before copying
@@ -70,7 +70,7 @@ Package Cache after setup, and Build Tools uses `--nocache`.
 Install the npm tools with the pinned Node on PATH, into a new dedicated prefix:
 
 ```powershell
-npm.cmd install --prefix C:\rc-image-tools @openai/codex@0.154.0 pnpm@12.4.1 bun@1.4.2
+npm.cmd install --prefix C:\rc-image-tools @openai/codex@0.163.0 pnpm@12.14.0 bun@1.4.3
 ```
 
 Then stage the inputs (replace paths with the extracted installation paths):
@@ -78,11 +78,11 @@ Then stage the inputs (replace paths with the extracted installation paths):
 ```powershell
 .\prepare-assets.ps1 `
   -RCBinaryDirectory C:\src\rc\bin\windows-amd64 `
-  -NodeDirectory C:\downloads\node-v26.8.2-win-x64 `
+  -NodeDirectory C:\downloads\node-v26.12.0-win-x64 `
   -GitDirectory C:\tools\git `
   -OpenaiDirectory C:\rc-image-tools `
-  -PythonInstaller C:\downloads\python-3.14.7-amd64.exe `
-  -CMakeInstaller C:\downloads\cmake-4.4.3-windows-x86_64.msi `
+  -PythonInstaller C:\downloads\python-3.14.8-amd64.exe `
+  -CMakeInstaller C:\downloads\cmake-4.4.4-windows-x86_64.msi `
   -VSBuildToolsBootstrapper C:\downloads\vs_buildtools.exe `
   -VCRuntimeInstaller C:\downloads\vc_redist.x64.exe
 ```

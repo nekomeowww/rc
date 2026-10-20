@@ -5,10 +5,10 @@ are an observed source PVC, the Repository, and optional Worktree overrides. It
 returns independently owned storage class, size, access modes and volume mode,
 or a structured error. It performs no Kubernetes I/O and knows no driver names.
 
-## Evidence and root cause (T-658 history)
+## Evidence and root cause
 
-T-658 reproduced both reported ihome failures locally against the original
-controller before changing production code:
+Both reported clone failures were reproduced locally against the original
+controller before the policy changed:
 
 ```sh
 go test ./internal/controller/repositories -run TestWorktreeCloneStorageRegression -count=2 -v
@@ -167,41 +167,10 @@ do not leak into results. A namespace-scoped envtest manager verifies actual
 index registration and that the single PVC watch wakes a Pending child when it
 binds, without a manual Reconcile call.
 
-No ihome resource is changed by these tests. A real CSI provisioning test remains
-separate from these deterministic creation-policy tests.
+A real CSI provisioning test remains separate from these deterministic
+creation-policy tests.
 
-Historical validation before the T-670 simplification:
-
-- `make manifests generate` succeeded.
-- `make lint-fix` passed with 0 issues.
-- `make test` passed; `internal/worktreestorage` has 100% statement coverage.
-- `go test -tags=integration ./internal/controller/repositories` passed against
-  local envtest Kubernetes 1.36.2 with `USE_EXISTING_CLUSTER=false`.
-
-The local proto Go shim sometimes prints an agent-mode notice on stdout, which
-breaks Go version/JSON parsing in tooling. Validation used the installed Go
-1.26.1 binary directory first in the command-local PATH to avoid that wrapper;
-no persistent tool configuration or repository build rules were changed.
-
-Historical T-658 recovery review verification (2026-10-07):
-
-- Uncached focused tests passed twice after the recovery changes:
-  `go test ./internal/controller/repositories ./internal/worktreestorage ./internal/repositories -run 'Test(WorktreeClone|WorktreeClaimMatches|CloneSourceName|WorktreeClientWaitReturnsStorageFailure|PlanClone)' -count=2`.
-- `make lint-fix` passed with 0 issues and `make test` passed; the storage
-  planning/recovery package retained 100% statement coverage.
-- `go test -tags=integration ./internal/controller/repositories -count=1` passed
-  against the isolated local envtest API server (`USE_EXISTING_CLUSTER=false`).
-- No ihome operations, commits, merges, or changes to other worktrees were made.
-
-## T-670 simplification (2026-10-07)
-
-The starting checkout was verified before edits: worktree
-`/Users/neko/Git/github.com/nekomeowww/rc-task-worktrees/t658`, branch
-`codex/t658-worktree-storage-plan`, HEAD/base
-`51d9ce86f84d9a704e4a23fde3546712589d9347`, with the T-658 implementation
-uncommitted. T-670 changes only watch routing, test responsibilities, and this
-record; it adds no exported Go API, CRD field, or dependency. Clone planning and
-the reconciliation/recovery state machine remain unchanged.
+## Watch routing
 
 PVC events now use one handler. A Worktree controller ownerRef produces a direct
 request with no List; a Repository controller ownerRef supplies the key for
@@ -244,22 +213,3 @@ Before the watch fix, `TestWorktreeClaimWatch` failed because every event called
 List with `RepositoryList`. The test now enforces the indexed Worktree selector
 at the client boundary, so a namespace scan cannot pass merely by returning the
 correct eventual requests.
-
-T-670 validation:
-
-- Before edits, the existing focused tests passed with `-count=1`; the new watch
-  regression then failed on the namespace-wide Repository scan.
-- After edits, `go test ./internal/controller/repositories ./internal/worktreestorage ./internal/repositories -run 'Test(Worktree|CloneSourceName|PlanClone)' -count=1 -json`
-  passed. The storage controller has 7 passing leaf cases, the watch mapper 6,
-  `PlanClone` 33, and `CloneSourceName` 14.
-- `make lint-fix` passed with 0 issues.
-- `make test` passed; `internal/worktreestorage` remains at 100% statement coverage.
-- `USE_EXISTING_CLUSTER=false KUBECONFIG=/dev/null KUBEBUILDER_ASSETS="$PWD/bin/k8s/1.36.2-darwin-arm64" go test -tags=integration ./internal/controller/repositories -count=1`
-  passed against local Kubernetes 1.36.2 envtest, including the real manager
-  watch/index case. No real CSI driver or external cluster was used.
-- `plan_test.go` and `source_test.go` are byte-for-byte unchanged from the starting
-  uncommitted implementation. All commands used the installed Go 1.26.1 binary
-  directory first in their command-local PATH.
-- Logs and pre-edit snapshots are under the ignored `bin/t670-review/` directory
-  in this worktree. No commits, merges, deployments, ihome operations, or changes
-  to the historical T-658 task were made.

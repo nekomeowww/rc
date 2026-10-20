@@ -12,8 +12,7 @@ and UID indefinitely. The execution controller also checked target readiness
 before resolving the original binding for Starting/Pending executions, and
 `originalProcessTarget` checked identity without checking terminal phase.
 
-T-671 replaces the broader T-659 recovery design. The planner now handles only
-terminal Pods. Existing Pending, initialization, readiness, topology replacement,
+The recovery planner handles only terminal Pods. Existing Pending, initialization, readiness, topology replacement,
 idle suspension, and retention behavior remain in their existing controllers.
 Recovery runs before dependency resolution so that missing Worktrees or
 Environments cannot hide a terminal runtime or block its cleanup.

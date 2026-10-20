@@ -56,7 +56,7 @@ For a node tainted like macOS-vz-kubelet's default:
 rcctl -n rc-dev workspace create xcode \
   --os darwin \
   --image registry.example.test/team/macos-xcode:26.3 \
-  --node-selector kubernetes.io/hostname=neko-macos-1 \
+  --node-selector kubernetes.io/hostname=<macos-node> \
   --toleration virtual-kubelet.io/provider=macos-vz:NoSchedule
 
 rcctl -n rc-dev exec xcode -- xcodebuild -version

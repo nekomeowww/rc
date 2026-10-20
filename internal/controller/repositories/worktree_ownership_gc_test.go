@@ -112,7 +112,7 @@ func ownershipGCKube(t *testing.T) client.Client {
 	require.NotEmpty(t, filename, "set RC_OWNERSHIP_KUBECONFIG to the isolated Kind kubeconfig")
 	raw, err := clientcmd.LoadFromFile(filename)
 	require.NoError(t, err)
-	require.Equal(t, "kind-rc-t661-ownership", raw.CurrentContext, "never run against an existing development cluster")
+	require.Equal(t, "kind-rc-ownership-gc", raw.CurrentContext, "never run against an existing development cluster")
 	config, err := clientcmd.RESTConfigFromKubeConfig(mustReadOwnershipConfig(t, filename))
 	require.NoError(t, err)
 	scheme := runtime.NewScheme()

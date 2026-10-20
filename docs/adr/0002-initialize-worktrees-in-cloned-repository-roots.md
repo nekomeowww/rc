@@ -11,7 +11,7 @@ independent Git repository and a complete working tree. Creating a native
 linked worktree inside that clone writes a second complete working tree to the
 same network volume.
 
-In an AIRI repository measurement, the linked checkout took about 37 seconds.
+In a measurement on one large repository, the linked checkout took about 37 seconds.
 Checking out the same commit in the cloned root took about 9 seconds. Both
 operations started from an isolated child PVC.
 

@@ -4,7 +4,7 @@ status: accepted
 
 # ADR 0007: Minimal Workspace lifetime model
 
-T-669 replaces T-662. Unnamed command runs are temporary; named runs and
+Unnamed command runs are temporary; named runs and
 `workspace create` retain their state. Kubernetes API creation still defaults
 to `Retain`. Suspended storage deletion requires an explicit positive timeout.
 

@@ -199,20 +199,20 @@ a failed topology checkpoint, and GC racing the deletion Lease or finalizer patc
 The real-API harness retries resourceVersion conflicts as the controller queue
 would; it retains all consumer, storage-protection, and convergence assertions.
 
-Real GC test (no storage driver, CSI cloning, runtime workload, or ihome access):
+Real GC test (no storage driver, CSI cloning, or runtime workload):
 
 ```sh
-kind create cluster --name rc-t661-ownership --image kindest/node:v1.36.1 \
-  --kubeconfig "$PWD/.task-evidence/kubeconfig"
-kubectl --kubeconfig "$PWD/.task-evidence/kubeconfig" apply -f config/crd/bases
-RC_OWNERSHIP_KUBECONFIG="$PWD/.task-evidence/kubeconfig" \
+kind create cluster --name rc-ownership-gc --image kindest/node:v1.36.1 \
+  --kubeconfig "$PWD/bin/ownership-gc/kubeconfig"
+kubectl --kubeconfig "$PWD/bin/ownership-gc/kubeconfig" apply -f config/crd/bases
+RC_OWNERSHIP_KUBECONFIG="$PWD/bin/ownership-gc/kubeconfig" \
   go test -tags=ownershipgc ./internal/controller/repositories \
   -run 'TestWorkspaceOwnershipWithRealGC|TestLivePVCDeletionWithRealAPI' -count=2 -v
-kind delete cluster --name rc-t661-ownership
+kind delete cluster --name rc-ownership-gc
 ```
 
-The real-GC test refuses any kubeconfig whose selected context is not the isolated
-T-661 Kind context. Ordinary tests cover identity, detach/adopt conflicts,
+The real-GC test refuses any kubeconfig whose selected context is not that
+isolated Kind context. Ordinary tests cover identity, detach/adopt conflicts,
 creation rollback, active writers, runtime cleanup, and legacy resources.
 
 ## Update: one hold set replaces the writer Lease

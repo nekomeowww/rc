@@ -27,11 +27,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	workspaceservice "github.com/nekomeowww/rc/internal/workspaces"
 )
@@ -168,34 +168,25 @@ func TestExecRejectsMissingCommandBeforeConnecting(t *testing.T) {
 
 func TestProcessListItemsFiltersAndSortsOldestFirst(t *testing.T) {
 	t.Parallel()
-	oldest := metav1.NewTime(time.Date(2026, time.September, 1, 1, 0, 0, 0, time.UTC))
-	newest := metav1.NewTime(oldest.Add(2 * time.Minute))
-	processes := []workspacesv1alpha1.WorkspaceExec{
-		{
-			ObjectMeta: metav1.ObjectMeta{Name: "codex-new", Namespace: testDevelopmentName, CreationTimestamp: newest},
-			Spec: workspacesv1alpha1.WorkspaceExecSpec{
-				TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Name: "other"}, AgentType: testAgentCommand,
-			},
-		},
-		{
-			ObjectMeta: metav1.ObjectMeta{Name: "process-old", Namespace: testDevelopmentName, CreationTimestamp: oldest},
-			Spec: workspacesv1alpha1.WorkspaceExecSpec{
-				TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Name: testDevelopmentName}, AgentType: testAgentCommand,
-			},
-		},
-		{
-			ObjectMeta: metav1.ObjectMeta{Name: "process-filtered", Namespace: testDevelopmentName, CreationTimestamp: oldest},
-			Spec: workspacesv1alpha1.WorkspaceExecSpec{
-				TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Name: testDevelopmentName}, AgentType: "shell",
-			},
-		},
+	processes := []workspaceservice.InventoryProcess{
+		inventoryProcess("codex-new", "Running", nil, "codex"),
+		inventoryProcess("process-old", "Running", nil, "codex"),
+		inventoryProcess("process-filtered", "Running", nil, "shell"),
 	}
 
 	items := processListItems(processes, listOptions{agent: testAgentCommand, all: true})
 
 	require.Len(t, items, 2, "retain only the selected agent type")
-	assert.Equal(t, "process-old", items[0].Name, "put the oldest process first despite its name prefix")
-	assert.Equal(t, "codex-new", items[1].Name, "put the newest process last")
+	assert.Equal(t, "codex-new", items[0].ID, "keep the inventory order")
+	assert.Equal(t, "process-old", items[1].ID)
+}
+
+func inventoryProcess(id, phase string, exitCode *int32, agent string) workspaceservice.InventoryProcess {
+	return workspaceservice.InventoryProcess{
+		Target:       workspaceservice.InventoryTarget{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: testDevelopmentName},
+		HistoryEntry: processruntime.HistoryEntry{State: processruntime.State{ID: id, Phase: phase, ExitCode: exitCode}},
+		Agent:        agent,
+	}
 }
 
 func TestProcessListAndGetCommandsExposeOutputFormats(t *testing.T) {
@@ -254,29 +245,31 @@ func TestSelectAgentCredentialsUsesExplicitCredentialForOrdinaryCommand(t *testi
 	assert.Equal(t, string(configsv1alpha1.AgentTypeCodex), selectedType, "derive process configuration from the credential")
 }
 
-func TestProcessListFiltersPhaseAndWorkspace(t *testing.T) {
+func TestProcessListFiltersPhase(t *testing.T) {
 	t.Parallel()
-	processes := []workspacesv1alpha1.WorkspaceExec{
-		{ObjectMeta: metav1.ObjectMeta{Name: "running"}, Spec: workspacesv1alpha1.WorkspaceExecSpec{TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: testDevelopmentName}}, Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseRunning}},
-		{ObjectMeta: metav1.ObjectMeta{Name: "completed"}, Spec: workspacesv1alpha1.WorkspaceExecSpec{TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: testDevelopmentName}}, Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded}},
-		{ObjectMeta: metav1.ObjectMeta{Name: "environment"}, Spec: workspacesv1alpha1.WorkspaceExecSpec{TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment, Name: testDevelopmentName}}, Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseRunning}},
-		{ObjectMeta: metav1.ObjectMeta{Name: "pending"}, Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhasePending}},
+	zero := int32(0)
+	processes := []workspaceservice.InventoryProcess{
+		inventoryProcess("running", "Running", nil, ""),
+		inventoryProcess("completed", "Exited", &zero, ""),
+		inventoryProcess("stopped", "Stopped", nil, ""),
 	}
 	cases := map[string]struct {
 		options listOptions
-		want    []workspacesv1alpha1.WorkspaceExec
+		want    []string
 	}{
-		"RunningAcrossTargets": {listOptions{}, []workspacesv1alpha1.WorkspaceExec{processes[2], processes[0]}},
-		"All":                  {listOptions{all: true}, []workspacesv1alpha1.WorkspaceExec{processes[1], processes[2], processes[3], processes[0]}},
-		"Workspace":            {listOptions{workspace: testDevelopmentName}, []workspacesv1alpha1.WorkspaceExec{processes[0]}},
-		"WorkspaceAll":         {listOptions{workspace: testDevelopmentName, all: true}, []workspacesv1alpha1.WorkspaceExec{processes[1], processes[0]}},
-		"ExplicitPhase":        {listOptions{phase: "succeeded"}, []workspacesv1alpha1.WorkspaceExec{processes[1]}},
-		"IDPrefix":             {listOptions{all: true, idPrefix: "pend"}, []workspacesv1alpha1.WorkspaceExec{processes[3]}},
+		"RunningByDefault": {listOptions{}, []string{"running"}},
+		"All":              {listOptions{all: true}, []string{"running", "completed", "stopped"}},
+		"ExplicitPhase":    {listOptions{phase: "succeeded"}, []string{"completed"}},
+		"IDPrefix":         {listOptions{all: true, idPrefix: "sto"}, []string{"stopped"}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.want, processListItems(processes, tc.options))
+			ids := []string{}
+			for _, process := range processListItems(processes, tc.options) {
+				ids = append(ids, process.ID)
+			}
+			assert.Equal(t, tc.want, ids)
 		})
 	}
 }
@@ -290,13 +283,6 @@ func TestExecutionCommandsRejectRemovedCredentialAlias(t *testing.T) {
 		assert.Contains(t, err.Error(), "unknown flag")
 		require.NotNil(t, cmd.Flag("credential"))
 	}
-}
-
-func TestProcessListSelectorsBoundDefaultPSHistoryTransfer(t *testing.T) {
-	t.Parallel()
-	require.Equal(t, client.MatchingFields{"status.phase": "Running"}, processListSelectors(listOptions{}))
-	require.Empty(t, processListSelectors(listOptions{all: true}))
-	require.Equal(t, client.MatchingFields{"spec.targetRef.name": "coding", "status.phase": "Failed"}, processListSelectors(listOptions{workspace: "coding", phase: "failed"}))
 }
 
 func TestRunRejectsConflictingRetentionBeforeConnecting(t *testing.T) {

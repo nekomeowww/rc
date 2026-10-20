@@ -714,7 +714,7 @@ rcctl workspace port-forward <name> <local-port>[:<remote-port>]
 rcctl run [options] [--rm | --retain] [--name <name>] [-it] [-d] -- <command> [args...]
 rcctl exec [options] [-it] [-d] <workspace> -- <command> [args...]
 rcctl attach <id>
-rcctl ps [-a] [--workspace <name>] [--all-namespaces] [-o table|wide|json|yaml]
+rcctl ps [-a] [--workspace <name>] [--all-namespaces] [-o table|wide|json|yaml]  # aggregates each running supervisor
 rcctl inspect <id> [-o table|json|yaml]
 rcctl logs <id>
 rcctl stop <id>

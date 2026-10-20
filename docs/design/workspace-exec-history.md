@@ -45,17 +45,11 @@ for a result window of 10 minutes so `rcctl run` and `rcctl exec` can read the
 exit code. The controller then deletes it. The number of WorkspaceExecs follows
 the number of concurrent processes.
 
-**Workspace status counts processes.**
-
-```yaml
-status:
-  processes:
-    active: 3          # nonterminal WorkspaceExecs for this target
-    started: 1284      # monotonic count of admitted starts
-  lastExecutionCompletedAt: ...   # existing idle and temporary-Workspace clock
-```
-
-WorkspaceEnvironment publishes the same `processes` summary.
+**Workspace status counts active processes.** The existing
+`status.lifecycle.activeExecutions` already counts nonterminal WorkspaceExecs,
+and `status.lastExecutionCompletedAt` remains the idle and temporary-Workspace
+clock. No new counter is added: a monotonic start count would write Workspace
+status on every start, the same write that already conflicts with admission.
 
 **The supervisor keeps history.** rc-kube writes `record.json` next to each
 transcript under the state directory:
@@ -83,10 +77,23 @@ terminal record after a supervisor restart, so a process that exited before the
 controller observed it reports its real exit code instead of Lost.
 
 A `list` protocol action returns every record, newest first, with live state
-for processes the current supervisor owns. `rcctl ps -a`, `inspect`, and `logs`
-read finished processes from the supervisor. When the runtime is stopped, they
-use the existing offline reader on the original PVC. Callers already need
+for processes the current supervisor owns.
+
+**`ps` asks every machine.** A Workspace is one machine and rc-kube is its
+process table, so `rcctl ps` reads no WorkspaceExec. It lists the Workspaces
+and WorkspaceEnvironments, asks the supervisor of each running runtime Pod for
+its records in parallel, and merges them oldest start first. `--workspace`
+asks one machine. A stopped machine lists nothing, and a command whose start
+has not reached the supervisor is not a process yet; `rcctl inspect ID` shows
+it. A running target that cannot be read becomes a warning on standard error,
+not a failure. `inspect` and `logs` read the WorkspaceExec while it exists and
+otherwise find the process in this inventory. Callers already need
 `pods/exec` for `attach` and live `logs`, so permissions do not change.
+
+rc-kube ships in each target's runner image. Until a target runs an image with
+history, its supervisor answers `list` with an unknown command or action, and
+`ps` falls back to that target's WorkspaceExecs with a warning to update the
+image. The fallback is removed once those images are gone.
 
 **The supervisor applies retention.** `spec.executionRetention` now configures
 the supervisor and is enabled by default:
@@ -124,9 +131,10 @@ Each stage is deployable alone.
    policy, so this stage does not change behavior. The protocol version stays
    at 4: a new client sends `list` to an old supervisor and receives
    `unknown action`.
-2. **Read history from the supervisor.** `ps -a`, `inspect`, and `logs` read
-   finished processes from rc-kube. Workspace and WorkspaceEnvironment publish
-   `status.processes`.
+2. **Read history from the supervisor.** `ps` aggregates every running
+   supervisor and reads no WorkspaceExec, except the transitional fallback for
+   old runner images. `inspect` and `logs` fall back to the inventory when no
+   WorkspaceExec matches.
 3. **Delete terminal records.** The controller passes `executionRetention` to
    rc-kube, deletes terminal WorkspaceExecs after the result window, and removes
    the CR-based retention machinery. Before deleting an existing terminal

@@ -92,6 +92,19 @@ func (options Options) PrintDetails(
 	return writeDetails(writer, fields)
 }
 
+// PrintValueDetails renders a non-Kubernetes result as a detailed view or in a
+// structured format. The fields must derive from value.
+func (options Options) PrintValueDetails(writer io.Writer, value any, fields []Field) error {
+	if err := options.Validate(false); err != nil {
+		return err
+	}
+	if options.isStructured() {
+		return options.writeValue(writer, value)
+	}
+
+	return writeDetails(writer, fields)
+}
+
 func (options Options) isStructured() bool {
 	return options.Format == FormatJSON || options.Format == FormatYAML
 }

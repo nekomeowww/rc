@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"testing"
 
@@ -124,4 +125,25 @@ func TestKubeRuntimeListsHistoryThroughRcKubeBridge(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, executor.entries, entries)
 	require.Equal(t, []string{runtimeBridgeCommand, runtimeProcessGroup, "list", runtimeSocketFlag, DefaultSocketPath}, executor.command)
+}
+
+type failingPodExecutor struct{ stderr string }
+
+func (executor failingPodExecutor) Exec(_ context.Context, _ Target, _ []string, _ io.Reader, _ io.Writer, stderr io.Writer, _ bool) error {
+	_, _ = io.WriteString(stderr, executor.stderr)
+	return errors.New("command terminated with exit code 1")
+}
+
+func TestKubeRuntimeReportsSupervisorWithoutHistory(t *testing.T) {
+	t.Parallel()
+	for _, stderr := range []string{
+		`Error: unknown command "list" for "rc-kube process"`,
+		"Error: unknown action",
+	} {
+		_, err := NewKubeRuntime(failingPodExecutor{stderr: stderr}).List(t.Context(), Target{})
+		require.ErrorIs(t, err, ErrHistoryUnsupported, stderr)
+	}
+	_, err := NewKubeRuntime(failingPodExecutor{stderr: "container not found"}).List(t.Context(), Target{})
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrHistoryUnsupported)
 }

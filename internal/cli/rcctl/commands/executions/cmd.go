@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -561,6 +560,18 @@ func newLogsCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 				return err
 			}
 			process, err := processClient.Resolve(cmd.Context(), namespace, args[0])
+			if errors.Is(err, workspaceservice.ErrProcessRecordNotFound) {
+				inventory := processInventory(processClient)
+				found, findErr := inventory.Find(cmd.Context(), namespace, args[0])
+				if findErr != nil {
+					return findErr
+				}
+				target, targetErr := inventory.RuntimeTarget(cmd.Context(), found.Target)
+				if targetErr != nil {
+					return targetErr
+				}
+				return processClient.Runtime.Logs(cmd.Context(), target, found.ID, cmd.OutOrStdout())
+			}
 			if err != nil {
 				return err
 			}
@@ -624,22 +635,27 @@ func newListCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			list := new(workspacesv1alpha1.WorkspaceExecList)
-			listOptions := []client.ListOption{processListSelectors(*options)}
-			if !options.allNamespaces {
-				listOptions = append(listOptions, client.InNamespace(namespace))
+			if options.allNamespaces {
+				namespace = ""
 			}
-			if err := clusterClient.Kube.List(cmd.Context(), list, listOptions...); err != nil {
+			inventory := &workspaceservice.ProcessInventory{Kube: clusterClient.Kube, History: clusterClient.Processes}
+			processes, warnings, err := inventory.List(cmd.Context(), workspaceservice.InventoryRequest{Namespace: namespace, Workspace: options.workspace})
+			if err != nil {
 				return err
 			}
-			list.Items = processListItems(list.Items, *options)
-			return options.output.PrintList(
-				cmd.OutOrStdout(), list, clusterClient.Kube.Scheme(),
-				processListTable(list.Items, options.allNamespaces, time.Now()),
+			for _, warning := range warnings {
+				if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "warning: %v\n", warning); err != nil {
+					return err
+				}
+			}
+			processes = processListItems(processes, *options)
+			return options.output.PrintValue(
+				cmd.OutOrStdout(), processList{Items: processes},
+				processListTable(processes, options.allNamespaces, time.Now()),
 			)
 		},
 	}
-	cmd.Flags().BoolVarP(&options.all, "all", "a", false, "Include pending and completed processes")
+	cmd.Flags().BoolVarP(&options.all, "all", "a", false, "Include finished processes")
 	cmd.Flags().StringVar(&options.workspace, "workspace", "", "Filter by target Workspace")
 	cmd.Flags().StringVar(&options.phase, "phase", "", "Filter by process phase")
 	cmd.Flags().StringVar(&options.agent, "agent", "", "Filter by recognized agent type")
@@ -663,6 +679,13 @@ func newInspectCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 				return err
 			}
 			process, err := processClient.Resolve(cmd.Context(), namespace, args[0])
+			if errors.Is(err, workspaceservice.ErrProcessRecordNotFound) {
+				found, findErr := processInventory(processClient).Find(cmd.Context(), namespace, args[0])
+				if findErr != nil {
+					return findErr
+				}
+				return options.PrintValueDetails(cmd.OutOrStdout(), found, historyDetailFields(found))
+			}
 			if err != nil {
 				return err
 			}
@@ -674,40 +697,36 @@ func newInspectCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	return cmd
 }
 
-func processListItems(processes []workspacesv1alpha1.WorkspaceExec, options listOptions) []workspacesv1alpha1.WorkspaceExec {
-	items := make([]workspacesv1alpha1.WorkspaceExec, 0, len(processes))
+const fieldTTY = "TTY"
+
+// processList is the structured ps output: what each supervisor reports.
+type processList struct {
+	Items []workspaceservice.InventoryProcess `json:"items"`
+}
+
+func processListItems(processes []workspaceservice.InventoryProcess, options listOptions) []workspaceservice.InventoryProcess {
+	items := make([]workspaceservice.InventoryProcess, 0, len(processes))
 	for _, process := range processes {
-		if !options.all && options.phase == "" && process.Status.Phase != workspacesv1alpha1.WorkspaceExecPhaseRunning {
+		phase := process.DisplayPhase()
+		if !options.all && options.phase == "" && phase != string(workspacesv1alpha1.WorkspaceExecPhaseRunning) {
 			continue
 		}
-		if options.workspace != "" && (process.Spec.TargetRef.Kind != workspacesv1alpha1.WorkspaceExecTargetWorkspace || process.Spec.TargetRef.Name != options.workspace) {
+		if options.phase != "" && !strings.EqualFold(phase, options.phase) {
 			continue
 		}
-		if options.phase != "" && !strings.EqualFold(string(process.Status.Phase), options.phase) {
+		if options.agent != "" && process.Agent != options.agent {
 			continue
 		}
-		if options.agent != "" && process.Spec.AgentType != options.agent {
-			continue
-		}
-		if options.idPrefix != "" && !strings.HasPrefix(process.Name, options.idPrefix) {
+		if options.idPrefix != "" && !strings.HasPrefix(process.ID, options.idPrefix) {
 			continue
 		}
 		items = append(items, process)
 	}
-	slices.SortStableFunc(items, func(left, right workspacesv1alpha1.WorkspaceExec) int {
-		if compared := left.CreationTimestamp.Compare(right.CreationTimestamp.Time); compared != 0 {
-			return compared
-		}
-		if compared := strings.Compare(left.Namespace, right.Namespace); compared != 0 {
-			return compared
-		}
-		return strings.Compare(left.Name, right.Name)
-	})
 
 	return items
 }
 
-func processListTable(processes []workspacesv1alpha1.WorkspaceExec, includeNamespace bool, now time.Time) clioutput.Table {
+func processListTable(processes []workspaceservice.InventoryProcess, includeNamespace bool, now time.Time) clioutput.Table {
 	columns := make([]clioutput.Column, 0, 10)
 	if includeNamespace {
 		columns = append(columns, clioutput.Column{Name: "NAMESPACE", MaxWidth: 24})
@@ -716,7 +735,7 @@ func processListTable(processes []workspacesv1alpha1.WorkspaceExec, includeNames
 		clioutput.Column{Name: "ID", MaxWidth: 32},
 		clioutput.Column{Name: "WORKSPACE", MaxWidth: 24},
 		clioutput.Column{Name: "COMMAND", MinWidth: 12, MaxWidth: 48, Flexible: true},
-		clioutput.Column{Name: "TTY", Wide: true},
+		clioutput.Column{Name: fieldTTY, Wide: true},
 		clioutput.Column{Name: "AGENT", MaxWidth: 16, Wide: true},
 		clioutput.Column{Name: "STATUS"},
 		clioutput.Column{Name: "CLIENTS", Wide: true},
@@ -726,27 +745,68 @@ func processListTable(processes []workspacesv1alpha1.WorkspaceExec, includeNames
 	rows := make([][]any, 0, len(processes))
 	for _, process := range processes {
 		exit := "-"
-		if process.Status.ExitCode != nil {
-			exit = fmt.Sprint(*process.Status.ExitCode)
+		if process.ExitCode != nil {
+			exit = fmt.Sprint(*process.ExitCode)
 		}
 		age := "<unknown>"
-		if !process.CreationTimestamp.IsZero() {
-			age = duration.HumanDuration(now.Sub(process.CreationTimestamp.Time))
+		if process.StartedAt != nil {
+			age = duration.HumanDuration(now.Sub(*process.StartedAt))
 		}
 		row := make([]any, 0, len(columns))
 		if includeNamespace {
-			row = append(row, process.Namespace)
+			row = append(row, process.Target.Namespace)
 		}
-		target := process.Spec.TargetRef.Name
-		if process.Spec.TargetRef.Kind == workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment {
+		target := process.Target.Name
+		if process.Target.Kind == workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment {
 			target = "env/" + target
 		}
-		row = append(row, process.Name, target, strings.Join(process.Spec.Command, " "), process.Spec.TTY,
-			clioutput.ValueOrDash(process.Spec.AgentType), clioutput.ValueOrDash(string(process.Status.Phase)), process.Status.AttachedClients, age, exit)
+		row = append(row,
+			process.ID,
+			target,
+			strings.Join(process.Command, " "),
+			process.TTY,
+			clioutput.ValueOrDash(process.Agent),
+			clioutput.ValueOrDash(process.DisplayPhase()),
+			process.AttachedClients,
+			age,
+			exit,
+		)
 		rows = append(rows, row)
 	}
 
 	return clioutput.Table{Columns: columns, Rows: rows}
+}
+
+func processInventory(processes *workspaceservice.ProcessClient) *workspaceservice.ProcessInventory {
+	return &workspaceservice.ProcessInventory{Kube: processes.Kube, History: processes.Runtime}
+}
+
+// historyDetailFields describes a process known only from its supervisor.
+func historyDetailFields(process workspaceservice.InventoryProcess) []clioutput.Field {
+	completed := "-"
+	if process.CompletedAt != nil {
+		completed = process.CompletedAt.UTC().Format(time.RFC3339)
+	}
+	started := "-"
+	if process.StartedAt != nil {
+		started = process.StartedAt.UTC().Format(time.RFC3339)
+	}
+
+	return []clioutput.Field{
+		{Name: "Name", Value: process.ID},
+		{Name: "Namespace", Value: process.Target.Namespace},
+		{Name: "Target", Value: fmt.Sprintf("%s/%s", process.Target.Kind, process.Target.Name)},
+		{Name: "Command", Value: quotedArguments(process.Command)},
+		{Name: "Working directory", Value: clioutput.ValueOrDash(process.WorkingDirectory)},
+		{Name: fieldTTY, Value: process.TTY},
+		{Name: "Agent", Value: clioutput.ValueOrDash(process.Agent)},
+		{Name: "Phase", Value: clioutput.ValueOrDash(process.DisplayPhase())},
+		{Name: "Started", Value: started},
+		{Name: "Completed", Value: completed},
+		{Name: "Exit code", Value: exitCodeOrDash(process.ExitCode)},
+		{Name: "Termination reason", Value: clioutput.ValueOrDash(process.Reason)},
+		{Name: "Record", Value: "supervisor history (no WorkspaceExec)"},
+	}
 }
 
 func processDetailFields(process *workspacesv1alpha1.WorkspaceExec) []clioutput.Field {
@@ -757,7 +817,7 @@ func processDetailFields(process *workspacesv1alpha1.WorkspaceExec) []clioutput.
 		{Name: "Target", Value: fmt.Sprintf("%s/%s", process.Spec.TargetRef.Kind, process.Spec.TargetRef.Name)},
 		{Name: "Command", Value: quotedArguments(process.Spec.Command)},
 		{Name: "Working directory", Value: clioutput.ValueOrDash(process.Spec.WorkingDirectory)},
-		{Name: "TTY", Value: process.Spec.TTY},
+		{Name: fieldTTY, Value: process.Spec.TTY},
 		{Name: "Desired state", Value: clioutput.ValueOrDash(string(process.Spec.DesiredState))},
 		{Name: "Agent", Value: clioutput.ValueOrDash(process.Spec.AgentType)},
 		{Name: "Agent credential", Value: localReferenceName(process.Spec.AgentCredentialRef)},
@@ -837,20 +897,3 @@ func boolPointer(value bool) *bool {
 
 // processListSelectors pushes supported filters to the API server so default
 // ps transfers running processes instead of the entire retained history.
-func processListSelectors(options listOptions) client.MatchingFields {
-	fields := client.MatchingFields{}
-	if options.workspace != "" {
-		fields["spec.targetRef.name"] = options.workspace
-	}
-	phase := options.phase
-	if !options.all && phase == "" {
-		phase = string(workspacesv1alpha1.WorkspaceExecPhaseRunning)
-	}
-	for _, known := range []workspacesv1alpha1.WorkspaceExecPhase{"Pending", "Starting", "Running", "Succeeded", "Failed", "Stopped", "Lost"} {
-		if strings.EqualFold(phase, string(known)) {
-			fields["status.phase"] = string(known)
-			break
-		}
-	}
-	return fields
-}

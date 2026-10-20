@@ -51,6 +51,7 @@ type ProcessStartRequest struct {
 	Command          []string
 	WorkingDirectory string
 	TTY              bool
+	Stdin            bool
 	AgentType        string
 	AgentCredential  string
 	Credentials      []string
@@ -137,7 +138,7 @@ func (processes *ProcessClient) Start(ctx context.Context, request ProcessStartR
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: request.Namespace},
 		Spec: workspacesv1alpha1.WorkspaceExecSpec{
 			TargetRef: request.Target, Command: append([]string(nil), request.Command...),
-			WorkingDirectory: request.WorkingDirectory, TTY: request.TTY,
+			WorkingDirectory: request.WorkingDirectory, TTY: request.TTY, Stdin: request.Stdin,
 			DesiredState: workspacesv1alpha1.WorkspaceExecDesiredStateRunning,
 			AgentType:    request.AgentType, Env: variables,
 		},
@@ -280,7 +281,20 @@ func (processes *ProcessClient) Resolve(ctx context.Context, namespace string, i
 	return matches[0], nil
 }
 
-func (processes *ProcessClient) Attach(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec, input io.Reader, output io.Writer) error {
+// AttachStreams connects a caller to a process. ErrorOutput receives errors of
+// the connection itself, never process output.
+type AttachStreams struct {
+	Input       io.Reader
+	Output      io.Writer
+	ErrorOutput io.Writer
+	// Lossless makes the process wait for this caller instead of dropping it,
+	// for callers that consume the output, such as a pipe.
+	Lossless bool
+	// CloseInputOnEOF closes the process's input when Input ends.
+	CloseInputOnEOF bool
+}
+
+func (processes *ProcessClient) Attach(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec, streams AttachStreams) error {
 	if process.Status.RuntimePodName == "" {
 		return fmt.Errorf("process %s has no runtime Pod", process.Name)
 	}
@@ -297,13 +311,18 @@ func (processes *ProcessClient) Attach(ctx context.Context, process *workspacesv
 	}
 	target := platform.ProcessTarget(process.Namespace, pod.Name, "rc-kube")
 	clientID := GenerateSortableName("terminal")
-	rows, columns, cleanup, err := processes.prepareLocalTerminal(ctx, target, process, clientID, input)
+	rows, columns, cleanup, err := processes.prepareLocalTerminal(ctx, target, process, clientID, streams.Input)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	return processes.Runtime.Attach(ctx, target, process.Name, clientID, input, output, process.Spec.TTY, rows, columns)
+	return processes.Runtime.Attach(ctx, target, process.Name, clientID, streams.Input, streams.Output, streams.ErrorOutput, processruntime.AttachOptions{
+		Rows:            rows,
+		Columns:         columns,
+		Lossless:        streams.Lossless && !process.Spec.TTY,
+		CloseInputOnEOF: streams.CloseInputOnEOF && !process.Spec.TTY,
+	})
 }
 
 func (processes *ProcessClient) prepareLocalTerminal(ctx context.Context, target processruntime.Target, process *workspacesv1alpha1.WorkspaceExec, clientID string, input io.Reader) (uint16, uint16, func(), error) {
@@ -364,7 +383,10 @@ func (processes *ProcessClient) Stop(ctx context.Context, process *workspacesv1a
 	return nil
 }
 
-func (processes *ProcessClient) Logs(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec, output io.Writer) error {
+// Logs streams a process transcript. A running original runtime serves it and
+// its result is final: falling back after a partial read would repeat output.
+// The offline reader serves only a runtime that is gone.
+func (processes *ProcessClient) Logs(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec, output, errorOutput io.Writer) error {
 	if process.Status.RuntimePodName != "" {
 		pod := new(corev1.Pod)
 		key := types.NamespacedName{Name: process.Status.RuntimePodName, Namespace: process.Namespace}
@@ -374,9 +396,7 @@ func (processes *ProcessClient) Logs(ctx context.Context, process *workspacesv1a
 				return fmt.Errorf("resolve log runtime platform: %w", platformErr)
 			}
 			target := platform.ProcessTarget(process.Namespace, pod.Name, "rc-kube")
-			if err := processes.Runtime.Logs(ctx, target, process.Name, output); err == nil {
-				return nil
-			}
+			return processes.Runtime.Logs(ctx, target, process.Name, output, errorOutput)
 		}
 	}
 

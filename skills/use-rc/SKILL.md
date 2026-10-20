@@ -199,7 +199,11 @@ rcctl -n <namespace> run --rm --environment <environment> -- <bounded-command> <
 ```
 
 Foreground execution waits for completion. Add `-it` to forward input and allocate
-a terminal, or `-d` to start detached.
+a terminal, or `-d` to start detached. Without `-i` the command reads end of file
+on standard input, so prompts fail instead of waiting. With `-i` (no `-t`), piped
+input reaches the command and its end closes the command's input. A foreground
+`exec` receives all output; if more than 64 MiB is written before rcctl attaches,
+rcctl exits with an error instead of returning partial output.
 
 ```sh
 rcctl -n <namespace> ps -a --workspace <workspace> -o wide

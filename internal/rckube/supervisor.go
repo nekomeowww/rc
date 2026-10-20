@@ -56,6 +56,30 @@ const (
 
 type terminalSize struct{ Rows, Cols uint16 }
 
+// attachClient receives process output. done closes when the client leaves or
+// is dropped, so senders never write to a closed channel.
+type attachClient struct {
+	data     chan []byte
+	done     chan struct{}
+	lossless bool
+	// closeInputOnEOF closes the process input once this client's input ends.
+	closeInputOnEOF bool
+}
+
+// removeClientLocked forgets a client once. The caller holds process.mu.
+func (process *supervisedProcess) removeClientLocked(id string, client *attachClient) {
+	if process.clients[id] != client {
+		return
+	}
+	delete(process.clients, id)
+	delete(process.clientSizes, id)
+	if process.foregroundClient == id {
+		process.foregroundClient = ""
+	}
+	close(client.done)
+	process.state.AttachedClients = int32(len(process.clients))
+}
+
 type terminalController interface {
 	Resize(columns, rows int) error
 }
@@ -70,8 +94,9 @@ type supervisedProcess struct {
 	transcript          *os.File
 	transcriptPath      string
 	exit                chan struct{}
+	inputClosed         bool
 	stopRequested       bool
-	clients             map[string]chan []byte
+	clients             map[string]*attachClient
 	clientSizes         map[string]terminalSize
 	nextClient          uint64
 	foregroundClient    string
@@ -210,7 +235,7 @@ func (supervisor *Supervisor) Start(ctx context.Context, request processruntime.
 		process: &supervisedProcess{
 			state:            processruntime.State{ID: request.ID, UID: request.UID, Phase: phaseStarting},
 			exit:             make(chan struct{}),
-			clients:          make(map[string]chan []byte),
+			clients:          make(map[string]*attachClient),
 			clientSizes:      make(map[string]terminalSize),
 			transcriptMax:    supervisor.maxLog,
 			supervisor:       supervisor,
@@ -351,87 +376,112 @@ func (supervisor *Supervisor) TranscriptAvailable(id string) error {
 }
 
 // Attach replays the raw transcript and then follows the raw PTY output. Input
-// is shared with every other attached client.
-func (supervisor *Supervisor) Attach(ctx context.Context, id string, clientID string, input io.Reader, output io.Writer, rows uint16, columns uint16) error {
+// is shared with every other attached client. A lossless client receives every
+// byte: the process waits for it instead of dropping it when it falls behind.
+func (supervisor *Supervisor) Attach(ctx context.Context, id string, clientID string, input io.Reader, output io.Writer, options processruntime.AttachOptions) error {
+	session, _, err := supervisor.openAttach(id, clientID, options)
+	if err != nil {
+		return err
+	}
+	return session.stream(ctx, input, output)
+}
+
+// attachSession is one registered client. Its replay and the state returned
+// with it come from the same locked read, so a client always learns whether
+// the replay it receives is complete.
+type attachSession struct {
+	process  *supervisedProcess
+	client   *attachClient
+	clientID string
+	replay   []byte
+	exit     chan struct{}
+	input    io.Writer
+}
+
+// openAttach registers a client and captures its replay. A finished process
+// returns a session that only writes the replay.
+func (supervisor *Supervisor) openAttach(id string, clientID string, options processruntime.AttachOptions) (*attachSession, processruntime.State, error) {
 	process, err := supervisor.process(id)
 	if err != nil {
-		return err
+		return nil, processruntime.State{}, err
 	}
 	process.mu.Lock()
+	defer process.mu.Unlock()
 	replay, err := process.readTranscriptLocked()
 	if err != nil {
-		process.mu.Unlock()
-		return err
+		return nil, processruntime.State{}, err
 	}
+	state := cloneState(process.state)
 	if process.state.Phase != phaseRunning && process.state.Phase != phaseStarting {
-		process.mu.Unlock()
-		_, err := output.Write(replay)
-		return err
+		return &attachSession{replay: replay}, state, nil
 	}
 	if clientID == "" {
 		clientID = fmt.Sprintf("client-%d", process.nextClient)
 		process.nextClient++
 	}
 	if _, exists := process.clients[clientID]; exists {
-		process.mu.Unlock()
-		return errors.New("attach client ID is already connected")
+		return nil, processruntime.State{}, errors.New("attach client ID is already connected")
 	}
-	stream := make(chan []byte, 128)
-	process.clients[clientID] = stream
+	client := &attachClient{data: make(chan []byte, 128), done: make(chan struct{}), lossless: options.Lossless, closeInputOnEOF: options.CloseInputOnEOF}
+	process.clients[clientID] = client
 	if process.foregroundClient == "" {
 		process.foregroundClient = clientID
 	}
-	if rows > 0 && columns > 0 {
-		size := terminalSize{Rows: rows, Cols: columns}
+	if options.Rows > 0 && options.Columns > 0 {
+		size := terminalSize{Rows: options.Rows, Cols: options.Columns}
 		process.clientSizes[clientID] = size
 		if process.foregroundClient == clientID && process.terminal != nil {
 			if err := process.terminal.Resize(int(size.Cols), int(size.Rows)); err != nil {
-				delete(process.clients, clientID)
-				delete(process.clientSizes, clientID)
-				process.foregroundClient = ""
-				process.mu.Unlock()
-				return fmt.Errorf("set initial PTY size: %w", err)
+				process.removeClientLocked(clientID, client)
+				return nil, processruntime.State{}, fmt.Errorf("set initial PTY size: %w", err)
 			}
 		}
 	}
 	process.state.AttachedClients = int32(len(process.clients))
-	exit := process.exit
-	processInput := process.input
-	process.mu.Unlock()
+	state.AttachedClients = process.state.AttachedClients
+
+	return &attachSession{process: process, client: client, clientID: clientID, replay: replay, exit: process.exit, input: process.input}, state, nil
+}
+
+// stream writes the replay, forwards input, and follows output until the
+// process exits, the client falls behind, or ctx ends.
+func (session *attachSession) stream(ctx context.Context, input io.Reader, output io.Writer) error {
+	if session.client == nil {
+		_, err := output.Write(session.replay)
+		return err
+	}
+	process, client := session.process, session.client
 	defer func() {
 		process.mu.Lock()
-		delete(process.clients, clientID)
-		delete(process.clientSizes, clientID)
-		if process.foregroundClient == clientID {
-			process.foregroundClient = ""
-		}
-		process.state.AttachedClients = int32(len(process.clients))
+		process.removeClientLocked(session.clientID, client)
 		process.mu.Unlock()
 	}()
-	if _, err := output.Write(replay); err != nil {
+	if _, err := output.Write(session.replay); err != nil {
 		return err
 	}
 	if input != nil {
 		go func() {
-			_, _ = io.Copy(foregroundWriter{process: process, clientID: clientID, target: processInput}, input)
+			_, err := io.Copy(foregroundWriter{process: process, clientID: session.clientID, target: session.input}, input)
+			// Every byte before the end is written first, so a pipe never loses
+			// its tail. A failed copy is a disconnect, not end of input.
+			if err == nil && client.closeInputOnEOF {
+				_ = process.closeInput()
+			}
 		}()
 	}
 	for {
 		select {
-		case data, ok := <-stream:
-			if !ok {
-				return ErrSlowClient
-			}
+		case data := <-client.data:
 			if _, err := output.Write(data); err != nil {
 				return err
 			}
-		case <-exit:
+		case <-client.done:
+			return ErrSlowClient
+		case <-session.exit:
+			// Output stops before exit closes, so everything sent is buffered.
 			for {
 				select {
-				case data, ok := <-stream:
-					if !ok {
-						return nil
-					}
+				case data := <-client.data:
 					if _, err := output.Write(data); err != nil {
 						return err
 					}
@@ -443,6 +493,28 @@ func (supervisor *Supervisor) Attach(ctx context.Context, id string, clientID st
 			return ctx.Err()
 		}
 	}
+}
+
+// closeInput ends a non-TTY process's standard input, as closing a pipe does.
+// Repeated requests are safe.
+func (process *supervisedProcess) closeInput() error {
+	process.inputMu.Lock()
+	defer process.inputMu.Unlock()
+	process.mu.Lock()
+	defer process.mu.Unlock()
+	if process.terminal != nil {
+		return errors.New("process owns a terminal; its input cannot be closed")
+	}
+	return process.closeInputLocked()
+}
+
+// closeInputLocked closes standard input once. The caller holds process.mu.
+func (process *supervisedProcess) closeInputLocked() error {
+	if process.inputClosed || process.input == nil {
+		return nil
+	}
+	process.inputClosed = true
+	return process.input.Close()
 }
 
 // Resize updates a PTY's canonical size. Non-terminal processes reject it.
@@ -512,7 +584,17 @@ func (process *supervisedProcess) wait() {
 	process.mu.Unlock()
 }
 
+// readTranscriptLocked returns the recorded output. After truncation it stops
+// at the limit, so a replay never carries the truncation notice as output.
 func (process *supervisedProcess) readTranscriptLocked() ([]byte, error) {
+	data, err := process.readWholeTranscriptLocked()
+	if err != nil || !process.truncated || int64(len(data)) <= process.transcriptLen {
+		return data, err
+	}
+	return data[:process.transcriptLen], nil
+}
+
+func (process *supervisedProcess) readWholeTranscriptLocked() ([]byte, error) {
 	if process.transcript == nil {
 		data, err := os.ReadFile(process.transcriptPath)
 		if err != nil {
@@ -548,6 +630,27 @@ type processOutput struct {
 
 func (output processOutput) Write(data []byte) (int, error) {
 	copyOfData := append([]byte(nil), data...)
+	lossless, err := output.distribute(data, copyOfData)
+	if err != nil {
+		return 0, err
+	}
+	// One goroutine copies process output, so these blocking sends keep their
+	// order. They run without the lock so Inspect and Stop never wait for a
+	// slow client; a client that leaves closes done and releases its sender.
+	for _, client := range lossless {
+		select {
+		case client.data <- copyOfData:
+		case <-client.done:
+		}
+	}
+
+	return len(data), nil
+}
+
+// distribute records data in the transcript and hands it to clients that drop
+// output when they fall behind. It returns the lossless clients, which the
+// caller serves without the lock.
+func (output processOutput) distribute(data, copyOfData []byte) ([]*attachClient, error) {
 	output.process.mu.Lock()
 	defer output.process.mu.Unlock()
 	if !output.process.truncated {
@@ -565,31 +668,31 @@ func (output processOutput) Write(data []byte) (int, error) {
 			written, err := output.process.transcript.Write(toWrite)
 			output.process.transcriptLen += int64(written)
 			if err != nil {
-				return 0, err
+				return nil, err
 			}
 		}
 		if output.process.transcriptMax > 0 && len(toWrite) < len(data) {
 			if _, err := output.process.transcript.WriteString("\n[rc-kube transcript truncated]\n"); err != nil {
-				return 0, err
+				return nil, err
 			}
 			output.process.truncated = true
+			output.process.state.TranscriptTruncated = true
 		}
 	}
+	var lossless []*attachClient
 	for id, client := range output.process.clients {
+		if client.lossless {
+			lossless = append(lossless, client)
+			continue
+		}
 		select {
-		case client <- copyOfData:
+		case client.data <- copyOfData:
 		default:
-			delete(output.process.clients, id)
-			delete(output.process.clientSizes, id)
-			if output.process.foregroundClient == id {
-				output.process.foregroundClient = ""
-			}
-			close(client)
+			output.process.removeClientLocked(id, client)
 		}
 	}
-	output.process.state.AttachedClients = int32(len(output.process.clients))
 
-	return len(data), nil
+	return lossless, nil
 }
 
 type foregroundWriter struct {

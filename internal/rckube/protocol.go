@@ -30,6 +30,9 @@ type protocolRequest struct {
 	Rows     uint16                        `json:"rows,omitempty"`
 	Columns  uint16                        `json:"columns,omitempty"`
 	History  *processruntime.HistoryPolicy `json:"history,omitempty"`
+	Lossless bool                          `json:"lossless,omitempty"`
+	// CloseInputOnEOF sends input as frames whose end closes the process input.
+	CloseInputOnEOF bool `json:"closeInputOnEOF,omitempty"`
 }
 
 type protocolResponse struct {

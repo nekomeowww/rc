@@ -109,7 +109,7 @@ type ExecutionRetentionPolicy struct {
 }
 
 // WorkspaceExecSpec defines one immutable, at-most-once command.
-// +kubebuilder:validation:XValidation:rule="self.targetRef == oldSelf.targetRef && self.command == oldSelf.command && has(self.workingDirectory) == has(oldSelf.workingDirectory) && (!has(self.workingDirectory) || self.workingDirectory == oldSelf.workingDirectory) && has(self.tty) == has(oldSelf.tty) && (!has(self.tty) || self.tty == oldSelf.tty) && has(self.envSecretRef) == has(oldSelf.envSecretRef) && (!has(self.envSecretRef) || self.envSecretRef == oldSelf.envSecretRef) && has(self.env) == has(oldSelf.env) && (!has(self.env) || self.env == oldSelf.env) && has(self.agentType) == has(oldSelf.agentType) && (!has(self.agentType) || self.agentType == oldSelf.agentType) && has(self.agentCredentialRef) == has(oldSelf.agentCredentialRef) && (!has(self.agentCredentialRef) || self.agentCredentialRef == oldSelf.agentCredentialRef) && has(self.credentialRefs) == has(oldSelf.credentialRefs) && (!has(self.credentialRefs) || self.credentialRefs == oldSelf.credentialRefs)",message="process execution fields are immutable"
+// +kubebuilder:validation:XValidation:rule="self.targetRef == oldSelf.targetRef && self.command == oldSelf.command && has(self.workingDirectory) == has(oldSelf.workingDirectory) && (!has(self.workingDirectory) || self.workingDirectory == oldSelf.workingDirectory) && has(self.tty) == has(oldSelf.tty) && (!has(self.tty) || self.tty == oldSelf.tty) && has(self.stdin) == has(oldSelf.stdin) && (!has(self.stdin) || self.stdin == oldSelf.stdin) && has(self.envSecretRef) == has(oldSelf.envSecretRef) && (!has(self.envSecretRef) || self.envSecretRef == oldSelf.envSecretRef) && has(self.env) == has(oldSelf.env) && (!has(self.env) || self.env == oldSelf.env) && has(self.agentType) == has(oldSelf.agentType) && (!has(self.agentType) || self.agentType == oldSelf.agentType) && has(self.agentCredentialRef) == has(oldSelf.agentCredentialRef) && (!has(self.agentCredentialRef) || self.agentCredentialRef == oldSelf.agentCredentialRef) && has(self.credentialRefs) == has(oldSelf.credentialRefs) && (!has(self.credentialRefs) || self.credentialRefs == oldSelf.credentialRefs)",message="process execution fields are immutable"
 // +kubebuilder:validation:XValidation:rule="has(oldSelf.desiredState) && oldSelf.desiredState == 'Stopped' ? has(self.desiredState) && self.desiredState == 'Stopped' : true",message="a stopped process cannot return to Running"
 type WorkspaceExecSpec struct {
 	// targetRef selects the owning runtime.
@@ -128,6 +128,12 @@ type WorkspaceExecSpec struct {
 	// tty allocates a PTY and enables interactive attach.
 	// +optional
 	TTY bool `json:"tty,omitempty"`
+
+	// stdin keeps a non-TTY process's standard input open for attached
+	// clients, as rcctl exec -i does. Without it the process reads end of
+	// file at once. A TTY process always reads its terminal.
+	// +optional
+	Stdin bool `json:"stdin,omitempty"`
 
 	// desiredState requests process start or one-way termination.
 	// +kubebuilder:default=Running

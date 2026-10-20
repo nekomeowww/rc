@@ -73,7 +73,7 @@ func TestKubeRuntimeAttachesWithInitialTerminalSize(t *testing.T) {
 	runtime := NewKubeRuntime(executor)
 	target := Target{Namespace: "development", Pod: "coding", Container: runtimeBridgeCommand}
 
-	err := runtime.Attach(context.Background(), target, testProcessID, "terminal-01", nil, io.Discard, true, 42, 120)
+	err := runtime.Attach(context.Background(), target, testProcessID, "terminal-01", nil, io.Discard, io.Discard, AttachOptions{Rows: 42, Columns: 120})
 	requirements.NoError(err, "attach through Pod exec bridge")
 	assertions.Equal(target, executor.target, "exec in selected runtime")
 	assertions.Equal(
@@ -93,7 +93,7 @@ func TestKubeRuntimeUsesWindowsTargetFromAnyHost(t *testing.T) {
 	require.Len(t, executor.command, 5)
 	assert.Equal(t, "rc-kube.exe", executor.command[0])
 	assert.Equal(t, `\\.\pipe\rc-kube`, executor.command[4])
-	err = runtime.Attach(context.Background(), target, testProcessID, "terminal-01", nil, io.Discard, true, 24, 80)
+	err = runtime.Attach(context.Background(), target, testProcessID, "terminal-01", nil, io.Discard, io.Discard, AttachOptions{Rows: 24, Columns: 80})
 	require.NoError(t, err)
 	require.Len(t, executor.command, 12)
 	assert.Equal(t, "rc-kube.exe", executor.command[0])

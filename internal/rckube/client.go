@@ -84,13 +84,29 @@ func (client *Client) Logs(ctx context.Context, id string, output io.Writer) err
 	if err := responseError(response); err != nil {
 		return err
 	}
-	_, err = io.Copy(output, reader)
+	if _, err := io.Copy(output, reader); err != nil {
+		return err
+	}
+	if response.State.TranscriptTruncated {
+		return processruntime.ErrTranscriptTruncated
+	}
 
-	return err
+	return nil
 }
 
-func (client *Client) Attach(ctx context.Context, id string, clientID string, input io.Reader, output io.Writer, rows uint16, columns uint16) error {
-	connection, reader, response, err := client.open(ctx, protocolRequest{Action: "attach", ID: id, ClientID: clientID, Rows: rows, Columns: columns})
+// Attach streams process output to output and forwards input. With
+// CloseInputOnEOF, input travels as frames and its end closes the process's
+// standard input after every byte before it, while output keeps streaming.
+func (client *Client) Attach(ctx context.Context, id string, clientID string, input io.Reader, output io.Writer, options processruntime.AttachOptions) error {
+	connection, reader, response, err := client.open(ctx, protocolRequest{
+		Action:          "attach",
+		ID:              id,
+		ClientID:        clientID,
+		Rows:            options.Rows,
+		Columns:         options.Columns,
+		Lossless:        options.Lossless,
+		CloseInputOnEOF: options.CloseInputOnEOF,
+	})
 	if err != nil {
 		return err
 	}
@@ -99,11 +115,22 @@ func (client *Client) Attach(ctx context.Context, id string, clientID string, in
 		return err
 	}
 	if input != nil {
-		go func() { _, _ = io.Copy(connection, input) }()
+		go func() {
+			if options.CloseInputOnEOF {
+				_ = writeInputFrames(connection, input)
+				return
+			}
+			_, _ = io.Copy(connection, input)
+		}()
 	}
 	_, err = io.Copy(output, reader)
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+	if err == nil && response.State.TranscriptTruncated {
+		// The replay of output produced before this client attached stopped
+		// at the transcript limit; everything after it arrived.
+		return processruntime.ErrTranscriptTruncated
 	}
 
 	return err

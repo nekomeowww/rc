@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -127,22 +128,39 @@ func (server *Server) handle(serverContext context.Context, connection net.Conn)
 			server.writeState(connection, processruntime.State{}, err)
 			return
 		}
-		if err := writeProtocolResponse(connection, protocolResponse{}); err != nil {
+		// A missing state only means no live or recorded process; the
+		// transcript itself was found above.
+		state, _ := server.supervisor.Inspect(request.ID)
+		if err := writeProtocolResponse(connection, protocolResponse{State: state}); err != nil {
 			return
 		}
 		_ = server.supervisor.Logs(request.ID, connection)
 	case "attach":
-		state, err := server.supervisor.Inspect(request.ID)
+		options := processruntime.AttachOptions{
+			Rows:            request.Rows,
+			Columns:         request.Columns,
+			Lossless:        request.Lossless,
+			CloseInputOnEOF: request.CloseInputOnEOF,
+		}
+		session, state, err := server.supervisor.openAttach(request.ID, request.ClientID, options)
 		if err != nil {
 			server.writeState(connection, state, err)
 			return
 		}
+		// The state comes from the same read as the replay, so the client knows
+		// whether the replay it is about to receive is complete.
 		if err := writeProtocolResponse(connection, protocolResponse{State: state}); err != nil {
 			return
 		}
 		attachContext, cancel := context.WithCancel(serverContext)
 		defer cancel()
-		if err := server.supervisor.Attach(attachContext, request.ID, request.ClientID, &cancelOnEOFReader{reader: reader, cancel: cancel}, connection, request.Rows, request.Columns); errors.Is(err, ErrSlowClient) {
+		// A closed connection ends the attach. With frames, only the end marker
+		// is end of input; the connection closing first still ends the attach.
+		var input io.Reader = &cancelOnEOFReader{reader: reader, cancel: cancel}
+		if request.CloseInputOnEOF {
+			input = &inputFrameReader{reader: input}
+		}
+		if err := session.stream(attachContext, input, connection); errors.Is(err, ErrSlowClient) {
 			_, _ = fmt.Fprintf(connection, "\r\n[rc-kube: %s]\r\n", err)
 		}
 	default:

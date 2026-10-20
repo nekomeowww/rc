@@ -129,6 +129,12 @@ spec:
                 required:
                 - name
                 type: object
+              stdin:
+                description: |-
+                  stdin keeps a non-TTY process's standard input open for attached
+                  clients, as rcctl exec -i does. Without it the process reads end of
+                  file at once. A TTY process always reads its terminal.
+                type: boolean
               targetRef:
                 description: targetRef selects the owning runtime.
                 properties:
@@ -164,7 +170,8 @@ spec:
                 && has(self.workingDirectory) == has(oldSelf.workingDirectory) &&
                 (!has(self.workingDirectory) || self.workingDirectory == oldSelf.workingDirectory)
                 && has(self.tty) == has(oldSelf.tty) && (!has(self.tty) || self.tty
-                == oldSelf.tty) && has(self.envSecretRef) == has(oldSelf.envSecretRef)
+                == oldSelf.tty) && has(self.stdin) == has(oldSelf.stdin) && (!has(self.stdin)
+                || self.stdin == oldSelf.stdin) && has(self.envSecretRef) == has(oldSelf.envSecretRef)
                 && (!has(self.envSecretRef) || self.envSecretRef == oldSelf.envSecretRef)
                 && has(self.env) == has(oldSelf.env) && (!has(self.env) || self.env
                 == oldSelf.env) && has(self.agentType) == has(oldSelf.agentType) &&

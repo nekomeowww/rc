@@ -167,6 +167,8 @@ type ProcessIntent struct {
 	CredentialMounts   []processruntime.CredentialMount
 	ExposeCredentials  bool
 	SSHConfigFragments map[string]string
+	// Stdin keeps a non-TTY process's standard input open.
+	Stdin bool
 }
 
 // Process compiles one logical process into the rc-kube wire request.
@@ -191,7 +193,7 @@ func (runtime Runtime) Process(intent ProcessIntent) processruntime.StartRequest
 	return processruntime.StartRequest{
 		ID: intent.ID, UID: intent.UID, Command: slices.Clone(intent.Command),
 		WorkingDirectory: intent.WorkingDirectory, DefaultDirectory: defaultDirectory,
-		TTY: intent.TTY, Environment: environment, Agent: agentProfile, ExposeCredentials: intent.ExposeCredentials,
+		TTY: intent.TTY, Stdin: intent.Stdin, Environment: environment, Agent: agentProfile, ExposeCredentials: intent.ExposeCredentials,
 		CredentialFiles: cloneFiles(intent.CredentialFiles), CredentialMounts: slices.Clone(intent.CredentialMounts),
 		SSHConfigFragments: maps.Clone(intent.SSHConfigFragments),
 	}

@@ -25,6 +25,10 @@ import (
 // ErrNotFound reports that the original supervisor process no longer exists.
 var ErrNotFound = errors.New("process not found")
 
+// ErrTranscriptTruncated reports output that did not reach a client: it was
+// produced before the client attached and exceeded the transcript limit.
+var ErrTranscriptTruncated = errors.New("process output exceeded the transcript limit before this client read it, so part of it was not delivered; copy large files with rcctl cp")
+
 // Target identifies one rc-kube supervisor Pod.
 type Target struct {
 	Namespace  string
@@ -57,12 +61,15 @@ type AgentRef struct {
 
 // StartRequest is the versioned process contract sent to rc-kube.
 type StartRequest struct {
-	ID                 string            `json:"id"`
-	UID                string            `json:"uid"`
-	Command            []string          `json:"command"`
-	WorkingDirectory   string            `json:"workingDirectory"`
-	DefaultDirectory   DefaultDirectory  `json:"defaultDirectory,omitempty"`
-	TTY                bool              `json:"tty"`
+	ID               string           `json:"id"`
+	UID              string           `json:"uid"`
+	Command          []string         `json:"command"`
+	WorkingDirectory string           `json:"workingDirectory"`
+	DefaultDirectory DefaultDirectory `json:"defaultDirectory,omitempty"`
+	TTY              bool             `json:"tty"`
+	// Stdin keeps a non-TTY process's standard input open for attached
+	// clients. Without it the process reads end of file at once.
+	Stdin              bool              `json:"stdin,omitempty"`
 	Environment        map[string]string `json:"environment,omitempty"`
 	Agent              *AgentRef         `json:"agent,omitempty"`
 	ExposeCredentials  bool              `json:"exposeCredentials,omitempty"`
@@ -80,6 +87,9 @@ type State struct {
 	ExitCode        *int32 `json:"exitCode,omitempty"`
 	Reason          string `json:"reason,omitempty"`
 	AttachedClients int32  `json:"attachedClients,omitempty"`
+	// TranscriptTruncated reports that the transcript reached its size limit,
+	// so a replay of earlier output is incomplete.
+	TranscriptTruncated bool `json:"transcriptTruncated,omitempty"`
 }
 
 // HistoryEntry is one process the supervisor has recorded, live or finished.
@@ -91,6 +101,18 @@ type HistoryEntry struct {
 	TTY              bool       `json:"tty,omitempty"`
 	StartedAt        *time.Time `json:"startedAt,omitempty"`
 	CompletedAt      *time.Time `json:"completedAt,omitempty"`
+}
+
+// AttachOptions describes one client's connection to a process.
+type AttachOptions struct {
+	// Rows and Columns set the initial terminal size of a TTY process.
+	Rows, Columns uint16
+	// Lossless applies backpressure instead of disconnecting a slow client, so
+	// the client receives every byte. The process waits for the client.
+	Lossless bool
+	// CloseInputOnEOF closes a non-TTY process's standard input when the
+	// client's input ends, as a pipe does.
+	CloseInputOnEOF bool
 }
 
 // HistoryPolicy bounds the finished processes a supervisor keeps. A zero field

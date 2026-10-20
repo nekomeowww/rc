@@ -749,7 +749,7 @@ func (r *WorkspaceExecReconciler) processStartRequest(ctx context.Context, proce
 	return target.platform.Process(rcplatform.ProcessIntent{
 		ID: process.Name, UID: string(process.UID), Command: process.Spec.Command,
 		WorkingDirectory: target.workingDir, DefaultDirectory: target.defaultDirectory,
-		TTY: process.Spec.TTY, Environment: environment, AgentProfile: target.agentProfile,
+		TTY: process.Spec.TTY, Stdin: process.Spec.Stdin, Environment: environment, AgentProfile: target.agentProfile,
 		CredentialFiles: target.credentials, CredentialMounts: target.mounts,
 		ExposeCredentials: len(process.Spec.CredentialRefs) > 0, SSHConfigFragments: target.sshConfigFragments,
 	}), nil

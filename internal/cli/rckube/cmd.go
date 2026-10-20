@@ -41,7 +41,7 @@ func NewCommand() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
-	root.AddCommand(newServeCommand(), newProcessCommand(), newLifecycleCommand(), newHealthCommand(), newTranscriptCommand(), newPruneTranscriptCommand())
+	root.AddCommand(newServeCommand(), newProcessCommand(), newLifecycleCommand(), newHealthCommand(), newTranscriptCommand())
 
 	return root
 }
@@ -74,8 +74,6 @@ func newServeCommand() *cobra.Command {
 	var stopGrace time.Duration
 	var maxTranscriptBytes int64
 	var initializeActions string
-	var historyPolicy processruntime.HistoryPolicy
-	var historyPruneInterval time.Duration
 	command := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the Workspace process supervisor",
@@ -107,7 +105,6 @@ func newServeCommand() *cobra.Command {
 			if err := supervisor.RecoverHistory(time.Now()); err != nil {
 				return fmt.Errorf("recover process history: %w", err)
 			}
-			go pruneHistory(command.Context(), command.ErrOrStderr(), supervisor, historyPolicy, historyPruneInterval)
 			return runtime.NewServer(supervisor).Serve(command.Context(), socketPath)
 		},
 	}
@@ -117,37 +114,13 @@ func newServeCommand() *cobra.Command {
 	command.Flags().StringVar(&initializeActions, "initialize-actions", "", "Lifecycle actions run in the runtime container before readiness")
 	command.Flags().DurationVar(&stopGrace, "stop-grace", 10*time.Second, "Process stop grace period before forced tree termination")
 	command.Flags().Int64Var(&maxTranscriptBytes, "max-transcript-bytes", 64<<20, "Maximum durable bytes retained per process; zero disables")
-	command.Flags().DurationVar(&historyPolicy.TTLAfterFinished, "history-ttl", 0, "Remove a finished process record after this age; zero disables")
-	command.Flags().IntVar(&historyPolicy.MaxEntries, "history-max-entries", 0, "Keep at most this many finished process records; zero disables")
-	command.Flags().DurationVar(&historyPolicy.TranscriptTTL, "history-transcript-ttl", 0, "Remove a finished process transcript after this age; zero disables")
-	command.Flags().DurationVar(&historyPruneInterval, "history-prune-interval", time.Hour, "Interval between history retention passes")
 
 	return command
 }
 
-// pruneHistory applies the history policy at startup and then periodically.
-// A failed pass is reported and retried on the next interval.
-func pruneHistory(ctx context.Context, output io.Writer, supervisor *runtime.Supervisor, policy processruntime.HistoryPolicy, interval time.Duration) {
-	if policy == (processruntime.HistoryPolicy{}) || interval <= 0 {
-		return
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		if _, err := supervisor.PruneHistory(policy, time.Now()); err != nil {
-			_, _ = fmt.Fprintf(output, "rc-kube: prune process history: %v\n", err)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
-}
-
 func newProcessCommand() *cobra.Command {
 	command := &cobra.Command{Use: "process", Short: "Bridge one request to the local supervisor"}
-	command.AddCommand(newStartCommand(), newStateCommand("inspect"), newStateCommand("stop"), newListCommand(), newAttachCommand(), newLogsCommand(), newResizeCommand(), newPruneProcessCommand())
+	command.AddCommand(newStartCommand(), newStateCommand("inspect"), newStateCommand("stop"), newListCommand(), newPruneHistoryCommand(), newAttachCommand(), newLogsCommand(), newResizeCommand())
 
 	return command
 }
@@ -192,6 +165,29 @@ func newListCommand() *cobra.Command {
 		},
 	}
 	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
+
+	return command
+}
+
+func newPruneHistoryCommand() *cobra.Command {
+	var socketPath string
+	var policy processruntime.HistoryPolicy
+	command := &cobra.Command{
+		Use:   "prune-history",
+		Short: "Apply a retention policy to finished process records",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			if err := runtime.NewClient(socketPath).PruneHistory(command.Context(), policy); err != nil {
+				return err
+			}
+
+			return json.NewEncoder(command.OutOrStdout()).Encode(processruntime.State{})
+		},
+	}
+	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
+	command.Flags().DurationVar(&policy.TTLAfterFinished, "ttl-after-finished", 0, "Remove a finished record after this age; zero disables")
+	command.Flags().IntVar(&policy.MaxEntries, "max-entries", 0, "Keep at most this many finished records; zero disables")
+	command.Flags().DurationVar(&policy.TranscriptTTL, "transcript-ttl", 0, "Remove a finished transcript after this age; zero disables")
 
 	return command
 }
@@ -315,31 +311,4 @@ func newTranscriptCommand() *cobra.Command {
 			_, err = io.Copy(command.OutOrStdout(), file)
 			return err
 		}}
-}
-
-// newPruneProcessCommand bridges cleanup through the live supervisor lock.
-func newPruneProcessCommand() *cobra.Command {
-	var socket, uid string
-	command := &cobra.Command{Use: "prune ID", Short: "Remove a terminal process transcript", Args: cobra.ExactArgs(1), RunE: func(command *cobra.Command, args []string) error {
-		if err := runtime.NewClient(socket).PruneTranscript(command.Context(), args[0], uid); err != nil {
-			return err
-		}
-		return json.NewEncoder(command.OutOrStdout()).Encode(processruntime.State{})
-	}}
-	command.Flags().StringVar(&socket, "socket", rcnative.Current().Endpoint, "Local supervisor endpoint")
-	command.Flags().StringVar(&uid, "uid", "", "Expected WorkspaceExec UID")
-	_ = command.MarkFlagRequired("uid")
-	return command
-}
-
-// newPruneTranscriptCommand processes one immutable offline batch. Each entry
-// is UID-checked and idempotent, so a partial failure can safely retry the batch.
-func newPruneTranscriptCommand() *cobra.Command {
-	return &cobra.Command{Use: "prune-transcripts BATCH_JSON", Short: "Remove a batch of offline transcripts", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error {
-		var batch []processruntime.TranscriptIdentity
-		if err := json.Unmarshal([]byte(args[0]), &batch); err != nil {
-			return err
-		}
-		return runtime.RemoveTranscripts(rcnative.Current().StateDirectory(), batch)
-	}}
 }

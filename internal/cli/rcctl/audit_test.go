@@ -9,7 +9,7 @@ import (
 )
 
 func TestMaintenanceCommandsRegistered(t *testing.T) {
-	for _, name := range []string{"doctor", "prune"} {
+	for _, name := range []string{"doctor"} {
 		command := NewCommand()
 		output := new(bytes.Buffer)
 		command.SetOut(output)

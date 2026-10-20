@@ -186,13 +186,12 @@ The top-level command groups follow the rc resource model:
 | `rcctl repo` | Clone, inspect, execute commands in, and delete Repository mirrors |
 | `rcctl worktree` | Create, inspect, execute in, and delete independent Git checkouts |
 | `rcctl doctor` | Audit references, storage requests, runtime failures and deletion blockers |
-| `rcctl prune` | Report terminal execution history awaiting controller cleanup (read-only) |
 | `rcctl env` | Prepare and commit reusable Workspace home environments |
 | `rcctl workspace` | Create persistent development machines and manage their mounts |
 | `rcctl run` / `rcctl exec` | Run commands in a new / existing Workspace |
 | `rcctl ps` / `attach` / `logs` / `stop` / `inspect` / `rm` | List and manage processes |
 
-For read-only diagnostics and the execution history report, see [Doctor and the execution history report](docs/doctor-prune.md).
+For read-only diagnostics, see [Doctor](docs/doctor.md).
 
 In most cases, it takes only a few steps to get started with rcctl:
 
@@ -399,7 +398,9 @@ exit code by default. Use `-it` for an interactive terminal or `-d` to detach.
 Each command creates a `WorkspaceExec`, so you can inspect and reconnect
 independently of the original terminal. `ps` asks the supervisor of every
 running Workspace and WorkspaceEnvironment, like `ps` on each machine: a stopped
-Workspace, or a command that has not started yet, lists no processes. Put rcctl flags before the
+Workspace, or a command that has not started yet, lists no processes. A finished
+command's WorkspaceExec is deleted after ten minutes; its supervisor keeps the
+history (90 days and 15000 entries by default, set by `spec.executionRetention`). Put rcctl flags before the
 Workspace name for `exec`; everything after that name is command argv.
 
 ```sh

@@ -22,7 +22,7 @@ func TestSupervisorRetainsSSHPreparationFailure(t *testing.T) {
 	requirements := require.New(t)
 	stateDirectory := t.TempDir()
 	runtimeRoot := t.TempDir()
-	supervisor := NewSupervisor(stateDirectory, time.Second, WithRoots("relative-home", t.TempDir(), runtimeRoot))
+	supervisor := newTestSupervisor(t, stateDirectory, time.Second, WithRoots("relative-home", t.TempDir(), runtimeRoot))
 	request := processruntime.StartRequest{
 		ID: "ssh-rejected", UID: "ssh-uid", Command: []string{missingStartCommand},
 		ExposeCredentials:  true,
@@ -47,7 +47,7 @@ func TestSupervisorRetainsSSHPreparationFailure(t *testing.T) {
 	requirements.NoError(err)
 	assertions.Equal(failed, inspected)
 
-	restarted := NewSupervisor(stateDirectory, time.Second)
+	restarted := newTestSupervisor(t, stateDirectory, time.Second)
 	_, err = restarted.Start(t.Context(), request)
 	requirements.ErrorIs(err, processruntime.ErrNotFound, "retain ownership across supervisor restarts")
 }
@@ -57,7 +57,7 @@ func TestCancelledStartDoesNotClaimIdentity(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	directory := t.TempDir()
-	supervisor := NewSupervisor(directory, time.Second)
+	supervisor := newTestSupervisor(t, directory, time.Second)
 	request := processruntime.StartRequest{ID: "cancelled", UID: "cancelled-uid", Command: []string{missingStartCommand}}
 	_, err := supervisor.Start(ctx, request)
 	require.ErrorIs(t, err, context.Canceled)
@@ -72,7 +72,7 @@ func TestCancelledStartDoesNotClaimIdentity(t *testing.T) {
 func TestCancellationAfterPreparationRollsBackResources(t *testing.T) {
 	t.Parallel()
 	directory, runtimeRoot := t.TempDir(), t.TempDir()
-	supervisor := NewSupervisor(directory, time.Second, WithRoots(t.TempDir(), t.TempDir(), runtimeRoot))
+	supervisor := newTestSupervisor(t, directory, time.Second, WithRoots(t.TempDir(), t.TempDir(), runtimeRoot))
 	request := processruntime.StartRequest{
 		ID: "prepared", UID: "prepared-uid", Command: []string{missingStartCommand},
 		ExposeCredentials:  true,
@@ -116,7 +116,7 @@ func TestStartRollbackCollectsCleanupErrors(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(ownerPath, "keep"), nil, 0o600))
 	removeErr := os.Remove(ownerPath)
 	require.Error(t, removeErr)
-	attempt := &processStart{supervisor: NewSupervisor(directory, time.Second), ownerPath: ownerPath,
+	attempt := &processStart{supervisor: newTestSupervisor(t, directory, time.Second), ownerPath: ownerPath,
 		process: &supervisedProcess{transcript: transcript, processID: "rollback"},
 	}
 	_, err = attempt.failLocked(context.Canceled, 125)

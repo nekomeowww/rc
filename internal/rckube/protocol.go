@@ -21,14 +21,15 @@ import processruntime "github.com/nekomeowww/rc/internal/execution"
 const protocolVersion = 4
 
 type protocolRequest struct {
-	Version  int                          `json:"version"`
-	Action   string                       `json:"action"`
-	UID      string                       `json:"uid,omitempty"`
-	ID       string                       `json:"id,omitempty"`
-	ClientID string                       `json:"clientID,omitempty"`
-	Start    *processruntime.StartRequest `json:"start,omitempty"`
-	Rows     uint16                       `json:"rows,omitempty"`
-	Columns  uint16                       `json:"columns,omitempty"`
+	Version  int                           `json:"version"`
+	Action   string                        `json:"action"`
+	UID      string                        `json:"uid,omitempty"`
+	ID       string                        `json:"id,omitempty"`
+	ClientID string                        `json:"clientID,omitempty"`
+	Start    *processruntime.StartRequest  `json:"start,omitempty"`
+	Rows     uint16                        `json:"rows,omitempty"`
+	Columns  uint16                        `json:"columns,omitempty"`
+	History  *processruntime.HistoryPolicy `json:"history,omitempty"`
 }
 
 type protocolResponse struct {

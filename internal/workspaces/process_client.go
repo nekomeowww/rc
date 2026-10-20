@@ -29,7 +29,6 @@ import (
 	"golang.org/x/term"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -366,9 +365,6 @@ func (processes *ProcessClient) Stop(ctx context.Context, process *workspacesv1a
 }
 
 func (processes *ProcessClient) Logs(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec, output io.Writer) error {
-	if condition := meta.FindStatusCondition(process.Status.Conditions, workspacesv1alpha1.WorkspaceExecConditionTranscriptCleanup); condition != nil && condition.Status == metav1.ConditionTrue {
-		return fmt.Errorf("transcript for %s was removed at %s", process.Name, condition.LastTransitionTime.Format(time.RFC3339))
-	}
 	if process.Status.RuntimePodName != "" {
 		pod := new(corev1.Pod)
 		key := types.NamespacedName{Name: process.Status.RuntimePodName, Namespace: process.Namespace}

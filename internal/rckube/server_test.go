@@ -46,7 +46,7 @@ func TestUnixServerKeepsProcessAfterClientDisconnect(t *testing.T) {
 	requirements.NoError(socketFile.Close(), "close socket path placeholder")
 	requirements.NoError(os.Remove(socketPath), "release socket path placeholder")
 	t.Cleanup(func() { _ = os.Remove(socketPath) })
-	server := NewServer(NewSupervisor(t.TempDir(), 100*time.Millisecond))
+	server := NewServer(newTestSupervisor(t, t.TempDir(), 100*time.Millisecond))
 	serverDone := make(chan error, 1)
 	go func() { serverDone <- server.Serve(ctx, socketPath) }()
 	requirements.Eventually(func() bool {
@@ -74,11 +74,8 @@ func TestUnixServerKeepsProcessAfterClientDisconnect(t *testing.T) {
 	var transcript bytes.Buffer
 	requirements.NoError(client.Logs(context.Background(), request.ID, &transcript), "read logs through new client")
 	assertions.Equal("done", transcript.String(), "new client sees detached output")
-	requirements.NoError(client.PruneTranscript(context.Background(), request.ID, request.UID), "prune through the versioned protocol")
-	requirements.NoError(client.PruneTranscript(context.Background(), request.ID, request.UID), "retry acknowledged cleanup")
-	requirements.ErrorIs(client.Logs(context.Background(), request.ID, &transcript), processruntime.ErrNotFound)
 	_, err = client.Start(context.Background(), request)
-	requirements.ErrorIs(err, processruntime.ErrNotFound, "cleanup must not permit a protocol replay to start again")
+	requirements.NoError(err, "a protocol replay returns the original process instead of starting again")
 
 	cancel()
 	select {
@@ -93,7 +90,7 @@ func TestSupervisorSupportsConcurrentReadOnlyAttaches(t *testing.T) {
 	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
-	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
+	supervisor := newTestSupervisor(t, t.TempDir(), 100*time.Millisecond)
 	request := processruntime.StartRequest{ID: "shared", UID: "shared-uid", Command: []string{"sh", "-c", "sleep 0.1; printf shared"}}
 	_, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "start shared process")
@@ -125,7 +122,7 @@ func TestUnixServerReportsMissingLogs(t *testing.T) {
 	requirements.NoError(socketFile.Close(), "close socket path placeholder")
 	requirements.NoError(os.Remove(socketPath), "release socket path placeholder")
 	t.Cleanup(func() { _ = os.Remove(socketPath) })
-	server := NewServer(NewSupervisor(t.TempDir(), 100*time.Millisecond))
+	server := NewServer(newTestSupervisor(t, t.TempDir(), 100*time.Millisecond))
 	go func() { _ = server.Serve(ctx, socketPath) }()
 	requirements.Eventually(func() bool {
 		return errors.Is(NewClient(socketPath).Logs(context.Background(), "missing", &bytes.Buffer{}), processruntime.ErrNotFound)
@@ -142,7 +139,7 @@ func TestUnixServerListsRecordedProcesses(t *testing.T) {
 	requirements.NoError(socketFile.Close(), "close socket path placeholder")
 	requirements.NoError(os.Remove(socketPath), "release socket path placeholder")
 	t.Cleanup(func() { _ = os.Remove(socketPath) })
-	supervisor := NewSupervisor(t.TempDir(), 100*time.Millisecond)
+	supervisor := newTestSupervisor(t, t.TempDir(), 100*time.Millisecond)
 	go func() { _ = NewServer(supervisor).Serve(ctx, socketPath) }()
 	client := NewClient(socketPath)
 	requirements.Eventually(func() bool { return client.Ping(context.Background()) == nil }, time.Second, 10*time.Millisecond)
@@ -157,6 +154,15 @@ func TestUnixServerListsRecordedProcesses(t *testing.T) {
 	requirements.Equal(request.ID, entries[0].ID)
 	requirements.Equal(request.Command, entries[0].Command)
 	requirements.Equal(phaseExited, entries[0].Phase)
+
+	requirements.NoError(client.PruneHistory(ctx, processruntime.HistoryPolicy{MaxEntries: 1}), "keep the newest record")
+	entries, err = client.List(ctx)
+	requirements.NoError(err)
+	requirements.Len(entries, 1)
+	requirements.NoError(client.PruneHistory(ctx, processruntime.HistoryPolicy{TTLAfterFinished: time.Nanosecond}))
+	entries, err = client.List(ctx)
+	requirements.NoError(err)
+	requirements.Empty(entries, "prune through the protocol")
 }
 
 func TestClientCancellationInterruptsResponseRead(t *testing.T) {

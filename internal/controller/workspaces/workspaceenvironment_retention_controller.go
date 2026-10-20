@@ -2,9 +2,9 @@ package workspaces
 
 import (
 	"context"
+	"sync"
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
-	processruntime "github.com/nekomeowww/rc/internal/execution"
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -18,16 +18,21 @@ type WorkspaceEnvironmentRetentionReconciler struct {
 	// APIReader is required. It bypasses the informer cache; SetupWithManager
 	// sets it from the manager.
 	APIReader client.Reader
-	Runtime   processruntime.Runtime
+	// History prunes the editor supervisor's finished process records.
+	History HistoryPruner
+
+	retention     *historyRetention
+	retentionOnce sync.Once
 }
 
-// Reconcile applies retention to one Environment draft's execution history.
+// Reconcile applies history retention on the editor's running supervisor.
 func (r *WorkspaceEnvironmentRetentionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	target := new(workspacesv1alpha1.WorkspaceEnvironment)
 	if err := r.Get(ctx, req.NamespacedName, target); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	return (&executionRetentionService{Client: r.Client, APIReader: r.APIReader, Runtime: r.Runtime}).reconcileTarget(ctx, target)
+	r.retentionOnce.Do(func() { r.retention = newHistoryRetention(r.APIReader, r.History, nil) })
+	return ctrl.Result{RequeueAfter: r.retention.reconcile(ctx, target, target.Status.EditorPodName, target.Spec.ExecutionRetention)}, nil
 }
 
 // SetupWithManager registers kind-filtered execution events and owned workers.

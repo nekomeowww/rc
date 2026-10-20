@@ -1,19 +1,18 @@
 # WorkspaceExec as active intent, history in the supervisor
 
-Status: accepted; implemented in stages (see [Rollout](#rollout)).
+Status: implemented (see [Rollout](#rollout)).
 
-This design supersedes the storage model of
-[`workspace-exec-retention.md`](workspace-exec-retention.md). It keeps the
+This design replaced the earlier CR-based retention. It keeps the
 `spec.executionRetention` field and its 90-day / 15000-entry defaults, but moves
 execution history out of the Kubernetes API.
 
 ## Problem
 
 Each command creates one WorkspaceExec, and terminal records stay until a user
-opts in to retention. On the ihome cluster, 3487 WorkspaceExecs existed while 6
-were running. Every record adds etcd data, list/watch work, and `rcctl` output.
-Opt-in retention does not fix this, because the user wants long history: the
-defaults were raised to 90 days and 15000 entries. Long history and one API
+opts in to retention. A long-lived cluster accumulates thousands of terminal
+records for a handful of running processes. Every record adds etcd data,
+list/watch work, and `rcctl` output. Opt-in retention does not fix this,
+because users want long history: the defaults are 90 days and 15000 entries. Long history and one API
 object per command conflict.
 
 Retention also needed a large protocol. Transcripts live on the home PVC, so a
@@ -94,8 +93,10 @@ rc is experimental, so the change keeps no compatibility path. rc-kube ships in
 each target's runner image; a target on an older image cannot answer `list`
 and appears only as a warning until its image is updated.
 
-**The supervisor applies retention.** `spec.executionRetention` now configures
-the supervisor and is enabled by default:
+**The supervisor applies retention.** `spec.executionRetention` configures the
+supervisor and is enabled by default. The controller sends the current policy to
+each running supervisor at most once an hour through the `prune-history`
+action, so a spec change applies without replacing the runtime Pod:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
@@ -103,8 +104,7 @@ the supervisor and is enabled by default:
 | `maxEntries` | 15000 | Keep at most this many terminal records, newest first |
 | `transcriptTTL` | 336h (14 days) | Remove a terminal transcript earlier; the record stays |
 
-The supervisor prunes at startup and periodically. It never removes an active
-process. Removing `owner.uid` is safe once the WorkspaceExec is gone: the
+Pruning never removes an active process. Removing `owner.uid` is safe once the WorkspaceExec is gone: the
 controller never starts a terminal or deleted record again, and the pruning age
 far exceeds any delayed start request.
 
@@ -113,27 +113,26 @@ as it does today. Moving `.rc/processes` off the cloneable home PVC is a later,
 independent change; the inherited-copy scope marker also removes inherited
 records.
 
-## What this removes
+## What this removed
 
-After the last stage, the controller no longer needs the transcript batch
-worker, the `TranscriptCleanup` Condition, per-CR transcript cleanup, the
-`executionHistory` status, or the `ExecutionHistoryCompliant` Condition. Pins
-(`spec.retain`) are removed with them, because a WorkspaceExec no longer
-outlives its result window.
+The controller no longer has the transcript batch worker, the
+`TranscriptCleanup` Condition, per-CR transcript cleanup, the `executionHistory`
+status, or the `ExecutionHistoryCompliant` Condition. Pins (`spec.retain`) went
+with them, because a WorkspaceExec no longer outlives its result window.
+`rcctl prune` only reported that status and is removed. Deleting a WorkspaceExec
+stops its process if it is still running and keeps the target's idle clock; it
+never removes the transcript, which stays under supervisor retention.
 
 ## Rollout
 
 Each stage is deployable alone.
 
 1. **Supervisor history.** `record.json`, restart recovery, the `list` action,
-   and supervisor retention. Retention is off unless `rc-kube serve` receives a
-   policy, so this stage does not change behavior. The protocol version stays
-   at 4: a new client sends `list` to an old supervisor and receives
-   `unknown action`.
+   and supervisor retention (#69). The protocol version stays at 4.
 2. **Read history from the supervisor.** `ps` aggregates every running
    supervisor and reads no WorkspaceExec. `inspect` and `logs` fall back to the
-   inventory when no WorkspaceExec matches.
-3. **Delete terminal records.** The controller passes `executionRetention` to
-   rc-kube, deletes terminal WorkspaceExecs after the result window, and removes
-   the CR-based retention machinery. Existing terminal records are deleted
-   without migrating them into supervisor history.
+   inventory when no WorkspaceExec matches (#70).
+3. **Delete terminal records.** The controller sends `executionRetention` to
+   each running supervisor, deletes terminal WorkspaceExecs after the result
+   window, and the CR-based retention machinery is removed. Existing terminal
+   records are deleted without migrating them into supervisor history.

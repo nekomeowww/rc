@@ -23,14 +23,9 @@ type scanOptions struct {
 	output        clioutput.Options
 }
 
-type pruneOptions struct {
-	allNamespaces bool
-	output        clioutput.Options
-}
-
-// Register attaches the read-only doctor and prune reports.
+// Register attaches the read-only doctor report.
 func Register(root *cobra.Command, flags *kubeconfig.Flags) {
-	root.AddCommand(newDoctorCommand(flags), newPruneCommand(flags))
+	root.AddCommand(newDoctorCommand(flags))
 }
 
 func newDoctorCommand(flags *kubeconfig.Flags) *cobra.Command {
@@ -84,52 +79,4 @@ func connect(flags *kubeconfig.Flags, allNamespaces bool) (*cluster.Client, stri
 		namespace = ""
 	}
 	return connection, namespace, nil
-}
-
-// pruneHint is printed on stderr so structured stdout stays one document.
-const pruneHint = "rcctl prune is read-only and shows status.executionHistory as published by the rc controller. The controller deletes terminal execution history; configure it with spec.executionRetention (ttlAfterFinished, maxEntries) on the Workspace or WorkspaceEnvironment, or set spec.retain on a WorkspaceExec to keep it. STATUS Stale or Unpublished means the controller has not caught up or is not running."
-
-func newPruneCommand(flags *kubeconfig.Flags) *cobra.Command {
-	options := &pruneOptions{}
-	cmd := &cobra.Command{
-		Use:   "prune",
-		Short: "Report terminal execution history awaiting controller cleanup (read-only)",
-		Long: "Report, for each Workspace and WorkspaceEnvironment, the controller-published status.executionHistory: how many WorkspaceExec records are retained and how many wait for the controller to delete them, and the ExecutionHistoryCompliant reason. " +
-			"Summaries older than the target spec are marked Stale and missing ones Unpublished; the command never recomputes them. " +
-			"This command never deletes anything: the rc controller performs history cleanup with fresh reads and preconditions. To remove history sooner, lower spec.executionRetention.ttlAfterFinished or maxEntries on the target. Use doctor for Workspace, Worktree, Repository and PVC diagnostics.",
-		Example: "  rcctl prune\n  rcctl prune -A -o json",
-		Args:    cobra.NoArgs,
-		RunE:    func(cmd *cobra.Command, _ []string) error { return runPrune(cmd, flags, options) },
-	}
-	cmd.Flags().BoolVarP(&options.allNamespaces, "all-namespaces", "A", false, "Read all namespaces; missing permissions remain unknown")
-	options.output.AddFlags(cmd, true)
-	return cmd
-}
-
-// runPrune reads the published execution history backlog. It issues only LIST
-// requests for Workspaces and WorkspaceEnvironments.
-func runPrune(cmd *cobra.Command, flags *kubeconfig.Flags, options *pruneOptions) error {
-	if err := options.output.Validate(true); err != nil {
-		return err
-	}
-	connection, namespace, err := connect(flags, options.allNamespaces)
-	if err != nil {
-		return err
-	}
-	report, err := audit.ExecutionHistory(cmd.Context(), connection.Kube, namespace, time.Now())
-	if err != nil {
-		return err
-	}
-	for _, observation := range report.Coverage {
-		if !observation.Complete {
-			if _, err := fmt.Fprintln(cmd.ErrOrStderr(), "UNKNOWN: "+observation.Kind+" visibility unknown: "+observation.Error); err != nil {
-				return err
-			}
-		}
-	}
-	if err := options.output.PrintValue(cmd.OutOrStdout(), report, historyTable(report)); err != nil {
-		return err
-	}
-	_, err = fmt.Fprintln(cmd.ErrOrStderr(), pruneHint)
-	return err
 }

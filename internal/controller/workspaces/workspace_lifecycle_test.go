@@ -244,7 +244,7 @@ func TestLifecycleRechecksExecutionsAtDeletionBoundary(t *testing.T) {
 	}).Build()
 	persisted, _ := reconcileLifecycle(t, kubeClient, now)
 	assert.True(t, persisted.DeletionTimestamp.IsZero(), "execution arrived while activity status was being persisted")
-	assert.Equal(t, 3, lists, "lifecycle boundary plus transcript obligation scan")
+	assert.Equal(t, 2, lists, "plan, then recheck at the deletion boundary")
 }
 
 func TestLifecycleDeletePreconditionProtectsConcurrentPolicyEdit(t *testing.T) {
@@ -278,7 +278,7 @@ func TestTemporaryTerminalWithoutCompletionTimeWaits(t *testing.T) {
 	workspace.Spec.RetentionPolicy = workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit
 	persisted, delay := reconcileLifecycle(t, lifecycleClient(t, workspace, lifecycleExec(workspace, workspacesv1alpha1.WorkspaceExecPhaseSucceeded)), now)
 	assert.True(t, persisted.DeletionTimestamp.IsZero())
-	assert.Equal(t, executionRetentionInterval, delay)
+	assert.Positive(t, delay, "re-check later instead of deleting without a completion time")
 }
 
 // ROOT CAUSE: a child CREATE does not change the Workspace resourceVersion.

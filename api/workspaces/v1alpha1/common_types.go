@@ -19,7 +19,6 @@ package v1alpha1
 import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
@@ -31,9 +30,6 @@ const (
 	// ConditionStorageReady reports whether the target's persistent volume claim
 	// exists, is owned by the target, and is bound.
 	ConditionStorageReady = "StorageReady"
-	// ConditionExecutionHistoryCompliant reports whether the target's
-	// WorkspaceExec history has no removals waiting for cleanup.
-	ConditionExecutionHistoryCompliant = "ExecutionHistoryCompliant"
 )
 
 // Condition reasons published by the workspaces controllers.
@@ -51,44 +47,7 @@ const (
 	// ReasonVolumeClaimConflict means the PVC is not controlled by this target
 	// incarnation or is terminating.
 	ReasonVolumeClaimConflict = "VolumeClaimConflict"
-	// ReasonWithinPolicy means ExecutionHistoryCompliant=True under a policy.
-	ReasonWithinPolicy = "WithinPolicy"
-	// ReasonPolicyUnset means ExecutionHistoryCompliant=True without a policy:
-	// history is kept until deleted explicitly.
-	ReasonPolicyUnset = "PolicyUnset"
-	// ReasonCleanupBacklog means ExecutionHistoryCompliant=False: some records
-	// are expired or deleting and still wait for cleanup.
-	ReasonCleanupBacklog = "CleanupBacklog"
 )
-
-// ExecutionHistoryStatus is the controller's view of a target's WorkspaceExec
-// history under its executionRetention policy.
-type ExecutionHistoryStatus struct {
-	// retained counts this target's WorkspaceExec records that the policy keeps,
-	// including active and pinned records.
-	// +optional
-	Retained int32 `json:"retained"`
-
-	// pendingCleanup counts records that are expired under the policy or
-	// already deleting, and still exist. Removals are bounded per pass, so a
-	// large backlog drains over several passes.
-	// +optional
-	PendingCleanup int32 `json:"pendingCleanup"`
-
-	// effectiveTTL is ttlAfterFinished after defaulting. It is empty when no
-	// policy is set.
-	// +optional
-	EffectiveTTL *metav1.Duration `json:"effectiveTTL,omitempty"`
-
-	// effectiveMaxEntries is maxEntries after defaulting. It is zero when no
-	// policy is set.
-	// +optional
-	EffectiveMaxEntries int32 `json:"effectiveMaxEntries,omitempty"`
-
-	// observedGeneration is the target generation this summary reflects.
-	// +optional
-	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
-}
 
 // LocalReference selects an rc resource in the same namespace.
 type LocalReference struct {

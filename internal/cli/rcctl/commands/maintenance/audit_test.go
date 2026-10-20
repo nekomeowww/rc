@@ -3,7 +3,6 @@ package maintenance
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,8 +17,6 @@ import (
 	"github.com/nekomeowww/rc/internal/audit"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 )
-
-const pruneCommand = "prune"
 
 type auditFixtureOptions struct {
 	edit func(map[string]json.RawMessage)
@@ -80,7 +77,7 @@ current-context: fixture
 		cmd := &cobra.Command{Use: "rcctl", SilenceErrors: true, SilenceUsage: true}
 		flags := kubeconfig.NewFlags()
 		flags.AddFlags(cmd.PersistentFlags())
-		cmd.AddCommand(newDoctorCommand(flags), newPruneCommand(flags))
+		cmd.AddCommand(newDoctorCommand(flags))
 		out := new(bytes.Buffer)
 		cmd.SetOut(out)
 		cmd.SetErr(new(bytes.Buffer))
@@ -113,83 +110,6 @@ func TestDoctorReportsEvidence(t *testing.T) {
 
 // TestPruneReportsBacklogReadOnly relies on the fixture server failing every
 // non-GET request: prune must never delete history itself.
-func TestPruneReportsBacklogReadOnly(t *testing.T) {
-	for _, tc := range []struct {
-		name, retention, history string
-		retentionState, status   string
-		pending                  *int32
-	}{
-		{"unpublished", "", "", audit.RetentionUnset, audit.HistoryStatusUnpublished, nil},
-		{"stale", "", `{"retained":3,"pendingCleanup":0,"observedGeneration":1}`, audit.RetentionUnset, audit.HistoryStatusStale, new(int32(0))},
-		{"configured", `{"ttlAfterFinished":"24h"}`, `{"retained":0,"pendingCleanup":1,"effectiveTTL":"24h0m0s","effectiveMaxEntries":100,"observedGeneration":2}`, audit.RetentionConfigured, audit.HistoryStatusCurrent, new(int32(1))},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			run := configuredAuditFixture(t, auditFixtureOptions{edit: func(responses map[string]json.RawMessage) {
-				editWorkspace(t, responses, func(workspace map[string]any) {
-					workspace["metadata"].(map[string]any)["generation"] = 2
-					if tc.retention != "" {
-						workspace["spec"].(map[string]any)["executionRetention"] = decode(t, tc.retention)
-					}
-					if tc.history != "" {
-						workspace["status"].(map[string]any)["executionHistory"] = decode(t, tc.history)
-					}
-				})
-			}})
-			out, err := run(pruneCommand, "-o", "json")
-			require.NoError(t, err)
-			var report audit.HistoryReport
-			require.NoError(t, json.Unmarshal([]byte(out), &report))
-			assert.True(t, report.Complete)
-			require.Len(t, report.Targets, 1)
-			target := report.Targets[0]
-			assert.Equal(t, "Workspace", target.Target.Kind)
-			assert.Equal(t, "dev", target.Target.Name)
-			assert.Equal(t, tc.retentionState, target.Retention)
-			assert.Equal(t, tc.status, target.Status)
-			assert.Equal(t, tc.pending, target.PendingCleanup)
-			for _, format := range [][]string{{}, {"-o", "wide"}} {
-				out, err = run(append([]string{pruneCommand}, format...)...)
-				require.NoError(t, err)
-				assert.Contains(t, out, "Workspace/audit/dev")
-				assert.Contains(t, out, tc.status)
-			}
-			out, err = run(pruneCommand, "-o", "yaml")
-			require.NoError(t, err)
-			if tc.pending != nil {
-				assert.Contains(t, out, fmt.Sprintf("pendingCleanup: %d", *tc.pending))
-			} else {
-				assert.NotContains(t, out, "pendingCleanup")
-			}
-		})
-	}
-}
-
-func TestPruneRejectsRemovedDeletionFlags(t *testing.T) {
-	run := auditFixture(t)
-	for _, flag := range []string{"--yes", "--dry-run", "--history-for=1h", "--from-plan=plan.json"} {
-		_, err := run(pruneCommand, flag)
-		require.ErrorContains(t, err, "unknown flag", flag)
-	}
-}
-
-func decode(t *testing.T, value string) any {
-	t.Helper()
-	var result any
-	require.NoError(t, json.Unmarshal([]byte(value), &result))
-	return result
-}
-
-func editWorkspace(t *testing.T, responses map[string]json.RawMessage, edit func(map[string]any)) {
-	t.Helper()
-	path := "/apis/workspaces.rc.ayaka.io/v1alpha1/namespaces/audit/workspaces"
-	var list map[string]any
-	require.NoError(t, json.Unmarshal(responses[path], &list))
-	edit(list["items"].([]any)[0].(map[string]any))
-	data, err := json.Marshal(list)
-	require.NoError(t, err)
-	responses[path] = data
-}
-
 func TestDoctorRendersMissingRuntimeAndStorage(t *testing.T) {
 	run := configuredAuditFixture(t, auditFixtureOptions{edit: func(responses map[string]json.RawMessage) {
 		for _, path := range []string{"/api/v1/namespaces/audit/pods", "/api/v1/namespaces/audit/persistentvolumeclaims"} {

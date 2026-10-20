@@ -1,7 +1,6 @@
 package maintenance
 
 import (
-	"cmp"
 	"fmt"
 	"strings"
 	"time"
@@ -85,39 +84,4 @@ func timestamp(t *metav1.Time) string {
 		return "none"
 	}
 	return t.UTC().Format(time.RFC3339)
-}
-
-func historyTable(report audit.HistoryReport) clioutput.Table {
-	table := clioutput.Table{Columns: []clioutput.Column{{Name: "TARGET"}, {Name: "RETENTION"}, {Name: "STATUS"}, {Name: "COMPLIANT"}, {Name: "RETAINED"}, {Name: "PENDING-CLEANUP"}, {Name: "POLICY", Wide: true}, {Name: "MESSAGE", Wide: true}}}
-	for _, observation := range report.Coverage {
-		if !observation.Complete {
-			table.Rows = append(table.Rows, []any{observation.Kind, audit.RetentionUnknown, "-", "-", "-", "-", "-", observation.Error})
-		}
-	}
-	for _, target := range report.Targets {
-		table.Rows = append(table.Rows, []any{objectName(target.Target), target.Retention, target.Status, cmp.Or(target.Reason, "-"), count(target.Retained), count(target.PendingCleanup), effectivePolicy(target), cmp.Or(target.Message, "-")})
-	}
-	if len(table.Rows) == 0 {
-		table.Rows = append(table.Rows, []any{"-", "no execution targets", "-", "-", "-", "-", "-", "-"})
-	}
-	return table
-}
-
-func count(value *int32) string {
-	if value == nil {
-		return "-"
-	}
-	return fmt.Sprint(*value)
-}
-
-// effectivePolicy shows the defaulted policy the controller published.
-func effectivePolicy(target audit.HistoryTarget) string {
-	if target.EffectiveTTL == nil && target.EffectiveMaxEntries == 0 {
-		return "-"
-	}
-	ttl := "-"
-	if target.EffectiveTTL != nil {
-		ttl = target.EffectiveTTL.Duration.String()
-	}
-	return fmt.Sprintf("ttlAfterFinished=%s maxEntries=%d", ttl, target.EffectiveMaxEntries)
 }

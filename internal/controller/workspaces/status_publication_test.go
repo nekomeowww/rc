@@ -13,11 +13,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
@@ -139,118 +137,6 @@ func TestRetentionPublishesSuspendedDeleteDeadline(t *testing.T) {
 	assert.Equal(t, time.Hour, delay)
 }
 
-func historyFixture(t *testing.T, policy *workspacesv1alpha1.ExecutionRetentionPolicy, executions ...*workspacesv1alpha1.WorkspaceExec) (client.WithWatch, *workspacesv1alpha1.Workspace) {
-	t.Helper()
-	scheme := runtime.NewScheme()
-	require.NoError(t, corev1.AddToScheme(scheme))
-	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
-	ws := &workspacesv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "history", Namespace: testNamespace, UID: "history-uid", Generation: 3}, Spec: workspacesv1alpha1.WorkspaceSpec{ExecutionRetention: policy}}
-	objects := make([]client.Object, 0, 1+len(executions))
-	objects = append(objects, ws)
-	for _, execution := range executions {
-		execution.Namespace = testNamespace
-		execution.Spec.TargetRef = executionTargetReference(ws)
-		require.NoError(t, controllerutil.SetControllerReference(ws, execution, scheme))
-		objects = append(objects, execution)
-	}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).WithStatusSubresource(ws, &workspacesv1alpha1.WorkspaceExec{}).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
-	return kube, ws
-}
-
-func historyExec(name string, completed time.Time) *workspacesv1alpha1.WorkspaceExec {
-	done := metav1.NewTime(completed)
-	return &workspacesv1alpha1.WorkspaceExec{ObjectMeta: metav1.ObjectMeta{Name: name, UID: types.UID(name)}, Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseSucceeded, CompletedAt: &done}}
-}
-
-// publishHistory runs one planning pass and publication, as reconcileTarget does.
-func publishHistory(t *testing.T, kube client.Client, ws *workspacesv1alpha1.Workspace) {
-	t.Helper()
-	r := &executionRetentionService{Client: kube, APIReader: kube}
-	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(ws), ws))
-	summary, err := r.pruneExecutionHistory(t.Context(), ws.Namespace, executionTargetReference(ws), ws.UID, ws.Spec.ExecutionRetention)
-	require.NoError(t, err)
-	require.NoError(t, r.publishExecutionHistory(t.Context(), ws, ws.Spec.ExecutionRetention, summary))
-}
-
-func TestExecutionHistoryPublishesBacklogUntilDrained(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	policy := &workspacesv1alpha1.ExecutionRetentionPolicy{TTLAfterFinished: &metav1.Duration{Duration: 24 * time.Hour}}
-	kube, ws := historyFixture(t, policy, historyExec("expired", now.Add(-48*time.Hour)), historyExec("recent", now.Add(-time.Hour)))
-	publishHistory(t, kube, ws)
-	assert.Equal(t, &workspacesv1alpha1.ExecutionHistoryStatus{
-		Retained: 1, PendingCleanup: 1, EffectiveTTL: &metav1.Duration{Duration: 24 * time.Hour},
-		EffectiveMaxEntries: 15000, ObservedGeneration: 3,
-	}, ws.Status.ExecutionHistory)
-	condition := meta.FindStatusCondition(ws.Status.Conditions, workspacesv1alpha1.ConditionExecutionHistoryCompliant)
-	require.NotNil(t, condition)
-	assert.Equal(t, metav1.ConditionFalse, condition.Status)
-	assert.Equal(t, workspacesv1alpha1.ReasonCleanupBacklog, condition.Reason)
-	assert.Equal(t, int64(3), condition.ObservedGeneration)
-
-	// The requested deletion still waits on the execution finalizer: unchanged.
-	writes := 0
-	publishHistory(t, countStatusWrites(kube, &writes), ws)
-	assert.Zero(t, writes, "no patch when the summary is unchanged")
-
-	expired := new(workspacesv1alpha1.WorkspaceExec)
-	require.NoError(t, kube.Get(t.Context(), client.ObjectKey{Namespace: testNamespace, Name: "expired"}, expired))
-	require.False(t, expired.DeletionTimestamp.IsZero())
-	expired.Finalizers = nil
-	require.NoError(t, kube.Update(t.Context(), expired))
-	publishHistory(t, kube, ws)
-	assert.Equal(t, int32(1), ws.Status.ExecutionHistory.Retained)
-	assert.Zero(t, ws.Status.ExecutionHistory.PendingCleanup)
-	condition = meta.FindStatusCondition(ws.Status.Conditions, workspacesv1alpha1.ConditionExecutionHistoryCompliant)
-	assert.Equal(t, metav1.ConditionTrue, condition.Status)
-	assert.Equal(t, workspacesv1alpha1.ReasonWithinPolicy, condition.Reason)
-}
-
-func TestExecutionHistoryWithoutPolicyAndForTemporaryWorkspace(t *testing.T) {
-	t.Parallel()
-	kube, ws := historyFixture(t, nil, historyExec("kept", time.Now().Add(-365*24*time.Hour)))
-	publishHistory(t, kube, ws)
-	assert.Equal(t, &workspacesv1alpha1.ExecutionHistoryStatus{Retained: 1, ObservedGeneration: 3}, ws.Status.ExecutionHistory)
-	condition := meta.FindStatusCondition(ws.Status.Conditions, workspacesv1alpha1.ConditionExecutionHistoryCompliant)
-	require.NotNil(t, condition)
-	assert.Equal(t, metav1.ConditionTrue, condition.Status)
-	assert.Equal(t, workspacesv1alpha1.ReasonPolicyUnset, condition.Reason)
-
-	// A temporary Workspace has a whole-target lifecycle and no history status.
-	ws.Spec.RetentionPolicy = workspacesv1alpha1.WorkspaceRetentionPolicyDeleteAfterProcessesExit
-	require.NoError(t, kube.Update(t.Context(), ws))
-	_, err := (&executionRetentionService{Client: kube, APIReader: kube}).reconcileTarget(t.Context(), ws)
-	require.NoError(t, err)
-	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(ws), ws))
-	assert.Nil(t, ws.Status.ExecutionHistory)
-	assert.Nil(t, meta.FindStatusCondition(ws.Status.Conditions, workspacesv1alpha1.ConditionExecutionHistoryCompliant))
-}
-
-func TestEnvironmentRetentionPublishesExecutionHistory(t *testing.T) {
-	t.Parallel()
-	scheme := runtime.NewScheme()
-	require.NoError(t, corev1.AddToScheme(scheme))
-	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
-	environment := &workspacesv1alpha1.WorkspaceEnvironment{
-		ObjectMeta: metav1.ObjectMeta{Name: "history-env", Namespace: testNamespace, UID: "history-env-uid", Generation: 2},
-		Spec:       workspacesv1alpha1.WorkspaceEnvironmentSpec{ExecutionRetention: &workspacesv1alpha1.ExecutionRetentionPolicy{MaxEntries: 5}},
-	}
-	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(environment).WithStatusSubresource(environment).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).Build()
-	request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(environment)}
-	_, err := (&WorkspaceEnvironmentRetentionReconciler{Client: base, APIReader: base}).Reconcile(t.Context(), request)
-	require.NoError(t, err)
-	require.NoError(t, base.Get(t.Context(), request.NamespacedName, environment))
-	require.NotNil(t, environment.Status.ExecutionHistory)
-	assert.Equal(t, int32(5), environment.Status.ExecutionHistory.EffectiveMaxEntries)
-	assert.True(t, meta.IsStatusConditionTrue(environment.Status.Conditions, workspacesv1alpha1.WorkspaceEnvironmentConditionExecutionHistoryCompliant))
-
-	writes := 0
-	kube := countStatusWrites(base, &writes)
-	_, err = (&WorkspaceEnvironmentRetentionReconciler{Client: kube, APIReader: kube}).Reconcile(t.Context(), request)
-	require.NoError(t, err)
-	assert.Zero(t, writes)
-}
-
 func TestWorkspaceStorageReadyReportsBoundLostAndConflict(t *testing.T) {
 	t.Parallel()
 	fixture := newRuntimeRecoveryFixture(t)
@@ -300,7 +186,7 @@ func TestWorkspaceDeletionBlockedNamesBlockers(t *testing.T) {
 	fixture := newRuntimeRecoveryFixture(t)
 	execution := &workspacesv1alpha1.WorkspaceExec{
 		ObjectMeta: metav1.ObjectMeta{Name: "still-running", Namespace: fixture.workspace.Namespace},
-		Spec:       workspacesv1alpha1.WorkspaceExecSpec{TargetRef: executionTargetReference(fixture.workspace), Command: []string{testTrueValue}},
+		Spec:       workspacesv1alpha1.WorkspaceExecSpec{TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: fixture.workspace.Name}, Command: []string{testTrueValue}},
 		Status:     workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseRunning},
 	}
 	require.NoError(t, fixture.client.Create(fixture.ctx, execution))

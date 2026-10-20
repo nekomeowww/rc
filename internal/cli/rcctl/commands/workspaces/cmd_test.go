@@ -129,8 +129,7 @@ func TestWorkspaceDetailShowsPublishedLifecycle(t *testing.T) {
 	t.Parallel()
 	deleteAt := metav1.NewTime(time.Date(2026, time.October, 7, 12, 0, 0, 0, time.UTC))
 	workspace := &workspacesv1alpha1.Workspace{Status: workspacesv1alpha1.WorkspaceStatus{
-		Lifecycle:        &workspacesv1alpha1.WorkspaceLifecycleStatus{DeleteAt: &deleteAt, ActiveExecutions: 2},
-		ExecutionHistory: &workspacesv1alpha1.ExecutionHistoryStatus{Retained: 4, PendingCleanup: 1},
+		Lifecycle: &workspacesv1alpha1.WorkspaceLifecycleStatus{DeleteAt: &deleteAt, ActiveExecutions: 2},
 	}}
 
 	fields := workspaceDetailFields(workspace)
@@ -138,7 +137,6 @@ func TestWorkspaceDetailShowsPublishedLifecycle(t *testing.T) {
 	assert.Contains(t, fields, clioutput.Field{Name: "Active executions", Value: int32(2)}, "show the controller's active count")
 	assert.Contains(t, fields, clioutput.Field{Name: "Delete at", Value: clioutput.Timestamp(deleteAt)}, "show the published deadline")
 	assert.Contains(t, fields, clioutput.Field{Name: "Idle suspend at", Value: "-"}, "show an absent deadline")
-	assert.Contains(t, fields, clioutput.Field{Name: "Execution history", Value: "4 retained, 1 pending cleanup"}, "show the history backlog")
 }
 
 func TestWorkspaceCreateNPMRegistryWritesWorkspaceEnvironment(t *testing.T) {

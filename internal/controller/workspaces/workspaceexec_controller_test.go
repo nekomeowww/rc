@@ -460,22 +460,9 @@ func TestDeletingActiveWorkspaceExecStopsOriginalRuntimeBeforeRemovingFinalizer(
 			requirements.NoError(err, "stop runtime while finalizing WorkspaceExec")
 			requirements.Equal(process.Name, runtimeClient.stoppedID, "stop the UID-bound process")
 			requirements.Equal(pod.Name, runtimeClient.stoppedTarget.Pod, "stop the original runtime Pod")
-			err = kubeClient.Get(ctx, key, process)
-			requirements.NoError(err, "CR remains until the target service acknowledges transcript cleanup")
-			requirements.True(transcriptRequested(process))
-			requirements.Equal(workspacesv1alpha1.WorkspaceExecPhaseStopped, process.Status.Phase)
-			requirements.NotNil(process.Status.CompletedAt)
-			setTranscriptCondition(process, metav1.ConditionTrue, "TranscriptDeleted", "test cleanup acknowledgement")
-			requirements.NoError(kubeClient.Status().Update(ctx, process))
-			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
-			requirements.NoError(err)
-			requirements.True(apierrors.IsNotFound(kubeClient.Get(ctx, key, process)))
+			requirements.True(apierrors.IsNotFound(kubeClient.Get(ctx, key, process)), "deletion waits for the stop, not for transcript cleanup")
 			requirements.NoError(kubeClient.Get(ctx, client.ObjectKeyFromObject(workspace), workspace))
 			requirements.NotNil(workspace.Status.LastExecutionCompletedAt)
 		})
 	}
-}
-
-func (processRuntime *recordingProcessRuntime) PruneTranscript(context.Context, processruntime.Target, string, string) error {
-	return nil
 }

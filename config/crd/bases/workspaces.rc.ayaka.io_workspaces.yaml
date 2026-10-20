@@ -1226,23 +1226,23 @@ spec:
                 properties:
                   maxEntries:
                     default: 15000
-                    description: maxEntries keeps at most this many unpinned terminal
-                      records per target.
+                    description: maxEntries keeps at most this many finished processes
+                      per target.
                     format: int32
                     minimum: 1
                     type: integer
                   transcriptTTL:
                     default: 336h
                     description: |-
-                      transcriptTTL removes transcripts before their execution records when due.
-                      Record deletion always removes its transcript, even when this TTL is longer.
+                      transcriptTTL removes a finished process's transcript earlier than its
+                      record. Removing the record also removes the transcript.
                     type: string
                     x-kubernetes-validations:
                     - message: transcript TTL must be positive
                       rule: duration(self) > duration('0s')
                   ttlAfterFinished:
                     default: 2160h
-                    description: ttlAfterFinished is measured from completedAt, never
+                    description: ttlAfterFinished is measured from completion, never
                       creation or start time.
                     type: string
                     x-kubernetes-validations:
@@ -1650,41 +1650,6 @@ spec:
                   deletion. Only the controllers manage this field. It survives restarts and
                   is reopened when deletion is cancelled; it never expires on a wall clock.
                 type: boolean
-              executionHistory:
-                description: |-
-                  executionHistory summarizes WorkspaceExec history under
-                  spec.executionRetention. It is empty for temporary Workspaces.
-                properties:
-                  effectiveMaxEntries:
-                    description: |-
-                      effectiveMaxEntries is maxEntries after defaulting. It is zero when no
-                      policy is set.
-                    format: int32
-                    type: integer
-                  effectiveTTL:
-                    description: |-
-                      effectiveTTL is ttlAfterFinished after defaulting. It is empty when no
-                      policy is set.
-                    type: string
-                  observedGeneration:
-                    description: observedGeneration is the target generation this
-                      summary reflects.
-                    format: int64
-                    type: integer
-                  pendingCleanup:
-                    description: |-
-                      pendingCleanup counts records that are expired under the policy or
-                      already deleting, and still exist. Removals are bounded per pass, so a
-                      large backlog drains over several passes.
-                    format: int32
-                    type: integer
-                  retained:
-                    description: |-
-                      retained counts this target's WorkspaceExec records that the policy keeps,
-                      including active and pinned records.
-                    format: int32
-                    type: integer
-                type: object
               homeVolumeClaimName:
                 description: |-
                   homeVolumeClaimName contains mutable Workspace home state and transcripts.

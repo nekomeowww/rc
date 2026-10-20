@@ -80,7 +80,14 @@ type WorkspaceExecReconciler struct {
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
 	Runtime   processruntime.Runtime
+	// Now allows deterministic result-window tests; defaults to time.Now.
+	Now func() time.Time
 }
+
+// executionResultWindow keeps a terminal record long enough for its caller to
+// read the result. Afterwards the process exists only in its supervisor's
+// history.
+const executionResultWindow = 10 * time.Minute
 
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaceexecs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaceexecs/status,verbs=get;update;patch
@@ -292,7 +299,11 @@ func (r *WorkspaceExecReconciler) handleWorkspaceExecLifecycle(ctx context.Conte
 			if err := r.releaseProcessEnvironment(ctx, process); err != nil {
 				return ctrl.Result{}, true, err
 			}
-			return ctrl.Result{}, true, r.ensureExecutionCompletedAt(ctx, process)
+			if err := r.ensureExecutionCompletedAt(ctx, process); err != nil {
+				return ctrl.Result{}, true, err
+			}
+			result, err := r.expireExecution(ctx, process)
+			return result, true, err
 		}
 		return ctrl.Result{}, false, nil
 	}
@@ -339,13 +350,6 @@ func (r *WorkspaceExecReconciler) finalizeWorkspaceExec(ctx context.Context, pro
 			return ctrl.Result{}, err
 		}
 	}
-	done, err := r.requestTranscriptCleanup(ctx, process)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if !done {
-		return ctrl.Result{RequeueAfter: processTargetRequeueDelay}, nil
-	}
 	if err := r.preserveTargetIdleClock(ctx, process); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -353,6 +357,25 @@ func (r *WorkspaceExecReconciler) finalizeWorkspaceExec(ctx context.Context, pro
 	if err := r.Update(ctx, process); err != nil {
 		return ctrl.Result{}, fmt.Errorf("remove WorkspaceExec finalizer: %w", err)
 	}
+
+	return ctrl.Result{}, nil
+}
+
+// expireExecution deletes a terminal record once its result window ends. The
+// finalizer then preserves the target's idle clock. The supervisor keeps the
+// process record and transcript under its own retention.
+func (r *WorkspaceExecReconciler) expireExecution(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) (ctrl.Result, error) {
+	now := time.Now()
+	if r.Now != nil {
+		now = r.Now()
+	}
+	if remaining := process.Status.CompletedAt.Add(executionResultWindow).Sub(now); remaining > 0 {
+		return ctrl.Result{RequeueAfter: remaining}, nil
+	}
+	if err := r.Delete(ctx, process, client.Preconditions{UID: &process.UID}); client.IgnoreNotFound(err) != nil {
+		return ctrl.Result{}, fmt.Errorf("delete expired WorkspaceExec: %w", err)
+	}
+	logf.FromContext(ctx).Info("Deleted finished WorkspaceExec", "name", process.Name)
 
 	return ctrl.Result{}, nil
 }
@@ -739,9 +762,6 @@ func (r *WorkspaceExecReconciler) claimProcessRuntime(ctx context.Context, key t
 	}
 	if current.Status.Phase.Terminal() || (current.Status.RuntimePodUID != "" && current.Status.RuntimePodUID != target.podUID) {
 		return fmt.Errorf("WorkspaceExec runtime claim changed before start")
-	}
-	if err := r.bindTranscriptVolume(ctx, current, target); err != nil {
-		return err
 	}
 	current.Status.TranscriptPath = path.Join(".rc", "processes", current.Name, "transcript.log")
 	current.Status.ObservedGeneration = current.Generation

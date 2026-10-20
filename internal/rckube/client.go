@@ -50,6 +50,12 @@ func (client *Client) Stop(ctx context.Context, id string) (processruntime.State
 	return client.stateRequest(ctx, protocolRequest{Action: "stop", ID: id})
 }
 
+// PruneHistory applies a retention policy to finished process records.
+func (client *Client) PruneHistory(ctx context.Context, policy processruntime.HistoryPolicy) error {
+	_, err := client.stateRequest(ctx, protocolRequest{Action: "prune-history", History: &policy})
+	return err
+}
+
 // List returns every process the supervisor has recorded, newest first.
 func (client *Client) List(ctx context.Context) ([]processruntime.HistoryEntry, error) {
 	connection, _, response, err := client.open(ctx, protocolRequest{Action: "list"})
@@ -168,11 +174,5 @@ func responseError(response protocolResponse) error {
 // Ping verifies that initialization finished and the supervisor accepts requests.
 func (client *Client) Ping(ctx context.Context) error {
 	_, err := client.stateRequest(ctx, protocolRequest{Action: "ping"})
-	return err
-}
-
-// PruneTranscript removes a terminal transcript through the supervisor lock.
-func (client *Client) PruneTranscript(ctx context.Context, id, uid string) error {
-	_, err := client.stateRequest(ctx, protocolRequest{Action: "prune", ID: id, UID: uid})
 	return err
 }

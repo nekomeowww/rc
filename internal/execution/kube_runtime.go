@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 )
 
@@ -123,6 +124,18 @@ func (runtime *KubeRuntime) stateCommand(ctx context.Context, target Target, com
 	return state, nil
 }
 
+// PruneHistory applies a retention policy to the target supervisor's finished
+// process records.
+func (runtime *KubeRuntime) PruneHistory(ctx context.Context, target Target, policy HistoryPolicy) error {
+	command := bridgeCommand(target, "prune-history",
+		"--ttl-after-finished", policy.TTLAfterFinished.String(),
+		"--max-entries", strconv.Itoa(policy.MaxEntries),
+		"--transcript-ttl", policy.TranscriptTTL.String(),
+	)
+	_, err := runtime.stateCommand(ctx, target, command, nil)
+	return err
+}
+
 // List returns every process the target supervisor has recorded, newest first.
 func (runtime *KubeRuntime) List(ctx context.Context, target Target) ([]HistoryEntry, error) {
 	stdout := new(bytes.Buffer)
@@ -139,10 +152,4 @@ func (runtime *KubeRuntime) List(ctx context.Context, target Target) ([]HistoryE
 	}
 
 	return entries, nil
-}
-
-// PruneTranscript requests UID-checked, idempotent terminal transcript cleanup.
-func (runtime *KubeRuntime) PruneTranscript(ctx context.Context, target Target, id, uid string) error {
-	_, err := runtime.stateCommand(ctx, target, bridgeCommand(target, "prune", id, "--uid", uid), nil)
-	return err
 }

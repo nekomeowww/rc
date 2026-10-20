@@ -128,12 +128,7 @@ func (runtime *KubeRuntime) List(ctx context.Context, target Target) ([]HistoryE
 	stdout := new(bytes.Buffer)
 	stderr := new(bytes.Buffer)
 	if err := runtime.executor.Exec(ctx, target, bridgeCommand(target, "list"), nil, stdout, stderr, false); err != nil {
-		message := strings.TrimSpace(stderr.String())
-		// An older bridge lacks the subcommand; an older supervisor lacks the action.
-		if strings.Contains(message, `unknown command "list"`) || strings.Contains(message, "unknown action") {
-			return nil, fmt.Errorf("%w: %s", ErrHistoryUnsupported, message)
-		}
-		if message != "" {
+		if message := strings.TrimSpace(stderr.String()); message != "" {
 			return nil, fmt.Errorf("exec rc-kube bridge: %w: %s", err, message)
 		}
 		return nil, fmt.Errorf("exec rc-kube bridge: %w", err)

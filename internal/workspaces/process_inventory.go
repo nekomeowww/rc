@@ -88,8 +88,7 @@ func (warning InventoryWarning) Error() string {
 
 // ProcessInventory lists processes by asking the supervisor of every running
 // Workspace and WorkspaceEnvironment, like ps on each machine. It reads no
-// WorkspaceExec, except as a fallback for a runner image that predates history.
-// A stopped machine has no processes to list.
+// WorkspaceExec. A stopped machine has no processes to list.
 type ProcessInventory struct {
 	Kube    client.Client
 	History HistoryLister
@@ -253,15 +252,6 @@ func (inventory *ProcessInventory) listTarget(ctx context.Context, target invent
 	listContext, cancel := context.WithTimeout(ctx, inventoryTimeout)
 	defer cancel()
 	entries, err := inventory.History.List(listContext, target.runtime)
-	if errors.Is(err, processruntime.ErrHistoryUnsupported) {
-		// Transitional: until its runner image is updated, the target's own
-		// WorkspaceExec records are the only source of its processes.
-		processes, fallbackErr := inventory.recordedProcesses(ctx, target.InventoryTarget)
-		if fallbackErr != nil {
-			return nil, fallbackErr
-		}
-		return processes, fmt.Errorf("%w; update its runner image to list processes from the supervisor", processruntime.ErrHistoryUnsupported)
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -271,56 +261,6 @@ func (inventory *ProcessInventory) listTarget(ctx context.Context, target invent
 	}
 
 	return processes, nil
-}
-
-func (inventory *ProcessInventory) recordedProcesses(ctx context.Context, target InventoryTarget) ([]InventoryProcess, error) {
-	list := new(workspacesv1alpha1.WorkspaceExecList)
-	if err := inventory.Kube.List(ctx, list, client.InNamespace(target.Namespace), client.MatchingFields{"spec.targetRef.name": target.Name}); err != nil {
-		return nil, fmt.Errorf("list WorkspaceExecs: %w", err)
-	}
-	processes := make([]InventoryProcess, 0, len(list.Items))
-	for _, record := range list.Items {
-		if record.Spec.TargetRef.Kind != target.Kind {
-			continue
-		}
-		processes = append(processes, recordedProcess(target, &record))
-	}
-
-	return processes, nil
-}
-
-// recordedProcess presents a WorkspaceExec record in the supervisor's terms.
-func recordedProcess(target InventoryTarget, record *workspacesv1alpha1.WorkspaceExec) InventoryProcess {
-	phase := string(record.Status.Phase)
-	switch record.Status.Phase {
-	case workspacesv1alpha1.WorkspaceExecPhaseSucceeded, workspacesv1alpha1.WorkspaceExecPhaseFailed:
-		phase = supervisorPhaseExited
-	case "":
-		phase = string(workspacesv1alpha1.WorkspaceExecPhasePending)
-	}
-	entry := processruntime.HistoryEntry{
-		State: processruntime.State{
-			ID:              record.Name,
-			UID:             string(record.UID),
-			Phase:           phase,
-			ExitCode:        record.Status.ExitCode,
-			Reason:          record.Status.TerminationReason,
-			AttachedClients: record.Status.AttachedClients,
-		},
-		Command:          record.Spec.Command,
-		WorkingDirectory: record.Spec.WorkingDirectory,
-		TTY:              record.Spec.TTY,
-	}
-	if record.Status.StartedAt != nil {
-		entry.StartedAt = &record.Status.StartedAt.Time
-	} else {
-		entry.StartedAt = &record.CreationTimestamp.Time
-	}
-	if record.Status.CompletedAt != nil {
-		entry.CompletedAt = &record.Status.CompletedAt.Time
-	}
-
-	return InventoryProcess{Target: target, HistoryEntry: entry, Agent: record.Spec.AgentType}
 }
 
 func agentForCommand(command []string) string {

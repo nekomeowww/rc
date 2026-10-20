@@ -90,10 +90,9 @@ not a failure. `inspect` and `logs` read the WorkspaceExec while it exists and
 otherwise find the process in this inventory. Callers already need
 `pods/exec` for `attach` and live `logs`, so permissions do not change.
 
-rc-kube ships in each target's runner image. Until a target runs an image with
-history, its supervisor answers `list` with an unknown command or action, and
-`ps` falls back to that target's WorkspaceExecs with a warning to update the
-image. The fallback is removed once those images are gone.
+rc is experimental, so the change keeps no compatibility path. rc-kube ships in
+each target's runner image; a target on an older image cannot answer `list`
+and appears only as a warning until its image is updated.
 
 **The supervisor applies retention.** `spec.executionRetention` now configures
 the supervisor and is enabled by default:
@@ -132,11 +131,9 @@ Each stage is deployable alone.
    at 4: a new client sends `list` to an old supervisor and receives
    `unknown action`.
 2. **Read history from the supervisor.** `ps` aggregates every running
-   supervisor and reads no WorkspaceExec, except the transitional fallback for
-   old runner images. `inspect` and `logs` fall back to the inventory when no
-   WorkspaceExec matches.
+   supervisor and reads no WorkspaceExec. `inspect` and `logs` fall back to the
+   inventory when no WorkspaceExec matches.
 3. **Delete terminal records.** The controller passes `executionRetention` to
    rc-kube, deletes terminal WorkspaceExecs after the result window, and removes
-   the CR-based retention machinery. Before deleting an existing terminal
-   record on a running target, the controller asks rc-kube to write its
-   `record.json`; records on stopped targets are deleted without history.
+   the CR-based retention machinery. Existing terminal records are deleted
+   without migrating them into supervisor history.

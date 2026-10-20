@@ -76,15 +76,10 @@ func inventoryFixture(t *testing.T, history podHistory) *ProcessInventory {
 	}
 	pending := running("pending-pod")
 	pending.Status.Phase = corev1.PodPending
-	created := metav1.NewTime(time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC))
 	objects := []client.Object{
 		&workspacesv1alpha1.Workspace{
 			ObjectMeta: metav1.ObjectMeta{Name: testInventoryWorkspace, Namespace: testInventoryNamespace},
 			Status:     workspacesv1alpha1.WorkspaceStatus{RuntimePodName: "coding-pod"},
-		},
-		&workspacesv1alpha1.Workspace{
-			ObjectMeta: metav1.ObjectMeta{Name: "legacy", Namespace: testInventoryNamespace},
-			Status:     workspacesv1alpha1.WorkspaceStatus{RuntimePodName: "legacy-pod"},
 		},
 		&workspacesv1alpha1.Workspace{
 			ObjectMeta: metav1.ObjectMeta{Name: "broken", Namespace: testInventoryNamespace},
@@ -100,24 +95,19 @@ func inventoryFixture(t *testing.T, history podHistory) *ProcessInventory {
 			Status:     workspacesv1alpha1.WorkspaceEnvironmentStatus{EditorPodName: "editor-pod"},
 		},
 		&workspacesv1alpha1.WorkspaceExec{
-			ObjectMeta: metav1.ObjectMeta{Name: "legacy-running", Namespace: testInventoryNamespace, CreationTimestamp: created},
+			ObjectMeta: metav1.ObjectMeta{Name: "record-only", Namespace: testInventoryNamespace},
 			Spec: workspacesv1alpha1.WorkspaceExecSpec{
-				TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: "legacy"},
+				TargetRef: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: testInventoryWorkspace},
 				Command:   []string{"sleep", "60"},
 			},
 			Status: workspacesv1alpha1.WorkspaceExecStatus{Phase: workspacesv1alpha1.WorkspaceExecPhaseRunning},
 		},
 		running("coding-pod"),
-		running("legacy-pod"),
 		running("broken-pod"),
 		running("editor-pod"),
 		pending,
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).
-		WithIndex(&workspacesv1alpha1.WorkspaceExec{}, "spec.targetRef.name", func(object client.Object) []string {
-			return []string{object.(*workspacesv1alpha1.WorkspaceExec).Spec.TargetRef.Name}
-		}).
-		Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 
 	return &ProcessInventory{Kube: kubeClient, History: history}
 }
@@ -137,7 +127,6 @@ func TestProcessInventoryAggregatesRunningSupervisors(t *testing.T) {
 		"editor-pod": {entries: []processruntime.HistoryEntry{
 			historyEntry("process-setup", "Stopped", nil, base.Add(3*time.Minute), "sh"),
 		}},
-		"legacy-pod": {err: processruntime.ErrHistoryUnsupported},
 		"broken-pod": {err: errors.New("container not ready")},
 	})
 
@@ -148,17 +137,14 @@ func TestProcessInventoryAggregatesRunningSupervisors(t *testing.T) {
 	for _, process := range processes {
 		ids = append(ids, process.ID)
 	}
-	assertions.Equal([]string{"legacy-running", "process-test", "codex-task", "process-server", "process-setup"}, ids, "oldest start first across machines")
-	assertions.Equal("Failed", processes[1].DisplayPhase())
-	assertions.Equal("Succeeded", processes[2].DisplayPhase())
-	assertions.Equal("codex", processes[2].Agent, "derive the agent from the command")
-	assertions.Equal(workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment, processes[4].Target.Kind)
-	assertions.Equal("Running", processes[0].DisplayPhase(), "fall back to records for an old runner image")
+	assertions.Equal([]string{"process-test", "codex-task", "process-server", "process-setup"}, ids, "oldest start first across machines; never WorkspaceExec records")
+	assertions.Equal("Failed", processes[0].DisplayPhase())
+	assertions.Equal("Succeeded", processes[1].DisplayPhase())
+	assertions.Equal("codex", processes[1].Agent, "derive the agent from the command")
+	assertions.Equal(workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment, processes[3].Target.Kind)
 
-	requirements.Len(warnings, 2)
+	requirements.Len(warnings, 1)
 	assertions.Equal("broken", warnings[0].Target.Name)
-	assertions.Equal("legacy", warnings[1].Target.Name)
-	assertions.ErrorIs(warnings[1].Err, processruntime.ErrHistoryUnsupported)
 
 	only, _, err := inventory.List(t.Context(), InventoryRequest{Namespace: testInventoryNamespace, Workspace: testInventoryWorkspace})
 	requirements.NoError(err)

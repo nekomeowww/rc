@@ -25,10 +25,6 @@ import (
 // ErrNotFound reports that the original supervisor process no longer exists.
 var ErrNotFound = errors.New("process not found")
 
-// ErrHistoryUnsupported reports a supervisor from a runner image that predates
-// process history. Updating the target's runner image adds it.
-var ErrHistoryUnsupported = errors.New("runtime does not report process history")
-
 // Target identifies one rc-kube supervisor Pod.
 type Target struct {
 	Namespace  string

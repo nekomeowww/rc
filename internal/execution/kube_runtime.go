@@ -67,18 +67,28 @@ func (runtime *KubeRuntime) Stop(ctx context.Context, target Target, id string) 
 	return runtime.stateCommand(ctx, target, bridgeCommand(target, "stop", id), nil)
 }
 
-func (runtime *KubeRuntime) Attach(ctx context.Context, target Target, id string, clientID string, input io.Reader, output io.Writer, _ bool, rows uint16, columns uint16) error {
+// Attach connects input and output to a process. Process output arrives on
+// output; errors of the bridge itself arrive on errorOutput.
+func (runtime *KubeRuntime) Attach(ctx context.Context, target Target, id string, clientID string, input io.Reader, output, errorOutput io.Writer, options AttachOptions) error {
 	// The child owns the PTY. The Kubernetes exec bridge stays a transparent
 	// byte stream so it does not introduce a second terminal line discipline.
 	command := append(bridgeCommand(target, "attach", id), runtimeClientIDFlag, clientID)
-	if rows > 0 && columns > 0 {
-		command = append(command, "--rows", fmt.Sprint(rows), "--columns", fmt.Sprint(columns))
+	if options.Rows > 0 && options.Columns > 0 {
+		command = append(command, "--rows", fmt.Sprint(options.Rows), "--columns", fmt.Sprint(options.Columns))
 	}
-	return runtime.executor.Exec(ctx, target, command, input, output, output, false)
+	if options.Lossless {
+		command = append(command, "--lossless")
+	}
+	if options.CloseInputOnEOF {
+		command = append(command, "--close-input-on-eof")
+	}
+	return runtime.executor.Exec(ctx, target, command, input, output, errorOutput, false)
 }
 
-func (runtime *KubeRuntime) Logs(ctx context.Context, target Target, id string, output io.Writer) error {
-	return runtime.executor.Exec(ctx, target, bridgeCommand(target, "logs", id), nil, output, output, false)
+// Logs streams a process transcript to output. Errors of the bridge itself
+// arrive on errorOutput.
+func (runtime *KubeRuntime) Logs(ctx context.Context, target Target, id string, output, errorOutput io.Writer) error {
+	return runtime.executor.Exec(ctx, target, bridgeCommand(target, "logs", id), nil, output, errorOutput, false)
 }
 
 func (runtime *KubeRuntime) Resize(ctx context.Context, target Target, id string, clientID string, rows uint16, columns uint16) error {

@@ -396,7 +396,12 @@ requires it.
 
 Both `run` and `exec WORKSPACE` wait for completion and return the command's
 exit code by default. Use `-it` for an interactive terminal or `-d` to detach.
-Each command creates a `WorkspaceExec`, so you can inspect and reconnect
+Without `-i`, the command reads end of file on standard input; with `-i`,
+piped input reaches it and its end closes the command's input, so
+`tar c dir | rcctl exec -i dev -- tar x` works. Output reaches a foreground
+`run` or `exec` in full, with the command waiting for a slow terminal, except
+that more than 64 MiB written before rcctl attaches is cut off with an error;
+use `rcctl cp` for files. Each command creates a `WorkspaceExec`, so you can inspect and reconnect
 independently of the original terminal. `ps` asks the supervisor of every
 running Workspace and WorkspaceEnvironment, like `ps` on each machine: a stopped
 Workspace, or a command that has not started yet, lists no processes. A finished

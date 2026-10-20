@@ -48,6 +48,11 @@ func (attempt *processStart) launchLocked(ctx context.Context, request processru
 	}
 	process.native = native
 	process.input = native.Input()
+	if !request.TTY && !request.Stdin {
+		// Like a process started without -i, read end of file at once rather
+		// than wait forever on input that no client will send.
+		_ = process.closeInputLocked()
+	}
 	if native.Terminal() {
 		process.terminal = native
 	}

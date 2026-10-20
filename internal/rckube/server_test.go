@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -101,11 +102,11 @@ func TestSupervisorSupportsConcurrentReadOnlyAttaches(t *testing.T) {
 	wait.Add(2)
 	go func() {
 		defer wait.Done()
-		_ = supervisor.Attach(context.Background(), request.ID, "first", nil, &first, 0, 0)
+		_ = supervisor.Attach(context.Background(), request.ID, "first", nil, &first, processruntime.AttachOptions{})
 	}()
 	go func() {
 		defer wait.Done()
-		_ = supervisor.Attach(context.Background(), request.ID, "second", nil, &second, 0, 0)
+		_ = supervisor.Attach(context.Background(), request.ID, "second", nil, &second, processruntime.AttachOptions{})
 	}()
 	wait.Wait()
 	assertions.Equal("shared", first.String(), "first client receives terminal output")
@@ -198,4 +199,89 @@ func TestClientCancellationInterruptsResponseRead(t *testing.T) {
 	err = NewClient(address).Ping(ctx)
 	require.NoError(t, <-done, "complete the peer's request handling")
 	require.ErrorIs(t, err, context.Canceled, "cancellation must interrupt reads after dialing")
+}
+
+func startTestServer(t *testing.T, options ...SupervisorOption) (*Supervisor, *Client) {
+	t.Helper()
+	socketFile, err := os.CreateTemp("/tmp", "rc-kube-*.sock")
+	require.NoError(t, err)
+	socketPath := socketFile.Name()
+	require.NoError(t, socketFile.Close())
+	require.NoError(t, os.Remove(socketPath))
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+	supervisor := newTestSupervisor(t, t.TempDir(), 100*time.Millisecond, options...)
+	go func() { _ = NewServer(supervisor).Serve(t.Context(), socketPath) }()
+	client := NewClient(socketPath)
+	require.Eventually(t, func() bool { return client.Ping(context.Background()) == nil }, time.Second, 10*time.Millisecond)
+
+	return supervisor, client
+}
+
+func TestProcessWithoutStdinReadsEndOfFile(t *testing.T) {
+	t.Parallel()
+	supervisor, client := startTestServer(t)
+	request := processruntime.StartRequest{ID: "no-stdin", UID: testProcessUID, Command: []string{"sh", "-c", "cat; echo finished"}}
+	_, err := client.Start(t.Context(), request)
+	require.NoError(t, err)
+	waitForExit(t, supervisor, request.ID)
+	var transcript bytes.Buffer
+	require.NoError(t, client.Logs(t.Context(), request.ID, &transcript))
+	require.Equal(t, "finished\n", transcript.String(), "never wait on input no client will send")
+}
+
+func TestAttachClosesInputAtEndOfFile(t *testing.T) {
+	t.Parallel()
+	_, client := startTestServer(t)
+	request := processruntime.StartRequest{ID: "pipe", UID: testProcessUID, Command: []string{"sh", "-c", "cat; echo finished"}, Stdin: true}
+	_, err := client.Start(t.Context(), request)
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	var output bytes.Buffer
+	err = client.Attach(ctx, request.ID, "pipe", bytes.NewBufferString("hello\n"), &output, processruntime.AttachOptions{Lossless: true, CloseInputOnEOF: true})
+	require.NoError(t, err, "the process sees end of file and exits")
+	require.Equal(t, "hello\nfinished\n", output.String())
+}
+
+type slowWriter struct {
+	written int
+}
+
+func (writer *slowWriter) Write(data []byte) (int, error) {
+	time.Sleep(time.Millisecond)
+	writer.written += len(data)
+	return len(data), nil
+}
+
+func TestLosslessAttachDeliversEveryByteToASlowReader(t *testing.T) {
+	t.Parallel()
+	_, client := startTestServer(t)
+	const size = 20 << 20
+	request := processruntime.StartRequest{ID: "bulk", UID: testProcessUID, Command: []string{"sh", "-c", fmt.Sprintf("head -c %d /dev/zero", size)}}
+	_, err := client.Start(t.Context(), request)
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	reader := &slowWriter{}
+	require.NoError(t, client.Attach(ctx, request.ID, "bulk", nil, reader, processruntime.AttachOptions{Lossless: true}))
+	require.Equal(t, size, reader.written, "a slow lossless client receives every byte")
+}
+
+func TestTruncatedReplayIsReportedNotSilent(t *testing.T) {
+	t.Parallel()
+	const limit = 1024
+	supervisor, client := startTestServer(t, WithMaxTranscriptBytes(limit))
+	request := processruntime.StartRequest{ID: "flood", UID: testProcessUID, Command: []string{"sh", "-c", "head -c 4096 /dev/zero"}}
+	_, err := client.Start(t.Context(), request)
+	require.NoError(t, err)
+	waitForExit(t, supervisor, request.ID)
+
+	var attached bytes.Buffer
+	err = client.Attach(t.Context(), request.ID, "late", nil, &attached, processruntime.AttachOptions{Lossless: true})
+	require.ErrorIs(t, err, processruntime.ErrTranscriptTruncated, "a late client learns that output is missing")
+	require.Equal(t, bytes.Repeat([]byte{0}, limit), attached.Bytes(), "the replay carries output only, never the truncation notice")
+
+	var logs bytes.Buffer
+	require.ErrorIs(t, client.Logs(t.Context(), request.ID, &logs), processruntime.ErrTranscriptTruncated)
+	require.Equal(t, limit, logs.Len())
 }

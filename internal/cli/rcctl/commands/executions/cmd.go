@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -311,7 +310,7 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 	processClient := &workspaceservice.ProcessClient{Kube: clusterClient.Kube, Runtime: clusterClient.Processes, Config: config}
 	process, err := processClient.Start(cmd.Context(), workspaceservice.ProcessStartRequest{
 		Namespace: namespace, Target: workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspace, Name: target.Workspace.Name},
-		Command: argv, WorkingDirectory: options.cwd, TTY: options.tty, AgentType: agentType,
+		Command: argv, WorkingDirectory: options.cwd, TTY: options.tty, Stdin: options.interactive, AgentType: agentType,
 		AgentCredential: agentCredential, Credentials: credentialRefs, Environment: values,
 	})
 	if err != nil {
@@ -331,15 +330,20 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 		return nil
 	}
 	if ready.Status.Phase.Terminal() {
-		if err := processClient.Logs(cmd.Context(), ready, cmd.OutOrStdout()); err != nil {
+		if err := processClient.Logs(cmd.Context(), ready, cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
 			return err
 		}
 	} else {
-		var input io.Reader
-		if options.interactive {
-			input = cmd.InOrStdin()
+		streams := workspaceservice.AttachStreams{
+			Output:      cmd.OutOrStdout(),
+			ErrorOutput: cmd.ErrOrStderr(),
+			// This caller consumes the output, so it must receive every byte.
+			Lossless: true,
 		}
-		if err := processClient.Attach(cmd.Context(), ready, input, cmd.OutOrStdout()); err != nil && cmd.Context().Err() == nil {
+		if options.interactive {
+			streams.Input, streams.CloseInputOnEOF = cmd.InOrStdin(), true
+		}
+		if err := processClient.Attach(cmd.Context(), ready, streams); err != nil && cmd.Context().Err() == nil {
 			return err
 		}
 	}
@@ -544,7 +548,8 @@ func newAttachCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if process.Status.Phase != workspacesv1alpha1.WorkspaceExecPhaseRunning {
 				return fmt.Errorf("cannot connect to WorkspaceExec %s in phase %s", process.Name, process.Status.Phase)
 			}
-			if err := processClient.Attach(cmd.Context(), process, cmd.InOrStdin(), cmd.OutOrStdout()); err != nil {
+			streams := workspaceservice.AttachStreams{Input: cmd.InOrStdin(), Output: cmd.OutOrStdout(), ErrorOutput: cmd.ErrOrStderr()}
+			if err := processClient.Attach(cmd.Context(), process, streams); err != nil {
 				return fmt.Errorf("cannot connect to original WorkspaceExec %s: %w", process.Name, err)
 			}
 			return nil
@@ -571,12 +576,12 @@ func newLogsCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 				if targetErr != nil {
 					return targetErr
 				}
-				return processClient.Runtime.Logs(cmd.Context(), target, found.ID, cmd.OutOrStdout())
+				return processClient.Runtime.Logs(cmd.Context(), target, found.ID, cmd.OutOrStdout(), cmd.ErrOrStderr())
 			}
 			if err != nil {
 				return err
 			}
-			return processClient.Logs(cmd.Context(), process, cmd.OutOrStdout())
+			return processClient.Logs(cmd.Context(), process, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
 }

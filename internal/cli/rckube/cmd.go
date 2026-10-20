@@ -261,20 +261,21 @@ func newStateCommand(action string) *cobra.Command {
 func newAttachCommand() *cobra.Command {
 	var socketPath string
 	var clientID string
-	var rows uint16
-	var columns uint16
+	var options processruntime.AttachOptions
 	command := &cobra.Command{
 		Use:   "attach ID",
 		Short: "Attach stdin and stdout to a supervised process",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(command *cobra.Command, arguments []string) error {
-			return runtime.NewClient(socketPath).Attach(command.Context(), arguments[0], clientID, command.InOrStdin(), command.OutOrStdout(), rows, columns)
+			return runtime.NewClient(socketPath).Attach(command.Context(), arguments[0], clientID, command.InOrStdin(), command.OutOrStdout(), options)
 		},
 	}
 	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
 	command.Flags().StringVar(&clientID, "client-id", "", "Stable identity for foreground terminal arbitration")
-	command.Flags().Uint16Var(&rows, "rows", 0, "Initial terminal rows")
-	command.Flags().Uint16Var(&columns, "columns", 0, "Initial terminal columns")
+	command.Flags().Uint16Var(&options.Rows, "rows", 0, "Initial terminal rows")
+	command.Flags().Uint16Var(&options.Columns, "columns", 0, "Initial terminal columns")
+	command.Flags().BoolVar(&options.Lossless, "lossless", false, "Make the process wait for this client instead of dropping it when it falls behind")
+	command.Flags().BoolVar(&options.CloseInputOnEOF, "close-input-on-eof", false, "Close the process's standard input when this client's input ends")
 
 	return command
 }

@@ -84,13 +84,21 @@ func (client *Client) Logs(ctx context.Context, id string, output io.Writer) err
 	if err := responseError(response); err != nil {
 		return err
 	}
-	_, err = io.Copy(output, reader)
+	if _, err := io.Copy(output, reader); err != nil {
+		return err
+	}
+	if response.State.TranscriptTruncated {
+		return processruntime.ErrTranscriptTruncated
+	}
 
-	return err
+	return nil
 }
 
-func (client *Client) Attach(ctx context.Context, id string, clientID string, input io.Reader, output io.Writer, rows uint16, columns uint16) error {
-	connection, reader, response, err := client.open(ctx, protocolRequest{Action: "attach", ID: id, ClientID: clientID, Rows: rows, Columns: columns})
+// Attach streams process output to output and forwards input. With
+// CloseInputOnEOF, the end of input closes the process's standard input
+// through a separate request, so the attach connection keeps streaming output.
+func (client *Client) Attach(ctx context.Context, id string, clientID string, input io.Reader, output io.Writer, options processruntime.AttachOptions) error {
+	connection, reader, response, err := client.open(ctx, protocolRequest{Action: "attach", ID: id, ClientID: clientID, Rows: options.Rows, Columns: options.Columns, Lossless: options.Lossless})
 	if err != nil {
 		return err
 	}
@@ -99,13 +107,28 @@ func (client *Client) Attach(ctx context.Context, id string, clientID string, in
 		return err
 	}
 	if input != nil {
-		go func() { _, _ = io.Copy(connection, input) }()
+		go func() {
+			if _, err := io.Copy(connection, input); err == nil && options.CloseInputOnEOF {
+				_ = client.CloseInput(ctx, id)
+			}
+		}()
 	}
 	_, err = io.Copy(output, reader)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	if err == nil && response.State.TranscriptTruncated {
+		// The replay of output produced before this client attached stopped
+		// at the transcript limit; everything after it arrived.
+		return processruntime.ErrTranscriptTruncated
+	}
 
+	return err
+}
+
+// CloseInput ends a non-TTY process's standard input.
+func (client *Client) CloseInput(ctx context.Context, id string) error {
+	_, err := client.stateRequest(ctx, protocolRequest{Action: "close-input", ID: id})
 	return err
 }
 

@@ -162,7 +162,13 @@ func TestSupervisorBoundsPersistentTranscript(t *testing.T) {
 	}, 3*time.Second, 10*time.Millisecond, "wait for producer")
 	var transcript bytes.Buffer
 	requirements.NoError(supervisor.Logs(request.ID, &transcript), "read bounded transcript")
-	requirements.Contains(transcript.String(), "[rc-kube transcript truncated]", "report truncation in durable output")
+	requirements.Equal("1234567890123456", transcript.String(), "serve recorded output only, up to the limit")
+	state, err := supervisor.Inspect(request.ID)
+	requirements.NoError(err)
+	requirements.True(state.TranscriptTruncated, "report truncation in state rather than in the output")
+	durable, err := os.ReadFile(filepath.Join(supervisor.stateDir, request.ID, "transcript.log"))
+	requirements.NoError(err)
+	requirements.Contains(string(durable), "[rc-kube transcript truncated]", "keep the notice in the durable file")
 }
 
 func TestSupervisorKeepsCredentialsOutOfPersistentState(t *testing.T) {
@@ -357,7 +363,7 @@ func TestSharedCredentialProjectionSurvivesAnotherProcessExit(t *testing.T) {
 	first := processruntime.StartRequest{
 		ID: "first", UID: "first-uid", Command: []string{"sh", "-c", "read -r proceed; cat \"$RC_CREDENTIALS_DIR/github/token\""},
 		Environment:       map[string]string{testCredentialsVariable: credentialsRoot},
-		ExposeCredentials: true, CredentialFiles: credentialFiles,
+		ExposeCredentials: true, CredentialFiles: credentialFiles, Stdin: true,
 	}
 	second := processruntime.StartRequest{
 		ID: "second", UID: "second-uid", Command: []string{testTrueCommand},
@@ -377,7 +383,7 @@ func TestSharedCredentialProjectionSurvivesAnotherProcessExit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	var transcript bytes.Buffer
-	requirements.NoError(supervisor.Attach(ctx, first.ID, "release", bytes.NewBufferString("continue\n"), &transcript, 0, 0), "release first process after checking shared ownership")
+	requirements.NoError(supervisor.Attach(ctx, first.ID, "release", bytes.NewBufferString("continue\n"), &transcript, processruntime.AttachOptions{}), "release first process after checking shared ownership")
 	requirements.Equal("secret", transcript.String(), "first process retains credential after second exits")
 }
 
@@ -404,16 +410,55 @@ func TestProcessOutputDisconnectsSlowClientInsteadOfDroppingBytes(t *testing.T) 
 	transcript, err := os.CreateTemp(t.TempDir(), "transcript-")
 	requirements.NoError(err, "create transcript")
 	t.Cleanup(func() { _ = transcript.Close() })
-	stream := make(chan []byte, 1)
-	stream <- []byte("pending")
-	process := &supervisedProcess{transcript: transcript, clients: map[string]chan []byte{"slow": stream}}
+	slow := &attachClient{data: make(chan []byte, 1), done: make(chan struct{})}
+	slow.data <- []byte("pending")
+	process := &supervisedProcess{transcript: transcript, clients: map[string]*attachClient{"slow": slow}}
 
 	_, err = (processOutput{process: process}).Write([]byte("new"))
 	requirements.NoError(err, "write process output")
 	requirements.Empty(process.clients, "remove lagging client")
-	<-stream
-	_, open := <-stream
-	requirements.False(open, "close lagging client stream explicitly")
+	requirements.Equal([]byte("pending"), <-slow.data, "never drop bytes already queued")
+	_, open := <-slow.done
+	requirements.False(open, "signal the lagging client explicitly")
+}
+
+func TestProcessOutputWaitsForLosslessClient(t *testing.T) {
+	t.Parallel()
+	requirements := require.New(t)
+	transcript, err := os.CreateTemp(t.TempDir(), "transcript-")
+	requirements.NoError(err, "create transcript")
+	t.Cleanup(func() { _ = transcript.Close() })
+	pipe := &attachClient{data: make(chan []byte), done: make(chan struct{}), lossless: true}
+	process := &supervisedProcess{transcript: transcript, clients: map[string]*attachClient{"pipe": pipe}}
+
+	written := make(chan struct{})
+	go func() {
+		_, _ = (processOutput{process: process}).Write([]byte("chunk"))
+		close(written)
+	}()
+	select {
+	case <-written:
+		t.Fatal("a lossless client must hold output until it reads")
+	case <-time.After(50 * time.Millisecond):
+	}
+	process.mu.Lock()
+	process.mu.Unlock() //nolint:staticcheck // Prove the waiting writer does not hold the lock.
+	requirements.Equal([]byte("chunk"), <-pipe.data)
+	<-written
+
+	released := make(chan struct{})
+	go func() {
+		_, _ = (processOutput{process: process}).Write([]byte("unread"))
+		close(released)
+	}()
+	process.mu.Lock()
+	process.removeClientLocked("pipe", pipe)
+	process.mu.Unlock()
+	select {
+	case <-released:
+	case <-time.After(3 * time.Second):
+		t.Fatal("a client that leaves must release a waiting writer")
+	}
 }
 
 func TestSupervisorDerivesPathsFromLogicalRequest(t *testing.T) {
@@ -480,7 +525,7 @@ func TestTerminalAttachStreamsRawPTYBytes(t *testing.T) {
 	_, err := supervisor.Start(t.Context(), request)
 	requirements.NoError(err, "start terminal process")
 	var attached bytes.Buffer
-	requirements.NoError(supervisor.Attach(context.Background(), request.ID, "viewer", nil, &attached, 24, 80), "attach to live terminal stream")
+	requirements.NoError(supervisor.Attach(context.Background(), request.ID, "viewer", nil, &attached, processruntime.AttachOptions{Rows: 24, Columns: 80}), "attach to live terminal stream")
 	requirements.Contains(attached.String(), "\x1b[31mraw-color\x1b[0m", "preserve the child PTY ANSI sequence byte-for-byte")
 }
 
@@ -496,7 +541,7 @@ func TestTerminalAttachAppliesInitialSizeBeforeForwardingInput(t *testing.T) {
 	requirements.NoError(err, "start terminal process")
 	var attached bytes.Buffer
 	input := bytes.NewBufferString("continue\n")
-	requirements.NoError(supervisor.Attach(context.Background(), request.ID, "viewer", input, &attached, 42, 120), "attach with local terminal size")
+	requirements.NoError(supervisor.Attach(context.Background(), request.ID, "viewer", input, &attached, processruntime.AttachOptions{Rows: 42, Columns: 120}), "attach with local terminal size")
 	requirements.Contains(attached.String(), "42 120", "resize the child PTY before forwarding attached input")
 }
 

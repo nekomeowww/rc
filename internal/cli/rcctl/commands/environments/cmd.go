@@ -206,7 +206,7 @@ func runEnvironmentProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags
 	process, err := processClient.Start(cmd.Context(), workspaceservice.ProcessStartRequest{
 		Namespace: namespace,
 		Target:    workspacesv1alpha1.WorkspaceExecTargetReference{Kind: workspacesv1alpha1.WorkspaceExecTargetWorkspaceEnvironment, Name: name},
-		Command:   processCommand, WorkingDirectory: options.cwd, TTY: tty, AgentType: agentType,
+		Command:   processCommand, WorkingDirectory: options.cwd, TTY: tty, Stdin: true, AgentType: agentType,
 		AgentCredential: options.agentCredential, Credentials: options.credentials, Environment: values,
 	})
 	if err != nil {
@@ -222,11 +222,18 @@ func runEnvironmentProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags
 		return err
 	}
 	if ready.Status.Phase.Terminal() {
-		if err := processClient.Logs(cmd.Context(), ready, cmd.OutOrStdout()); err != nil {
+		if err := processClient.Logs(cmd.Context(), ready, cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
 			return err
 		}
 	} else {
-		if err := processClient.Attach(cmd.Context(), ready, cmd.InOrStdin(), cmd.OutOrStdout()); err != nil && cmd.Context().Err() == nil {
+		streams := workspaceservice.AttachStreams{
+			Input:           cmd.InOrStdin(),
+			Output:          cmd.OutOrStdout(),
+			ErrorOutput:     cmd.ErrOrStderr(),
+			Lossless:        true,
+			CloseInputOnEOF: true,
+		}
+		if err := processClient.Attach(cmd.Context(), ready, streams); err != nil && cmd.Context().Err() == nil {
 			return err
 		}
 	}

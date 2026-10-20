@@ -6,11 +6,11 @@ status: accepted
 
 ## Evidence
 
-T-660 reported a Worktree followed 11 seconds later by a same-name Workspace
-in one namespace. Both controllers addressed the Worktree-owned PVC. The
+A Worktree was followed seconds later by a same-name Workspace in one
+namespace. Both controllers addressed the Worktree-owned PVC. The
 Workspace repeatedly reported `VolumeClaimConflict`.
 
-On baseline `51d9ce86f84d9a704e4a23fde3546712589d9347`, the original envtest matrix in
+Before the fix, the original envtest matrix in
 `internal/controller/workspaces/pvc_isolation_test.go` reproduced:
 
 | Scenario, both creation orders | Cases | Baseline |
@@ -26,7 +26,7 @@ seconds. Worktree-before-Workspace failed in both baseline runs. Envtest has no
 CSI provisioner: the regression boundary is distinct owned PVCs and absence of
 conflict, not simulated storage provisioning or Pod readiness.
 
-Current focused regression command (the original matrix was reduced in T-666):
+Current focused regression command (the original matrix was later reduced):
 
 ```sh
 go test -tags=integration ./internal/controller/workspaces -run '^TestControllers$' -ginkgo.focus='PVC isolation' -ginkgo.v -count=1
@@ -111,8 +111,8 @@ and races after CLI preflight.
 
 ## Validation
 
-T-666 replaces the 24 ordered kind-pair cases and ten migration cases with two
-envtest scenarios:
+Two envtest scenarios replace the original 24 ordered kind-pair cases and ten
+migration cases:
 
 - Four same-name CR kinds allocate four independently owned PVCs.
 - An owned legacy Workspace home has the Environment draft's derived name and
@@ -180,31 +180,6 @@ go test ./internal/controller/repositories -run '^TestWorktreeDeletionWaitsForPe
 go test -tags=integration ./internal/controller/repositories -run '^TestControllers$' -ginkgo.focus='deletion|Pending typed clone' -count=1 -v
 ```
 
-Follow-up validation passed: all four noncached unit scenarios, all five
-selected deletion envtest cases, `make lint-fix` (0 issues), and `make test`.
-No API or marker changed in this follow-up. ADR numbering is unchanged for
-integration to reconcile.
-
-
-## T-666 simplification validation (2026-10-07)
-
-The replacement task keeps the existing identity/ownership/resolution policy and
-recorded-claim deletion behavior. Preflight now takes explicit role/revision
-arguments, and Darwin's home exemption lives in Workspace callers. The two
-focused isolation specs also cover legacy-owned recovery, avoiding a separate
-migration matrix.
-
-Validation passed using the installed Go 1.26.1 binary directly in PATH:
-
-```sh
-go test ./internal/volumeclaim ./internal/repositories ./internal/workspaces ./internal/controller/repositories ./internal/cli/rcctl/commands/... -run 'TestNames|TestResolve|TestPreflight|TestCreationRejectsPVCConflict|TestRunner.*PVC|TestWorktreeDeletionWaitsForPendingClaim' -count=1
-go test -tags=integration ./internal/controller/workspaces ./internal/controller/repositories -run '^TestControllers$' -ginkgo.focus='PVC isolation|deletion|Pending typed clone' -count=1 -v
-make lint-fix
-make lint
-GOFLAGS=-count=1 make test
-```
-
-The focused envtest run passed both isolation specs and all five selected
-Worktree deletion specs. Both lint commands reported zero issues. Ordinary
-tests ran without cached results. No live-cluster operations, deployment,
-commits or merges were performed; all changes remain in the designated worktree.
+Preflight takes explicit role/revision arguments, and Darwin's home exemption
+lives in Workspace callers. The two focused isolation specs also cover
+legacy-owned recovery, avoiding a separate migration matrix.

@@ -55,6 +55,9 @@ Always use `kubebuilder create api` and `kubebuilder create webhook` to scaffold
 ### One Element per Line in Wrapped Literals
 When a map, slice, or struct literal spans several lines, put each element or field on its own line. Never pack several entries onto wrapped lines. See "Code style" in `CONTRIBUTING.md`.
 
+### Keep Deployment Details Out of the Repository
+Never write real cluster, node, host, namespace, or resource names, local paths, internal task IDs, environment-specific measurements, or validation logs into docs, ADRs, skills, comments, or fixtures. Use placeholders or generic examples. See "Writing docs" in `CONTRIBUTING.md`.
+
 ### E2E Tests Require an Isolated Kind Cluster
 The e2e tests are designed to validate the solution in an isolated environment (similar to GitHub Actions CI).
 Ensure you run them against a dedicated [Kind](https://kind.sigs.k8s.io/) cluster (not your “real” dev/prod cluster).

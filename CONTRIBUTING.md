@@ -288,6 +288,21 @@ var failedReasons = map[string]struct{}{
 A literal that fits on one line may stay on one line. Some older code still
 packs entries; reformat it when you change it.
 
+## Writing docs
+
+Docs, ADRs, skills, code comments, and test fixtures describe rc, not one
+deployment or one work session. Do not include:
+
+- Names of real clusters, nodes, hosts, namespaces, or resources from a
+  deployment. Use placeholders such as `<node>` or generic examples such as
+  `rc-dev` and `kind-rc-dev`.
+- Local paths, branch names, commit hashes of unmerged work, or internal task
+  identifiers.
+- Counts or timings measured in one environment, unless the doc explains how
+  to reproduce them. Prefer the general behavior ("thousands of records").
+- Validation logs ("tests passed", "no cluster was changed"). Put those in the
+  pull request description instead.
+
 ## Pull requests
 
 Before opening a pull request:

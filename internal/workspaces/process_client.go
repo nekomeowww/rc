@@ -95,6 +95,40 @@ func (err *ProcessTerminationError) Error() string {
 func (err *ProcessTerminationError) ExitCode() int { return 1 }
 
 // ResultError translates every non-success terminal state into a CLI error.
+// RuntimeResult asks the original runtime's supervisor for a finished
+// process's result error. known is false while the supervisor reports no final
+// state, or cannot be reached; callers then wait for the record.
+// The supervisor knows the exit as soon as it happens, while the record waits
+// for the controller's next observation.
+func (processes *ProcessClient) RuntimeResult(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) (known bool, result error) {
+	pod := new(corev1.Pod)
+	if err := processes.Kube.Get(ctx, client.ObjectKey{Namespace: process.Namespace, Name: process.Status.RuntimePodName}, pod); err != nil || string(pod.UID) != process.Status.RuntimePodUID {
+		return false, nil
+	}
+	platform, err := rcplatform.FromPod(pod)
+	if err != nil {
+		return false, nil
+	}
+	state, err := processes.Runtime.Inspect(ctx, platform.ProcessTarget(process.Namespace, pod.Name, "rc-kube"), process.Name)
+	if err != nil {
+		return false, nil
+	}
+	switch state.Phase {
+	case supervisorPhaseExited:
+		if state.ExitCode != nil && *state.ExitCode == 0 {
+			return true, nil
+		}
+		if state.ExitCode != nil {
+			return true, &ProcessExitError{Process: process.Name, Code: *state.ExitCode}
+		}
+		return true, &ProcessTerminationError{Process: process.Name, Phase: workspacesv1alpha1.WorkspaceExecPhaseFailed, Reason: state.Reason}
+	case supervisorPhaseStopped:
+		return true, &ProcessTerminationError{Process: process.Name, Phase: workspacesv1alpha1.WorkspaceExecPhaseStopped, Reason: state.Reason}
+	default:
+		return false, nil
+	}
+}
+
 func ResultError(process *workspacesv1alpha1.WorkspaceExec) error {
 	if process.Status.Phase == workspacesv1alpha1.WorkspaceExecPhaseSucceeded {
 		return nil
@@ -213,7 +247,8 @@ func (processes *ProcessClient) processOwner(ctx context.Context, namespace stri
 }
 
 func (processes *ProcessClient) WaitUntilAttachable(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) (*workspacesv1alpha1.WorkspaceExec, error) {
-	return processes.wait(ctx, process, func(current *workspacesv1alpha1.WorkspaceExec) (bool, error) {
+	// A process usually starts within a second; poll quickly while it does.
+	return processes.waitEvery(ctx, process, startupPollInterval, func(current *workspacesv1alpha1.WorkspaceExec) (bool, error) {
 		if current.Status.Phase == workspacesv1alpha1.WorkspaceExecPhaseRunning {
 			return true, nil
 		}
@@ -230,24 +265,45 @@ func (processes *ProcessClient) WaitUntilTerminal(ctx context.Context, process *
 	})
 }
 
+const (
+	pollInterval = 300 * time.Millisecond
+	// startupPollInterval applies for startupPollWindow, then pollInterval.
+	startupPollInterval = 50 * time.Millisecond
+	startupPollWindow   = 2 * time.Second
+)
+
 func (processes *ProcessClient) wait(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec, done func(*workspacesv1alpha1.WorkspaceExec) (bool, error)) (*workspacesv1alpha1.WorkspaceExec, error) {
-	var result *workspacesv1alpha1.WorkspaceExec
-	err := wait.PollUntilContextCancel(ctx, 300*time.Millisecond, true, func(ctx context.Context) (bool, error) {
+	return processes.waitEvery(ctx, process, pollInterval, done)
+}
+
+// waitEvery polls at interval; a startup interval relaxes to pollInterval
+// after startupPollWindow.
+// waitEvery checks at interval until done, relaxing a faster startup interval
+// to pollInterval after startupPollWindow.
+func (processes *ProcessClient) waitEvery(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec, interval time.Duration, done func(*workspacesv1alpha1.WorkspaceExec) (bool, error)) (*workspacesv1alpha1.WorkspaceExec, error) {
+	started := time.Now()
+	for {
 		current := new(workspacesv1alpha1.WorkspaceExec)
 		if err := processes.Kube.Get(ctx, client.ObjectKeyFromObject(process), current); err != nil {
-			return false, fmt.Errorf("get WorkspaceExec: %w", err)
+			return nil, fmt.Errorf("get WorkspaceExec: %w", err)
 		}
 		complete, err := done(current)
-		if complete {
-			result = current
+		if err != nil {
+			return nil, err
 		}
-		return complete, err
-	})
-	if err != nil {
-		return nil, err
+		if complete {
+			return current, nil
+		}
+		delay := interval
+		if time.Since(started) > startupPollWindow {
+			delay = max(interval, pollInterval)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
 	}
-
-	return result, nil
 }
 
 // ErrProcessRecordNotFound reports that no WorkspaceExec matches an ID. The

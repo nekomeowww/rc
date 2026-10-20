@@ -18,6 +18,7 @@ package workspaces
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -249,6 +250,10 @@ func (processes *ProcessClient) wait(ctx context.Context, process *workspacesv1a
 	return result, nil
 }
 
+// ErrProcessRecordNotFound reports that no WorkspaceExec matches an ID. The
+// process may still exist in its supervisor's history.
+var ErrProcessRecordNotFound = errors.New("process record not found")
+
 func (processes *ProcessClient) Resolve(ctx context.Context, namespace string, idOrPrefix string) (*workspacesv1alpha1.WorkspaceExec, error) {
 	exact := new(workspacesv1alpha1.WorkspaceExec)
 	if err := processes.Kube.Get(ctx, types.NamespacedName{Name: idOrPrefix, Namespace: namespace}, exact); err == nil {
@@ -267,7 +272,7 @@ func (processes *ProcessClient) Resolve(ctx context.Context, namespace string, i
 		}
 	}
 	if len(matches) == 0 {
-		return nil, fmt.Errorf("process %q was not found in namespace %q", idOrPrefix, namespace)
+		return nil, fmt.Errorf("%w: %q in namespace %q", ErrProcessRecordNotFound, idOrPrefix, namespace)
 	}
 	if len(matches) > 1 {
 		return nil, fmt.Errorf("process prefix %q is ambiguous", idOrPrefix)

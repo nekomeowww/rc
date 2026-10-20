@@ -396,14 +396,16 @@ requires it.
 
 Both `run` and `exec WORKSPACE` wait for completion and return the command's
 exit code by default. Use `-it` for an interactive terminal or `-d` to detach.
-Each command creates a persistent `WorkspaceExec`, so you can inspect and
-reconnect independently of the original terminal. Put rcctl flags before the
+Each command creates a `WorkspaceExec`, so you can inspect and reconnect
+independently of the original terminal. `ps` asks the supervisor of every
+running Workspace and WorkspaceEnvironment, like `ps` on each machine: a stopped
+Workspace, or a command that has not started yet, lists no processes. Put rcctl flags before the
 Workspace name for `exec`; everything after that name is command argv.
 
 ```sh
 rcctl -n development ps                    # Running processes in this namespace
-rcctl -n development ps -a                 # Include pending and completed processes
-rcctl -n development ps --workspace dev    # Filter by Workspace
+rcctl -n development ps -a                 # Include finished processes
+rcctl -n development ps --workspace dev    # Ask only one Workspace
 
 # Replace PROCESS_ID with a value printed by `ps`:
 # rcctl -n development inspect PROCESS_ID

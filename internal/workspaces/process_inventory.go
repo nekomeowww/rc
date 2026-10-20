@@ -36,12 +36,14 @@ import (
 )
 
 const (
-	inventoryConcurrency  = 8
-	inventoryTimeout      = 10 * time.Second
-	runtimeBridgeName     = "rc-kube"
-	phaseSucceeded        = "Succeeded"
-	phaseFailed           = "Failed"
-	supervisorPhaseExited = "Exited"
+	inventoryConcurrency   = 8
+	inventoryTimeout       = 10 * time.Second
+	runtimeBridgeName      = "rc-kube"
+	phaseSucceeded         = "Succeeded"
+	phaseFailed            = "Failed"
+	supervisorPhaseExited  = "Exited"
+	supervisorPhaseStopped = "Stopped"
+	supervisorPhaseRunning = "Running"
 )
 
 // HistoryLister reads the process history of one supervisor.

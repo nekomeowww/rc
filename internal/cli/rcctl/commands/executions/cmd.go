@@ -349,6 +349,11 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 	}
 	finished := ready
 	if !ready.Status.Phase.Terminal() {
+		// The attach stream ended at exit; the supervisor already knows the
+		// result, while the record waits for the controller.
+		if known, result := processClient.RuntimeResult(cmd.Context(), ready); known {
+			return result
+		}
 		finished, err = processClient.WaitUntilTerminal(cmd.Context(), process)
 		if err != nil {
 			return err

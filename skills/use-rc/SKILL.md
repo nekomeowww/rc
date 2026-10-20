@@ -249,7 +249,7 @@ a large pnpm monorepo with iSCSI storage:
 
 | Operation | Expect |
 | --- | --- |
-| Each `rcctl exec`, even `true` | 4-6 s of fixed overhead |
+| Each `rcctl exec`, even `true` | under a second of fixed overhead, more over a slow API connection |
 | `pnpm install` | about 10 min |
 | `grep -r` over the checkout | more than 2 min |
 | First dev-server page load | about 80 s; Vite may return `504 Outdated Optimize Dep` until it finishes |

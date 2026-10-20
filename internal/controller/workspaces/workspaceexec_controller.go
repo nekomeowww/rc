@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -83,6 +84,12 @@ type WorkspaceExecReconciler struct {
 	// Now allows deterministic result-window tests; defaults to time.Now.
 	Now func() time.Time
 }
+
+// workspaceExecWorkers bounds concurrent reconciles. Each running execution
+// is inspected through a Pod exec every processTargetRequeueDelay, so one
+// worker serialized every start behind every inspection. A key still runs on
+// one worker at a time, and admission uses compare-and-swap on the Workspace.
+const workspaceExecWorkers = 8
 
 // executionResultWindow keeps a terminal record long enough for its caller to
 // read the result. Afterwards the process exists only in its supervisor's
@@ -899,6 +906,7 @@ func (r *WorkspaceExecReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&workspacesv1alpha1.WorkspaceExec{}).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.executionsForRuntimePod)).
+		WithOptions(controller.Options{MaxConcurrentReconciles: workspaceExecWorkers}).
 		Named("workspaces-workspaceexec").
 		Complete(r)
 }

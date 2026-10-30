@@ -302,7 +302,10 @@ if git -C /repository remote get-url origin >/dev/null 2>&1; then
 else
   git -C /repository remote add origin "$remote"
 fi
-git -C /repository fetch --prune origin
+# Fetch only the parent. On-demand submodule recursion would also fetch every
+# gitlink recorded on any fetched branch, so one dropped commit on an unrelated
+# branch would fail the sync. The update below fetches what the target records.
+git -C /repository fetch --prune --recurse-submodules=no origin
 git -C /repository remote set-head origin -a >/dev/null 2>&1 || true
 
 if [ -n "$ref" ]; then
@@ -314,7 +317,7 @@ if [ -n "$ref" ]; then
     target="$ref"
     ;;
   refs/*)
-    git -C /repository fetch origin "$ref"
+    git -C /repository fetch --recurse-submodules=no origin "$ref"
     target=FETCH_HEAD
     ;;
   *)

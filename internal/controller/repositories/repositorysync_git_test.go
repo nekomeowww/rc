@@ -15,9 +15,7 @@ import (
 
 func TestSyncAdvancesParentAndPreservesDirtyChild(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("Repository Jobs run the POSIX script on Linux")
-	}
+	skipPOSIXScriptOnWindows(t)
 	directory := t.TempDir()
 	remote := filepath.Join(directory, "remote")
 	parent := filepath.Join(directory, "parent")
@@ -75,11 +73,82 @@ func TestSyncAdvancesParentAndPreservesDirtyChild(t *testing.T) {
 	require.Equal(t, second, git(fresh, "rev-parse", "HEAD"))
 }
 
+func TestSyncIgnoresSubmoduleCommitsOutsideTargetRef(t *testing.T) {
+	t.Parallel()
+	skipPOSIXScriptOnWindows(t)
+	directory := t.TempDir()
+	gitConfig := filepath.Join(directory, "gitconfig")
+	environment := append(os.Environ(), "GIT_CONFIG_GLOBAL="+gitConfig, "GIT_CONFIG_NOSYSTEM=1")
+	git := func(path string, args ...string) string {
+		t.Helper()
+		command := exec.CommandContext(t.Context(), "git", args...)
+		command.Dir = path
+		command.Env = environment
+		output, err := command.CombinedOutput()
+		require.NoError(t, err, string(output))
+		return strings.TrimSpace(string(output))
+	}
+	repository := func(name string) string {
+		t.Helper()
+		path := filepath.Join(directory, name)
+		require.NoError(t, os.MkdirAll(path, 0755))
+		git(path, "init", "-b", "main")
+		require.NoError(t, os.WriteFile(filepath.Join(path, "README"), []byte(name), 0644))
+		git(path, "add", ".")
+		git(path, "commit", "-m", name)
+		return path
+	}
+	git(directory, "config", "--file", gitConfig, "user.email", "sync@example.test")
+	git(directory, "config", "--file", gitConfig, "user.name", "Sync test")
+	git(directory, "config", "--file", gitConfig, "protocol.file.allow", "always")
+	child := repository("child")
+	remote := repository("remote")
+	git(remote, "submodule", "add", child, "child")
+	git(remote, "commit", "-m", "add submodule")
+
+	parent := filepath.Join(directory, "parent")
+	require.NoError(t, os.MkdirAll(parent, 0755))
+	result := filepath.Join(directory, "result")
+	synchronize := func() {
+		t.Helper()
+		script := strings.NewReplacer("/repository", parent, "/dev/termination-log", result).Replace(repositoryCheckoutScript)
+		command := exec.CommandContext(t.Context(), "sh", "-ceu", script, "repository-sync", remote, "refs/heads/main", repositorySubmoduleModeRecursive, "Fail", "none", "0")
+		command.Env = environment
+		output, err := command.CombinedOutput()
+		require.NoError(t, err, "a gitlink outside the target ref must not fail the sync: %s", output)
+	}
+	synchronize()
+
+	// Another branch records a submodule commit that the submodule upstream
+	// later drops, as when a feature branch points at a force-pushed commit.
+	git(child, "checkout", "-b", "dropped")
+	require.NoError(t, os.WriteFile(filepath.Join(child, "README"), []byte("dropped"), 0644))
+	git(child, "commit", "-am", "dropped")
+	git(filepath.Join(remote, "child"), "fetch", "origin", "dropped")
+	git(filepath.Join(remote, "child"), "checkout", "FETCH_HEAD")
+	git(remote, "checkout", "-b", "feature")
+	git(remote, "commit", "-am", "record dropped child commit")
+	git(remote, "checkout", "main")
+	git(remote, "submodule", "update")
+	git(child, "checkout", "main")
+	git(child, "branch", "-D", "dropped")
+	git(child, "reflog", "expire", "--expire=now", "--all")
+	git(child, "gc", "--prune=now")
+
+	require.NoError(t, os.WriteFile(filepath.Join(remote, "tracked.txt"), []byte("second"), 0644))
+	git(remote, "add", "tracked.txt")
+	git(remote, "commit", "-m", "second")
+	synchronize()
+
+	message, err := os.ReadFile(result)
+	require.NoError(t, err)
+	require.Equal(t, git(remote, "rev-parse", "HEAD"), parseCheckoutResult(string(message)).commit)
+	require.Equal(t, git(child, "rev-parse", "main"), git(filepath.Join(parent, "child"), "rev-parse", "HEAD"))
+}
+
 func TestCheckoutReportsSubmoduleMissingUpstream(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("Repository Jobs run the POSIX script on Linux")
-	}
+	skipPOSIXScriptOnWindows(t)
 	for _, policy := range []repositoriesv1alpha1.RepositorySubmoduleFailurePolicy{
 		repositoriesv1alpha1.RepositorySubmoduleFailurePolicyFail, repositoriesv1alpha1.RepositorySubmoduleFailurePolicyContinue,
 	} {
@@ -153,4 +222,11 @@ func checkoutWithMissingSubmodule(t *testing.T, policy repositoriesv1alpha1.Repo
 	require.Equal(t, []string{"broken at " + recorded}, parsed.submoduleFailures, "name every failed path in either mode")
 	require.Equal(t, git(healthy, "rev-parse", "HEAD"), git(filepath.Join(parent, "healthy"), "rev-parse", "HEAD"), "update the healthy submodule")
 	require.NoFileExists(t, filepath.Join(parent, ".git", "rc-submodule-failures"))
+}
+
+func skipPOSIXScriptOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Repository Jobs run the POSIX script on Linux")
+	}
 }

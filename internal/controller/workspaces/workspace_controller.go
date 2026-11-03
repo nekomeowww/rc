@@ -153,6 +153,10 @@ type WorkspaceReconciler struct {
 	WindowsRunnerImage  string
 	DarwinRunnerImage   string
 	DarwinWorkspaceRoot string
+
+	// admissionRetries backs off creates the API server rejected; see
+	// admission_rejection.go. The zero value is ready to use.
+	admissionRetries admissionRetries
 }
 
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces,verbs=get;list;watch;create;update;patch;delete
@@ -226,14 +230,28 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, workspacesv1alpha1.ReasonVolumeClaimLost, message)
 		}
 		if home == nil {
+			retryKey := admissionRetryKey(workspace, admissionObjectHome)
+			if retryAfter, pending := r.admissionRetries.pending(retryKey); pending {
+				return ctrl.Result{RequeueAfter: retryAfter}, nil
+			}
 			resolved.setStorage(metav1.ConditionFalse, "Provisioning", "Workspace home volume is provisioning")
 			home = workspaceHomeVolumeClaim(workspace, resolved)
 			if err := controllerutil.SetControllerReference(workspace, home, r.Scheme); err != nil {
 				return ctrl.Result{}, fmt.Errorf("set Workspace owner on home PersistentVolumeClaim: %w", err)
 			}
 			if err := r.Create(ctx, home); err != nil {
-				return ctrl.Result{}, fmt.Errorf("create Workspace home PersistentVolumeClaim: %w", err)
+				if !admissionRejected(err) {
+					return ctrl.Result{}, fmt.Errorf("create Workspace home PersistentVolumeClaim: %w", err)
+				}
+				message := admissionRejectionMessage("Workspace home PersistentVolumeClaim", err)
+				log.Info("API server rejected Workspace home PersistentVolumeClaim", "name", home.Name, "message", err.Error())
+				resolved.setStorage(metav1.ConditionFalse, workspacesv1alpha1.WorkspaceReasonAdmissionRejected, message)
+				// A recorded home name is creation evidence; a missing recorded
+				// home is reported as lost. Record it only once the PVC exists.
+				resolved.homeClaimName = ""
+				return ctrl.Result{RequeueAfter: r.admissionRetries.record(retryKey)}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, workspacesv1alpha1.WorkspaceReasonAdmissionRejected, message)
 			}
+			r.admissionRetries.clear(retryKey)
 			log.Info("Created Workspace home PersistentVolumeClaim", "name", home.Name)
 
 			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Provisioning", "Workspace home volume is provisioning")
@@ -331,6 +349,12 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if err := r.releaseClaims(ctx, workspace); err != nil {
 			return ctrl.Result{}, err
 		}
+		// The API server refused the last create for this generation. Wait out
+		// the backoff before taking holders again; Ready already explains why.
+		retryKey := admissionRetryKey(workspace, admissionObjectRuntimePod)
+		if retryAfter, pending := r.admissionRetries.pending(retryKey); pending {
+			return ctrl.Result{RequeueAfter: retryAfter}, nil
+		}
 		if reason, message, err := r.admitWorktreeMounts(ctx, workspace, resolved.worktreeMounts, worktreeModes(resolved)); err != nil {
 			return ctrl.Result{}, err
 		} else if reason != "" {
@@ -374,8 +398,20 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return ctrl.Result{}, fmt.Errorf("set Workspace owner on runtime Pod: %w", err)
 		}
 		if err := r.Create(ctx, pod); err != nil {
-			return ctrl.Result{}, fmt.Errorf("create Workspace runtime Pod: %w", err)
+			if !admissionRejected(err) {
+				return ctrl.Result{}, fmt.Errorf("create Workspace runtime Pod: %w", err)
+			}
+			message := admissionRejectionMessage("Workspace runtime Pod", err)
+			log.Info("API server rejected Workspace runtime Pod", "name", pod.Name, "message", err.Error())
+			// Nothing was created from the holders admitted above. Release them
+			// so a rejected Workspace does not block other writers or Repository
+			// updates while it waits for the cause to clear.
+			if err := r.releaseClaims(ctx, workspace); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: r.admissionRetries.record(retryKey)}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, workspacesv1alpha1.WorkspaceReasonAdmissionRejected, message)
 		}
+		r.admissionRetries.clear(retryKey)
 		log.Info("Created Workspace runtime Pod", "name", pod.Name)
 
 		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reasonStarting, "Workspace runtime Pod is starting")
@@ -462,9 +498,15 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if err != nil {
 			return ctrl.Result{}, err
 		}
+		hotMountRetryKey := admissionRetryKey(workspace, admissionObjectHotMount)
 		if !ready {
-			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reason, message)
+			requeue := workspaceDependencyRequeue
+			if reason == workspacesv1alpha1.WorkspaceReasonAdmissionRejected {
+				requeue = r.admissionRetries.record(hotMountRetryKey)
+			}
+			return ctrl.Result{RequeueAfter: requeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reason, message)
 		}
+		r.admissionRetries.clear(hotMountRetryKey)
 		if err := r.releaseOldWorktreeMounts(ctx, workspace, pod, worktreeModes(resolved)); err != nil {
 			return ctrl.Result{}, err
 		}

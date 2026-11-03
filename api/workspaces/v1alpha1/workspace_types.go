@@ -46,6 +46,13 @@ const (
 
 // Ready and DeletionBlocked reasons published for a Workspace.
 const (
+	// WorkspaceReasonAdmissionRejected means the API server refused to create
+	// a Pod or PersistentVolumeClaim the Workspace needs, for example because
+	// of a ResourceQuota, a LimitRange, Pod Security admission, or an admission
+	// webhook or policy. The message carries the API server's explanation. The
+	// controller retries with a bounded backoff, so the Workspace starts once
+	// the cause is resolved.
+	WorkspaceReasonAdmissionRejected = "AdmissionRejected"
 	// WorkspaceReasonRuntimeMissing means a Ready runtime Pod disappeared and the
 	// controller is replacing it.
 	WorkspaceReasonRuntimeMissing = "RuntimeMissing"

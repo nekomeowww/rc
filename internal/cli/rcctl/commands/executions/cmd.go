@@ -533,8 +533,12 @@ func waitWorkspaceReady(ctx context.Context, kubeClient client.Client, workspace
 		if meta.IsStatusConditionTrue(current.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady) {
 			return true, nil
 		}
-		if condition := meta.FindStatusCondition(current.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady); condition != nil && condition.Status == "False" && condition.Reason == "InvalidSpec" {
+		condition := meta.FindStatusCondition(current.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady)
+		if condition != nil && condition.Status == "False" && condition.Reason == "InvalidSpec" {
 			return false, fmt.Errorf("workspace %q is invalid: %s", current.Name, condition.Message)
+		}
+		if condition != nil && condition.Status == "False" && condition.Reason == workspacesv1alpha1.WorkspaceReasonAdmissionRejected {
+			return false, fmt.Errorf("workspace %q cannot start until the cause is fixed; rc keeps retrying: %s", current.Name, condition.Message)
 		}
 		return false, nil
 	})

@@ -366,6 +366,9 @@ func (r *WorkspaceReconciler) reconcileHotMounts(ctx context.Context, workspace 
 				return false, "", "", fmt.Errorf("set Workspace owner on hot Worktree mount Pod: %w", err)
 			}
 			if err := r.Create(ctx, pod); err != nil {
+				if admissionRejected(err) {
+					return false, workspacesv1alpha1.WorkspaceReasonAdmissionRejected, admissionRejectionMessage(fmt.Sprintf("Hot Worktree mount %s Pod", mount.name), err), nil
+				}
 				return false, "", "", fmt.Errorf("create hot Worktree mount Pod: %w", err)
 			}
 			return false, "Mounting", fmt.Sprintf("Hot Worktree mount %s is starting", mount.name), nil

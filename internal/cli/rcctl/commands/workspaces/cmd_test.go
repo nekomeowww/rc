@@ -541,3 +541,38 @@ func TestWaitEndsWithPendingMountWhenWorktreeIsInUse(t *testing.T) {
 	require.ErrorAs(t, err, &inUse)
 	assert.Contains(t, inUse.message, "WorktreeExec/build")
 }
+
+func TestWaitFailsFastWhenAdmissionRejectsWorkspace(t *testing.T) {
+	t.Parallel()
+	const quota = `Workspace runtime Pod was rejected by the API server: pods "dev" is forbidden: exceeded quota: compute`
+	scheme := runtime.NewScheme()
+	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
+	workspace := &workspacesv1alpha1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       testWorkspaceName,
+			Namespace:  testWorkspaceNamespace,
+			UID:        testWorkspaceUID,
+			Generation: 3,
+		},
+		Status: workspacesv1alpha1.WorkspaceStatus{
+			ObservedGeneration: 3,
+			Conditions: []metav1.Condition{{
+				Type:               workspacesv1alpha1.WorkspaceConditionReady,
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: 3,
+				Reason:             workspacesv1alpha1.WorkspaceReasonAdmissionRejected,
+				Message:            quota,
+			}},
+		},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace).Build()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	err := waitWorkspaceGenerationReady(ctx, kubeClient, workspace, 3)
+
+	require.Error(t, err)
+	require.NotErrorIs(t, err, context.DeadlineExceeded, "the wait ends at once instead of waiting silently")
+	assert.ErrorContains(t, err, "exceeded quota: compute")
+	assert.ErrorContains(t, err, "rc keeps retrying")
+}

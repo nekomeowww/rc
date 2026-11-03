@@ -118,7 +118,10 @@ func (runner *Runner) Prepare(ctx context.Context, request RunRequest) (RunTarge
 		if workspace.Spec.IsTemporary() {
 			return RunTarget{}, fmt.Errorf("workspace %q is temporary and cannot be selected for another run", workspaceName)
 		}
-		if !meta.IsStatusConditionTrue(workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady) {
+		if ready := meta.FindStatusCondition(workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady); ready == nil || ready.Status != metav1.ConditionTrue {
+			if ready != nil && ready.Reason != "" {
+				return RunTarget{}, fmt.Errorf("workspace %q is not Ready: %s: %s", workspaceName, ready.Reason, ready.Message)
+			}
 			return RunTarget{}, fmt.Errorf("workspace %q is not Ready", workspaceName)
 		}
 		if err := runner.validateExistingTarget(ctx, workspace, request); err != nil {

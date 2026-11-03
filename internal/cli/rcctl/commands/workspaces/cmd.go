@@ -1152,11 +1152,20 @@ func waitWorkspaceGenerationReady(ctx context.Context, kubeClient client.Client,
 		if condition != nil && condition.Status == metav1.ConditionFalse && condition.ObservedGeneration >= generation && condition.Reason == reasonWorktreeInUse {
 			return false, &worktreeInUseError{workspace: current.Name, message: condition.Message}
 		}
+		if condition != nil && condition.Status == metav1.ConditionFalse && condition.ObservedGeneration >= generation && condition.Reason == workspacesv1alpha1.WorkspaceReasonAdmissionRejected {
+			return false, admissionRejectedError(current.Name, condition.Message)
+		}
 		if condition != nil && condition.Status == metav1.ConditionFalse && condition.ObservedGeneration >= generation && !workspaceReadinessTransient(condition.Reason) {
 			return false, fmt.Errorf("workspace %q runtime failed for generation %d: %s", current.Name, generation, condition.Message)
 		}
 		return false, nil
 	})
+}
+
+// admissionRejectedError ends a wait the API server would keep failing. The
+// controller keeps retrying, so the Workspace still starts once the cause clears.
+func admissionRejectedError(workspace, message string) error {
+	return fmt.Errorf("workspace %q cannot start until the cause is fixed; rc keeps retrying: %s", workspace, message)
 }
 
 func workspaceReadinessTransient(reason string) bool {

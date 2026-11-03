@@ -318,6 +318,18 @@ Named Workspaces default to `Running` when created.
 stop is rejected while a process is active. A forced stop terminates the
 processes and then suspends the Workspace.
 
+The API server can refuse the runtime Pod, the home PVC, or a hot-mount helper
+Pod on policy grounds: a ResourceQuota or LimitRange, Pod Security admission,
+or an admission webhook or ValidatingAdmissionPolicy. A `Forbidden` or
+`Invalid` create error sets Ready to False with reason `AdmissionRejected`,
+and the message carries the API server's explanation, such as the quota and
+the exceeded resource. The controller releases the holders it took for that
+start and retries with a backoff that doubles from 5 seconds up to 1 minute,
+so the Workspace starts without user action once the quota is freed. A spec
+change retries at once. Server faults, such as an unreachable webhook, stay
+reconcile errors. `rcctl workspace create`, `mount`, and `run` stop waiting
+and print the message instead of waiting for Ready.
+
 Kubernetes does not permit adding PVC volumes to an existing Pod. Environment,
 Service Account, and projected-volume topology changes replace the runtime
 Pod. Repository mount changes and Windows Worktree mount changes also replace

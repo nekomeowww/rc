@@ -2,6 +2,8 @@
 IMG ?= ghcr.io/nekomeowww/rc/controller:latest
 # Shared image used by Repository and Worktree Jobs and Workspace runtimes.
 RUNNER_IMG ?= ghcr.io/nekomeowww/rc/runner:latest
+# Minimal Workspace runtime image built from this checkout for the e2e suite.
+E2E_RUNNER_IMG ?= example.com/rc-runner:v0.0.1
 # INSTALLER_OUTPUT defines where build-installer writes the consolidated manifest.
 INSTALLER_OUTPUT ?= dist/install.yaml
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
@@ -80,9 +82,16 @@ test-integration: manifests generate fmt vet setup-envtest ## Run controller int
 KIND_CLUSTER ?= rc-test-e2e
 CSI_HOSTPATH_VERSION ?= v1.18.0
 CSI_HOSTPATH_STORAGE_CLASS ?= csi-hostpath-sc
+# kwok fakes Nodes and Pod status for the controller-level e2e suite.
+KWOK_VERSION ?= v0.8.0
+KWOK_KIND_CLUSTER ?= rc-test-e2e-kwok
 
 .PHONY: setup-kind
-setup-kind: ## Set up a single-node Kind cluster with CSI volume cloning.
+setup-kind: setup-kind-cluster ## Set up a single-node Kind cluster with CSI volume cloning.
+	@$(MAKE) setup-csi-hostpath KIND_CLUSTER="$(KIND_CLUSTER)"
+
+.PHONY: setup-kind-cluster
+setup-kind-cluster: ## Create a single-node Kind cluster without add-ons if it does not exist.
 	@command -v $(KIND) >/dev/null 2>&1 || { \
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
@@ -93,7 +102,6 @@ setup-kind: ## Set up a single-node Kind cluster with CSI volume cloning.
 		echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
 		$(KIND) create cluster --name "$(KIND_CLUSTER)"; \
 	fi
-	@$(MAKE) setup-csi-hostpath KIND_CLUSTER="$(KIND_CLUSTER)"
 
 .PHONY: setup-csi-hostpath
 setup-csi-hostpath: ## Install the non-production CSI hostpath driver in a Kind cluster.
@@ -127,6 +135,22 @@ setup-csi-hostpath: ## Install the non-production CSI hostpath driver in a Kind 
 		statefulset/csi-hostpathplugin --timeout=5m; \
 	KUBECONFIG="$$driver_tmp/kubeconfig" $(KUBECTL) get storageclass "$(CSI_HOSTPATH_STORAGE_CLASS)"
 
+.PHONY: setup-kwok
+setup-kwok: ## Install the kwok controller and its fast Node and Pod stages into a Kind cluster.
+	@$(KIND) get clusters | grep -Fxq "$(KIND_CLUSTER)" || { \
+		echo "Kind cluster '$(KIND_CLUSTER)' does not exist."; \
+		exit 1; \
+	}
+	@kwok_tmp="$$(mktemp -d)"; \
+	trap 'rm -rf "$$kwok_tmp"' EXIT; \
+	$(KIND) get kubeconfig --name "$(KIND_CLUSTER)" > "$$kwok_tmp/kubeconfig"; \
+	KUBECONFIG="$$kwok_tmp/kubeconfig" $(KUBECTL) apply \
+		-f "https://github.com/kubernetes-sigs/kwok/releases/download/$(KWOK_VERSION)/kwok.yaml"; \
+	KUBECONFIG="$$kwok_tmp/kubeconfig" $(KUBECTL) apply \
+		-f "https://github.com/kubernetes-sigs/kwok/releases/download/$(KWOK_VERSION)/stage-fast.yaml"; \
+	KUBECONFIG="$$kwok_tmp/kubeconfig" $(KUBECTL) rollout status \
+		deployment/kwok-controller -n kube-system --timeout=5m
+
 .PHONY: setup-test-e2e
 setup-test-e2e: setup-kind ## Set up a Kind cluster for e2e tests if it does not exist.
 
@@ -136,8 +160,26 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 	trap 'rm -rf "$$e2e_tmp"' EXIT; \
 	$(KIND) get kubeconfig --name "$(KIND_CLUSTER)" > "$$e2e_tmp/kubeconfig"; \
 	KUBECONFIG="$$e2e_tmp/kubeconfig" KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) \
-		go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+		go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout 45m
 	$(MAKE) cleanup-test-e2e
+
+.PHONY: setup-test-e2e-kwok
+setup-test-e2e-kwok: ## Set up a Kind cluster with kwok fake nodes if it does not exist.
+	@$(MAKE) setup-kind-cluster KIND_CLUSTER="$(KWOK_KIND_CLUSTER)"
+	@$(MAKE) setup-kwok KIND_CLUSTER="$(KWOK_KIND_CLUSTER)"
+
+.PHONY: test-e2e-kwok
+test-e2e-kwok: setup-test-e2e-kwok manifests generate fmt vet ## Run the controller e2e tests on kwok fake nodes in an isolated Kind cluster.
+	@e2e_tmp="$$(mktemp -d)"; \
+	trap 'rm -rf "$$e2e_tmp"' EXIT; \
+	$(KIND) get kubeconfig --name "$(KWOK_KIND_CLUSTER)" > "$$e2e_tmp/kubeconfig"; \
+	KUBECONFIG="$$e2e_tmp/kubeconfig" KIND=$(KIND) KIND_CLUSTER=$(KWOK_KIND_CLUSTER) \
+		go test -tags=e2e_kwok ./test/e2e/kwok/ -v -ginkgo.v -timeout 30m
+	$(MAKE) cleanup-test-e2e-kwok
+
+.PHONY: cleanup-test-e2e-kwok
+cleanup-test-e2e-kwok: ## Tear down the Kind cluster used for kwok e2e tests.
+	@$(MAKE) cleanup-kind KIND_CLUSTER="$(KWOK_KIND_CLUSTER)"
 
 .PHONY: cleanup-kind
 cleanup-kind: ## Tear down a named Kind cluster.
@@ -199,6 +241,10 @@ docker-push: ## Push docker image with the manager.
 .PHONY: docker-build-runner
 docker-build-runner: ## Build the shared Repository, Worktree, and Workspace runner image.
 	$(CONTAINER_TOOL) build -f Dockerfile.runner -t ${RUNNER_IMG} .
+
+.PHONY: docker-build-e2e-runner
+docker-build-e2e-runner: ## Build the minimal Workspace runtime image used by the Kind e2e suite.
+	$(CONTAINER_TOOL) build -f test/e2e/Dockerfile.runner -t ${E2E_RUNNER_IMG} .
 
 .PHONY: docker-push-runner
 docker-push-runner: ## Push the shared runner image.

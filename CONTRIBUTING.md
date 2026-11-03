@@ -148,6 +148,44 @@ make cleanup-test-e2e KIND_CLUSTER=rc-test-local
 
 Do not run the e2e suite against a development or production Kubernetes cluster.
 
+### Two e2e suites
+
+rc has two Kind-based e2e suites. Each creates, uses, and deletes its own
+cluster.
+
+| Suite | Command | Nodes | Covers |
+| --- | --- | --- | --- |
+| Runtime | `make test-e2e` | The real Kind Node | Manager deployment and metrics, idle activity, resident services, maximum run, Pod metadata, priority, admission rejection, resume |
+| kwok | `make test-e2e-kwok` | [kwok](https://kwok.sigs.k8s.io) fake Nodes | Controller behavior only: placement, Pod metadata, priority, admission rejection, maximum run without a supervisor, many Workspaces at once |
+
+The runtime suite (`test/e2e`, build tag `e2e`) runs real containers. It
+builds the manager image and a minimal runner image from
+`test/e2e/Dockerfile.runner`, which contains only `rc-kube` from this checkout,
+`tini`, and a shell. The full `Dockerfile.runner` is not needed because the specs
+use only `rc-kube` and `sh`. The specs use short clocks, so the suite takes
+several minutes.
+
+The kwok suite (`test/e2e/kwok`, build tag `e2e_kwok`) installs a pinned kwok
+release (`KWOK_VERSION`) into a Kind cluster without the CSI driver. It adds a
+fake Node and binds Workspace homes to pre-created PersistentVolumes. kwok marks
+a runtime Pod Running and Ready, but no container starts and Pod exec does not
+work. So this suite cannot test anything that needs `rc-kube`: activity,
+services, WorkspaceExec, or history. On a fake Node the idle activity query
+fails, and idle suspension fails closed by design. Only `maxRunDuration`
+suspends such a Workspace, and the suite checks this.
+
+```sh
+make test-e2e-kwok
+make test-e2e-kwok KWOK_KIND_CLUSTER=rc-test-kwok-local
+make cleanup-test-e2e-kwok KWOK_KIND_CLUSTER=rc-test-kwok-local
+```
+
+The suites deploy the manager from a temporary copy of `config/`, so a run
+does not change `config/manager/kustomization.yaml`. `kind create cluster`
+writes the new context to the kubeconfig that `KUBECONFIG` selects. To keep
+your default kubeconfig unchanged, set `KUBECONFIG` to a temporary file for the
+command.
+
 ## Test development images in Kind
 
 Build both runtime images and load them into an existing Kind cluster:

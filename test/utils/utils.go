@@ -22,9 +22,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive,staticcheck
+	"github.com/onsi/gomega"
 )
 
 const (
@@ -169,8 +172,15 @@ func GetProjectDir() (string, error) {
 	if err != nil {
 		return wd, fmt.Errorf("failed to get current working directory: %w", err)
 	}
-	wd = strings.ReplaceAll(wd, "/test/e2e", "")
-	return wd, nil
+	// Suites live in nested directories under test/, so walk up to go.mod.
+	for dir := wd; ; dir = filepath.Dir(dir) {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir, nil
+		}
+		if filepath.Dir(dir) == dir {
+			return wd, fmt.Errorf("failed to find go.mod above %q", wd)
+		}
+	}
 }
 
 // UncommentCode searches for target in the file and remove the comment prefix
@@ -223,4 +233,120 @@ func UncommentCode(filename, target, prefix string) error {
 	}
 
 	return nil
+}
+
+// RunWithInput executes the provided command with input as its standard input.
+func RunWithInput(cmd *exec.Cmd, input string) (string, error) {
+	cmd.Stdin = strings.NewReader(input)
+	return Run(cmd)
+}
+
+// KubectlApply applies the given manifest with kubectl.
+func KubectlApply(manifest string) error {
+	_, err := RunWithInput(exec.Command("kubectl", "apply", "-f", "-"), manifest)
+	return err
+}
+
+// DeployManager deploys the manager like "make deploy" with the given images.
+// "make deploy" rewrites config/manager/kustomization.yaml in place, so this
+// sets the images on a temporary copy of config/ instead: the checkout is
+// never modified, even when suites run concurrently or are interrupted.
+func DeployManager(managerImage, runnerImage string) error {
+	dir, err := GetProjectDir()
+	if err != nil {
+		return err
+	}
+	if _, err := Run(exec.Command("make", "manifests", "kustomize")); err != nil {
+		return err
+	}
+	staging, err := os.MkdirTemp("", "rc-e2e-config-")
+	if err != nil {
+		return fmt.Errorf("failed to create a staging directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(staging) }()
+	config := filepath.Join(staging, "config")
+	if err := os.CopyFS(config, os.DirFS(filepath.Join(dir, "config"))); err != nil {
+		return fmt.Errorf("failed to copy config: %w", err)
+	}
+
+	kustomize := filepath.Join(dir, "bin", "kustomize")
+	edit := exec.Command(kustomize, "edit", "set", "image",
+		"controller="+managerImage,
+		"runner="+runnerImage,
+	)
+	edit.Dir = filepath.Join(config, "manager")
+	if output, err := edit.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to set the manager images: %w: %s", err, output)
+	}
+	manifest, err := exec.Command(kustomize, "build", filepath.Join(config, "default")).Output()
+	if err != nil {
+		return fmt.Errorf("failed to build the manager manifests: %w", err)
+	}
+	_, err = RunWithInput(exec.Command("kubectl", "apply", "-f", "-"), string(manifest))
+	return err
+}
+
+// CreateNamespace creates a namespace and succeeds when it already exists.
+func CreateNamespace(name string) error {
+	manifest := fmt.Sprintf("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: %s\n", name)
+	return KubectlApply(manifest)
+}
+
+// Kubectl runs kubectl with the given arguments and returns its trimmed output.
+func Kubectl(args ...string) (string, error) {
+	output, err := Run(exec.Command("kubectl", args...))
+	return strings.TrimSpace(output), err
+}
+
+// GetJSONPath returns one JSONPath expression of a namespaced resource.
+func GetJSONPath(namespace, resource, name, jsonPath string) (string, error) {
+	return Kubectl("get", resource, name, "-n", namespace, "-o", "jsonpath="+jsonPath)
+}
+
+// WorkspaceManifest renders a blank Workspace. extraSpec holds additional
+// spec fields as YAML indented by two spaces, one field per line.
+func WorkspaceManifest(namespace, name, image, storageClass, extraSpec string) string {
+	return fmt.Sprintf(`apiVersion: workspaces.rc.ayaka.io/v1alpha1
+kind: Workspace
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  image: %s
+  automountServiceAccountToken: false
+  storage:
+    storageClassName: %s
+    size: 1Gi
+%s`, name, namespace, image, storageClass, extraSpec)
+}
+
+// DumpNamespaceDiagnostics writes the rc resources, Pods, and events of a
+// namespace and the manager logs to the Ginkgo writer.
+func DumpNamespaceDiagnostics(managerNamespace string, namespaces ...string) {
+	logs, err := Kubectl("logs", "deployment/rc-controller-manager", "-n", managerNamespace,
+		"-c", "manager",
+		"--tail=400",
+	)
+	_, _ = fmt.Fprintf(GinkgoWriter, "Controller logs (err=%v):\n%s\n", err, logs)
+	for _, namespace := range namespaces {
+		resources, err := Kubectl("get", "workspaces,workspaceexecs,pods,pvc", "-n", namespace, "-o", "yaml")
+		_, _ = fmt.Fprintf(GinkgoWriter, "Resources in %s (err=%v):\n%s\n", namespace, err, resources)
+		events, err := Kubectl("get", "events", "-n", namespace, "--sort-by=.lastTimestamp")
+		_, _ = fmt.Fprintf(GinkgoWriter, "Events in %s (err=%v):\n%s\n", namespace, err, events)
+	}
+}
+
+// Field returns one JSONPath expression of a namespaced resource and fails
+// the Gomega assertion g when kubectl fails.
+func Field(g gomega.Gomega, namespace, resource, name, jsonPath string) string {
+	output, err := GetJSONPath(namespace, resource, name, jsonPath)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	return output
+}
+
+// ParseTime parses an RFC 3339 status time and fails g when it is malformed.
+func ParseTime(g gomega.Gomega, value string) time.Time {
+	parsed, err := time.Parse(time.RFC3339, value)
+	g.Expect(err).NotTo(gomega.HaveOccurred(), "expected an RFC 3339 time, got %q", value)
+	return parsed
 }

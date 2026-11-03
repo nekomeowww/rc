@@ -159,7 +159,7 @@ func newServeCommand() *cobra.Command {
 
 func newProcessCommand() *cobra.Command {
 	command := &cobra.Command{Use: "process", Short: "Bridge one request to the local supervisor"}
-	command.AddCommand(newStartCommand(), newStateCommand("inspect"), newStateCommand("stop"), newListCommand(), newPruneHistoryCommand(), newAttachCommand(), newLogsCommand(), newResizeCommand())
+	command.AddCommand(newStartCommand(), newStateCommand("inspect"), newStateCommand("stop"), newListCommand(), newPruneHistoryCommand(), newTouchCommand(), newActivityCommand(), newAttachCommand(), newLogsCommand(), newResizeCommand())
 
 	return command
 }
@@ -227,6 +227,51 @@ func newPruneHistoryCommand() *cobra.Command {
 	command.Flags().DurationVar(&policy.TTLAfterFinished, "ttl-after-finished", 0, "Remove a finished record after this age; zero disables")
 	command.Flags().IntVar(&policy.MaxEntries, "max-entries", 0, "Keep at most this many finished records; zero disables")
 	command.Flags().DurationVar(&policy.TranscriptTTL, "transcript-ttl", 0, "Remove a finished transcript after this age; zero disables")
+
+	return command
+}
+
+func newTouchCommand() *cobra.Command {
+	var socketPath string
+	command := &cobra.Command{
+		Use:   "touch",
+		Short: "Report work in progress, so idle suspension waits",
+		Long: "Report work in progress inside the Workspace, such as a tool call served by a resident agent.\n" +
+			"The controller reads the last report before an idle suspension and postpones it when the report is newer.",
+		Args: cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			if err := runtime.NewClient(socketPath).Touch(command.Context()); err != nil {
+				return err
+			}
+
+			return json.NewEncoder(command.OutOrStdout()).Encode(processruntime.State{})
+		},
+	}
+	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
+
+	return command
+}
+
+func newActivityCommand() *cobra.Command {
+	var socketPath string
+	command := &cobra.Command{
+		Use:   "activity",
+		Short: "Print the last recorded activity as JSON",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			last, err := runtime.NewClient(socketPath).LastActivity(command.Context())
+			if err != nil {
+				return err
+			}
+			activity := processruntime.Activity{}
+			if !last.IsZero() {
+				activity.LastActivity = &last
+			}
+
+			return json.NewEncoder(command.OutOrStdout()).Encode(activity)
+		},
+	}
+	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
 
 	return command
 }

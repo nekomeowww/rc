@@ -27,18 +27,20 @@ import (
 // Omitted and zero values both disable a clock; Environments supply no defaults.
 type LifecycleOptions struct {
 	IdleTimeout          time.Duration
+	MaxRunDuration       time.Duration
 	DeleteAfterSuspended time.Duration
 }
 
 // AddFlags exposes the existing idle clock and opt-in suspended storage deletion.
 func (options *LifecycleOptions) AddFlags(flags *pflag.FlagSet) {
 	flags.DurationVar(&options.IdleTimeout, "idle-timeout", 0, "Suspend compute after inactivity; zero or omitted disables")
+	flags.DurationVar(&options.MaxRunDuration, "max-run-duration", 0, "Suspend compute this long after each start, even while busy; zero or omitted disables")
 	flags.DurationVar(&options.DeleteAfterSuspended, "delete-after-suspended", 0, "Delete Workspace and owned storage after confirmed suspension; zero or omitted disables")
 }
 
 // Validate rejects invalid clocks before connecting to the cluster.
 func (options *LifecycleOptions) Validate() error {
-	if options.IdleTimeout < 0 || options.DeleteAfterSuspended < 0 {
+	if options.IdleTimeout < 0 || options.MaxRunDuration < 0 || options.DeleteAfterSuspended < 0 {
 		return fmt.Errorf("lifecycle durations must not be negative")
 	}
 	return nil

@@ -62,6 +62,15 @@ const (
 	WorkspaceReasonWaitingForPods = "WaitingForPods"
 )
 
+// Reasons recorded in status.lifecycle.lastAutomaticSuspendReason.
+const (
+	// WorkspaceAutomaticSuspendIdle means idleTimeout passed without activity.
+	WorkspaceAutomaticSuspendIdle = "Idle"
+	// WorkspaceAutomaticSuspendMaxRunDuration means the run reached
+	// maxRunDuration, whatever its activity.
+	WorkspaceAutomaticSuspendMaxRunDuration = "MaxRunDuration"
+)
+
 // WorkspaceMount associates a stable path with a Worktree or Repository PVC.
 // +kubebuilder:validation:XValidation:rule="has(self.worktreeRef) != has(self.repositoryRef)",message="exactly one of worktreeRef or repositoryRef must be set"
 // +kubebuilder:validation:XValidation:rule="!has(self.repositoryRef) || self.readOnly",message="Repository mounts must be read-only"
@@ -230,11 +239,20 @@ type WorkspaceSpec struct {
 	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
 
 	// idleTimeout suspends compute after inactivity. Zero or omitted disables it.
-	// Creation, Ready, resume, and execution completion advance activity.
+	// Creation, Ready, resume, execution completion, and work reported to the
+	// runtime supervisor (rc-kube process touch) advance activity.
 	// Pending and running executions block suspension; attach alone is not activity.
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('0s')",message="idleTimeout must not be negative"
 	// +optional
 	IdleTimeout *metav1.Duration `json:"idleTimeout,omitempty"`
+
+	// maxRunDuration suspends compute this long after the runtime last
+	// started, whatever its activity: running executions are stopped first.
+	// It bounds stuck or runaway work that idle suspension never sees. Zero or
+	// omitted disables it. Each resume starts a new run.
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('0s')",message="maxRunDuration must not be negative"
+	// +optional
+	MaxRunDuration *metav1.Duration `json:"maxRunDuration,omitempty"`
 
 	// deleteAfterSuspended deletes the Workspace and owned storage after
 	// confirmed suspension. Zero or omitted keeps storage indefinitely. This
@@ -277,6 +295,16 @@ type WorkspaceLifecycleStatus struct {
 	// +optional
 	DeleteAt *metav1.Time `json:"deleteAt,omitempty"`
 
+	// maxRunSuspendAt is when the current run reaches maxRunDuration. Unlike
+	// idleSuspendAt, active executions do not postpone it.
+	// +optional
+	MaxRunSuspendAt *metav1.Time `json:"maxRunSuspendAt,omitempty"`
+
+	// lastAutomaticSuspendReason records why the retention controller last
+	// suspended the Workspace: Idle or MaxRunDuration.
+	// +optional
+	LastAutomaticSuspendReason string `json:"lastAutomaticSuspendReason,omitempty"`
+
 	// activeExecutions counts nonterminal WorkspaceExecs for this Workspace.
 	// +optional
 	ActiveExecutions int32 `json:"activeExecutions"`
@@ -307,6 +335,12 @@ type WorkspaceStatus struct {
 	// execution completion time so deleting execution history cannot shorten idle.
 	// +optional
 	LastActivityTime *metav1.Time `json:"lastActivityTime,omitempty"`
+
+	// runningSince is when the current run started: the first Ready after
+	// creation or resume. It is cleared once suspension is confirmed, and a
+	// runtime Pod restart does not reset it.
+	// +optional
+	RunningSince *metav1.Time `json:"runningSince,omitempty"`
 
 	// suspendedAt starts the storage grace period after the runtime is confirmed
 	// absent. It is cleared on resume and survives controller restarts. Workspaces

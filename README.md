@@ -331,6 +331,10 @@ Worktrees selected with `--worktree` are never deleted by this cleanup.
 into `--idle-timeout=1h --delete-after-suspended=168h`: the first stage
 stops compute; the second deletes owned storage after a full suspended grace
 period. Both stages default to disabled for CLI and direct API creation.
+`--max-run-duration=8h` also stops compute 8 hours after each start, even
+while busy, which bounds stuck or looping work. A resident service inside the
+Workspace reports activity with `rc-kube process touch` so idle suspension
+waits for it.
 See [Workspace lifetime decisions and migration](docs/adr/0007-workspace-lifetimes.md)
 for the behavior matrix, timer rules, and script migration.
 

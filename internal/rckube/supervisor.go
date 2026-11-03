@@ -31,6 +31,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -118,6 +119,11 @@ type supervisedProcess struct {
 
 // Supervisor owns child processes independently of attach connections.
 type Supervisor struct {
+	// lastActivity is the Unix nanosecond time of the last reported or
+	// started work. It lives only in memory: a new runtime is fresh activity
+	// to the controller anyway.
+	lastActivity atomic.Int64
+
 	mu           sync.RWMutex
 	stateDir     string
 	homeDir      string
@@ -164,6 +170,28 @@ func NewSupervisor(stateDir string, stopGrace time.Duration, options ...Supervis
 	return supervisor
 }
 
+// Touch records work happening inside the runtime, such as an agent tool call
+// served by a resident service. It never moves the activity time backward.
+func (supervisor *Supervisor) Touch(now time.Time) {
+	value := now.UnixNano()
+	for {
+		current := supervisor.lastActivity.Load()
+		if current >= value || supervisor.lastActivity.CompareAndSwap(current, value) {
+			return
+		}
+	}
+}
+
+// LastActivity returns the last recorded activity, or the zero time when
+// nothing was recorded since the supervisor started.
+func (supervisor *Supervisor) LastActivity() time.Time {
+	value := supervisor.lastActivity.Load()
+	if value == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, value)
+}
+
 // Shutdown stops owned processes concurrently so one slow child cannot consume
 // the entire Pod termination grace period before other trees receive a stop.
 func (supervisor *Supervisor) Shutdown() {
@@ -197,6 +225,7 @@ func (supervisor *Supervisor) Start(ctx context.Context, request processruntime.
 	if len(request.Command) == 0 || request.Command[0] == "" {
 		return processruntime.State{}, errors.New("process command is required")
 	}
+	supervisor.Touch(time.Now())
 
 	supervisor.mu.Lock()
 	defer supervisor.mu.Unlock()

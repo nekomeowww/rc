@@ -286,3 +286,50 @@ func TestTruncatedReplayIsReportedNotSilent(t *testing.T) {
 	require.ErrorIs(t, client.Logs(t.Context(), request.ID, &logs), processruntime.ErrTranscriptTruncated)
 	require.Equal(t, limit, logs.Len())
 }
+
+func TestUnixServerRecordsActivity(t *testing.T) {
+	t.Parallel()
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	ctx := t.Context()
+	socketFile, err := os.CreateTemp("/tmp", "rc-kube-*.sock")
+	requirements.NoError(err, "reserve short Unix socket path")
+	socketPath := socketFile.Name()
+	requirements.NoError(socketFile.Close(), "close socket path placeholder")
+	requirements.NoError(os.Remove(socketPath), "release socket path placeholder")
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+	supervisor := newTestSupervisor(t, t.TempDir(), 100*time.Millisecond)
+	go func() { _ = NewServer(supervisor).Serve(ctx, socketPath) }()
+	client := NewClient(socketPath)
+	requirements.Eventually(func() bool { return client.Ping(context.Background()) == nil }, time.Second, 10*time.Millisecond)
+
+	last, err := client.LastActivity(ctx)
+	requirements.NoError(err)
+	assertions.True(last.IsZero(), "a fresh supervisor has recorded no activity")
+
+	before := time.Now()
+	requirements.NoError(client.Touch(ctx), "report work through the protocol")
+	last, err = client.LastActivity(ctx)
+	requirements.NoError(err)
+	assertions.False(last.Before(before), "the reported work is the last activity")
+
+	touched := last
+	request := processruntime.StartRequest{ID: "active", UID: testProcessUID, Command: []string{testTrueCommand}}
+	_, err = client.Start(ctx, request)
+	requirements.NoError(err)
+	waitForExit(t, supervisor, request.ID)
+	last, err = client.LastActivity(ctx)
+	requirements.NoError(err)
+	assertions.False(last.Before(touched), "starting a process is activity")
+}
+
+func TestSupervisorActivityNeverMovesBackward(t *testing.T) {
+	t.Parallel()
+	supervisor := newTestSupervisor(t, t.TempDir(), 100*time.Millisecond)
+	later := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+
+	supervisor.Touch(later)
+	supervisor.Touch(later.Add(-time.Hour))
+
+	assert.True(t, supervisor.LastActivity().Equal(later), "an earlier report keeps the later activity")
+}

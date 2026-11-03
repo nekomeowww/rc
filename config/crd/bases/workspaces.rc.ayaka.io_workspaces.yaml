@@ -1252,7 +1252,8 @@ spec:
               idleTimeout:
                 description: |-
                   idleTimeout suspends compute after inactivity. Zero or omitted disables it.
-                  Creation, Ready, resume, and execution completion advance activity.
+                  Creation, Ready, resume, execution completion, and work reported to the
+                  runtime supervisor (rc-kube process touch) advance activity.
                   Pending and running executions block suspension; attach alone is not activity.
                 type: string
                 x-kubernetes-validations:
@@ -1327,6 +1328,16 @@ spec:
                         rule: has(self.command) != has(self.script)
                     type: array
                 type: object
+              maxRunDuration:
+                description: |-
+                  maxRunDuration suspends compute this long after the runtime last
+                  started, whatever its activity: running executions are stopped first.
+                  It bounds stuck or runaway work that idle suspension never sees. Zero or
+                  omitted disables it. Each resume starts a new run.
+                type: string
+                x-kubernetes-validations:
+                - message: maxRunDuration must not be negative
+                  rule: duration(self) >= duration('0s')
               mounts:
                 description: mounts exposes Worktrees and explicit read-only Repositories.
                 items:
@@ -1686,12 +1697,30 @@ spec:
                     description: idleSuspendAt is when an idle Workspace will be suspended.
                     format: date-time
                     type: string
+                  lastAutomaticSuspendReason:
+                    description: |-
+                      lastAutomaticSuspendReason records why the retention controller last
+                      suspended the Workspace: Idle or MaxRunDuration.
+                    type: string
+                  maxRunSuspendAt:
+                    description: |-
+                      maxRunSuspendAt is when the current run reaches maxRunDuration. Unlike
+                      idleSuspendAt, active executions do not postpone it.
+                    format: date-time
+                    type: string
                 type: object
               observedGeneration:
                 description: observedGeneration is the latest generation reflected
                   by status.
                 format: int64
                 type: integer
+              runningSince:
+                description: |-
+                  runningSince is when the current run started: the first Ready after
+                  creation or resume. It is cleared once suspension is confirmed, and a
+                  runtime Pod restart does not reset it.
+                format: date-time
+                type: string
               runtimeImage:
                 description: runtimeImage is the exact image string captured at Workspace
                   creation.

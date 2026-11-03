@@ -93,7 +93,7 @@ func TestWorkspaceDeadlinesRequeueAndPublishedPrecision(t *testing.T) {
 	assert.Equal(t, 90*time.Second+300*time.Millisecond, deadlines.requeueAfter(now), "act at the precise earliest deadline")
 	assert.Equal(t, temporaryWorkspaceCleanupDelay, workspaceDeadlines{recheck: temporaryWorkspaceCleanupDelay}.requeueAfter(now))
 	assert.Zero(t, workspaceDeadlines{}.requeueAfter(now))
-	status := deadlines.status(3)
+	status := deadlines.status(3, nil)
 	assert.Equal(t, now.Add(91*time.Second), status.IdleSuspendAt.Time, "never publish a deadline before the action")
 	assert.Equal(t, deletion, status.DeleteAt.Time)
 	assert.Equal(t, int32(3), status.ActiveExecutions)

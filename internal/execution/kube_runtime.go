@@ -146,6 +146,29 @@ func (runtime *KubeRuntime) PruneHistory(ctx context.Context, target Target, pol
 	return err
 }
 
+// LastActivity reads the activity the target supervisor recorded. A
+// supervisor without the activity command returns ErrActivityUnsupported.
+func (runtime *KubeRuntime) LastActivity(ctx context.Context, target Target) (Activity, error) {
+	stdout := new(bytes.Buffer)
+	stderr := new(bytes.Buffer)
+	if err := runtime.executor.Exec(ctx, target, bridgeCommand(target, "activity"), nil, stdout, stderr, false); err != nil {
+		message := strings.TrimSpace(stderr.String())
+		if strings.Contains(message, `unknown command "activity"`) || strings.Contains(message, "unknown action") {
+			return Activity{}, ErrActivityUnsupported
+		}
+		if message != "" {
+			return Activity{}, fmt.Errorf("exec rc-kube bridge: %w: %s", err, message)
+		}
+		return Activity{}, fmt.Errorf("exec rc-kube bridge: %w", err)
+	}
+	activity := Activity{}
+	if err := json.NewDecoder(stdout).Decode(&activity); err != nil {
+		return Activity{}, fmt.Errorf("decode rc-kube activity: %w", err)
+	}
+
+	return activity, nil
+}
+
 // CopyFrom streams path in the target runtime to output as a tar stream.
 // A relative path is resolved against the runtime's Workspace directory.
 func (runtime *KubeRuntime) CopyFrom(ctx context.Context, target Target, path string, output io.Writer) error {

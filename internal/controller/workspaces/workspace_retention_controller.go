@@ -34,6 +34,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	processruntime "github.com/nekomeowww/rc/internal/execution"
+	"github.com/nekomeowww/rc/internal/rcplatform"
 	"github.com/nekomeowww/rc/internal/workspaceadmission"
 )
 
@@ -51,6 +53,10 @@ type WorkspaceRetentionReconciler struct {
 	APIReader client.Reader
 	// History prunes each running supervisor's finished process records.
 	History HistoryPruner
+	// Activity reads the work a running supervisor recorded, such as tool
+	// calls served by a resident agent. It is asked only before an idle
+	// suspension, never polled. Nil disables the check.
+	Activity ActivityReader
 	// Now allows deterministic deadline and restart tests; defaults to time.Now.
 	Now func() time.Time
 
@@ -60,7 +66,7 @@ type WorkspaceRetentionReconciler struct {
 
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces,verbs=get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaceexecs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaceexecs,verbs=get;list;watch;update;patch
 
 // Reconcile advances the idle -> suspended -> deleted policy and history
 // retention on the running supervisor.
@@ -98,13 +104,24 @@ func (r *WorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 	var lifecycleResult ctrl.Result
 	switch {
+	case deadlines.maxRunSuspendAt != nil && !now.Before(*deadlines.maxRunSuspendAt):
+		// The maximum run ignores activity: stop running executions so the
+		// runtime controller, which waits for them, can stop compute.
+		if err := r.stopExecutions(ctx, workspace); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.requestSuspension(ctx, workspace, workspacesv1alpha1.WorkspaceAutomaticSuspendMaxRunDuration); err != nil {
+			return ctrl.Result{}, err
+		}
+		logf.FromContext(ctx).Info("Requested Workspace suspension at its maximum run duration", "name", workspace.Name)
+		return ctrl.Result{}, nil
 	case deadlines.idleSuspendAt != nil && !now.Before(*deadlines.idleSuspendAt):
-		// Updating the version we read prevents a concurrent resume or policy
-		// edit from being overwritten. The runtime controller rechecks active
-		// executions before stopping compute.
-		workspace.Spec.DesiredState = workspacesv1alpha1.WorkspaceDesiredStateSuspended
-		if err := r.Update(ctx, workspace); err != nil {
-			return ctrl.Result{}, fmt.Errorf("suspend idle Workspace: %w", err)
+		postponed, err := r.postponeForRuntimeActivity(ctx, workspace, now)
+		if err != nil || postponed > 0 {
+			return ctrl.Result{RequeueAfter: postponed}, err
+		}
+		if err := r.requestSuspension(ctx, workspace, workspacesv1alpha1.WorkspaceAutomaticSuspendIdle); err != nil {
+			return ctrl.Result{}, err
 		}
 		logf.FromContext(ctx).Info("Requested idle Workspace suspension", "name", workspace.Name)
 		return ctrl.Result{}, nil
@@ -139,6 +156,7 @@ func (r *WorkspaceRetentionReconciler) recordActivity(ctx context.Context, works
 	if completion := processes.lastCompletion; completion != nil && completion.After(activity) {
 		activity = completion.Time
 	}
+	r.recordRun(workspace, ready)
 	if workspace.Status.SuspendedAt != nil && (workspace.Spec.DesiredState != workspacesv1alpha1.WorkspaceDesiredStateSuspended || active) {
 		workspace.Status.SuspendedAt = nil
 		activity = now
@@ -158,11 +176,117 @@ func (r *WorkspaceRetentionReconciler) recordActivity(ctx context.Context, works
 		workspace.Status.SuspendedAt = &stamp
 	}
 	deadlines := lifecycleDeadlines(workspace, processes)
-	workspace.Status.Lifecycle = deadlines.status(processes.active)
+	workspace.Status.Lifecycle = deadlines.status(processes.active, before.Status.Lifecycle)
 	if apiequality.Semantic.DeepEqual(before.Status, workspace.Status) {
 		return deadlines, nil
 	}
 	return deadlines, r.Status().Patch(ctx, workspace, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
+}
+
+// recordRun starts the run clock at the first Ready of a run and clears it
+// once suspension is confirmed. A runtime Pod restart within a run keeps it,
+// so restarts cannot extend the maximum run.
+func (r *WorkspaceRetentionReconciler) recordRun(workspace *workspacesv1alpha1.Workspace, ready *metav1.Condition) {
+	switch {
+	case workspace.Spec.DesiredState == workspacesv1alpha1.WorkspaceDesiredStateSuspended:
+		if ready != nil && ready.Status == metav1.ConditionFalse && ready.Reason == reasonSuspended {
+			workspace.Status.RunningSince = nil
+		}
+	case workspace.Status.RunningSince == nil && ready != nil && ready.Status == metav1.ConditionTrue:
+		started := ready.LastTransitionTime
+		workspace.Status.RunningSince = &started
+	}
+}
+
+// postponeForRuntimeActivity asks the running supervisor for activity it
+// recorded, such as tool calls served by a resident agent, before an idle
+// suspension. Newer activity advances the idle clock, and the returned wait
+// is the new deadline. A query failure keeps the Workspace running and is
+// retried; maxRunDuration bounds how long that can last.
+func (r *WorkspaceRetentionReconciler) postponeForRuntimeActivity(ctx context.Context, workspace *workspacesv1alpha1.Workspace, now time.Time) (time.Duration, error) {
+	if r.Activity == nil || workspace.Status.RuntimePodName == "" || workspace.Spec.IdleTimeout == nil {
+		return 0, nil
+	}
+	pod := new(corev1.Pod)
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: workspace.Namespace, Name: workspace.Status.RuntimePodName}, pod); err != nil {
+		if apierrors.IsNotFound(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("get runtime Pod for activity: %w", err)
+	}
+	if pod.Status.Phase != corev1.PodRunning || !pod.DeletionTimestamp.IsZero() {
+		return 0, nil
+	}
+	platform, err := rcplatform.FromPod(pod)
+	if err != nil {
+		return 0, fmt.Errorf("resolve runtime platform for activity: %w", err)
+	}
+	activity, err := r.Activity.LastActivity(ctx, platform.ProcessTarget(workspace.Namespace, pod.Name, runtimeContainerName))
+	if errors.Is(err, processruntime.ErrActivityUnsupported) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read runtime activity: %w", err)
+	}
+	if activity.LastActivity == nil || workspace.Status.LastActivityTime == nil || !activity.LastActivity.After(workspace.Status.LastActivityTime.Time) {
+		return 0, nil
+	}
+	deadline := activity.LastActivity.Add(workspace.Spec.IdleTimeout.Duration)
+	if !deadline.After(now) {
+		return 0, nil
+	}
+	before := workspace.DeepCopy()
+	stamp := metav1.NewTime(*activity.LastActivity)
+	workspace.Status.LastActivityTime = &stamp
+	if workspace.Status.Lifecycle != nil {
+		workspace.Status.Lifecycle.IdleSuspendAt = ceilSecond(&deadline)
+	}
+	if err := r.Status().Patch(ctx, workspace, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+		return 0, fmt.Errorf("record runtime activity: %w", err)
+	}
+	logf.FromContext(ctx).V(1).Info("Postponed idle Workspace suspension for runtime activity", "name", workspace.Name, "idleSuspendAt", deadline)
+	return deadline.Sub(now), nil
+}
+
+// requestSuspension asks the runtime controller to stop compute and records
+// why. Updating the version we read prevents a concurrent resume or policy
+// edit from being overwritten.
+func (r *WorkspaceRetentionReconciler) requestSuspension(ctx context.Context, workspace *workspacesv1alpha1.Workspace, reason string) error {
+	workspace.Spec.DesiredState = workspacesv1alpha1.WorkspaceDesiredStateSuspended
+	if err := r.Update(ctx, workspace); err != nil {
+		return fmt.Errorf("suspend Workspace: %w", err)
+	}
+	before := workspace.DeepCopy()
+	if workspace.Status.Lifecycle == nil {
+		workspace.Status.Lifecycle = &workspacesv1alpha1.WorkspaceLifecycleStatus{}
+	}
+	workspace.Status.Lifecycle.LastAutomaticSuspendReason = reason
+	if err := r.Status().Patch(ctx, workspace, client.MergeFrom(before)); err != nil {
+		return fmt.Errorf("record automatic suspend reason: %w", err)
+	}
+	return nil
+}
+
+// stopExecutions asks every running execution of the Workspace to stop.
+func (r *WorkspaceRetentionReconciler) stopExecutions(ctx context.Context, workspace *workspacesv1alpha1.Workspace) error {
+	processes := new(workspacesv1alpha1.WorkspaceExecList)
+	if err := r.List(ctx, processes, client.InNamespace(workspace.Namespace), client.MatchingFields{executionTargetIndex: workspace.Name}); err != nil {
+		return fmt.Errorf("list Workspace processes: %w", err)
+	}
+	for index := range processes.Items {
+		process := &processes.Items[index]
+		if process.Spec.TargetRef.Kind != workspacesv1alpha1.WorkspaceExecTargetWorkspace || process.Spec.TargetRef.Name != workspace.Name ||
+			process.Status.Phase.Terminal() || process.Spec.DesiredState == workspacesv1alpha1.WorkspaceExecDesiredStateStopped {
+			continue
+		}
+		before := process.DeepCopy()
+		process.Spec.DesiredState = workspacesv1alpha1.WorkspaceExecDesiredStateStopped
+		if err := r.Patch(ctx, process, client.MergeFrom(before)); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("stop WorkspaceExec %s: %w", process.Name, err)
+		}
+		logf.FromContext(ctx).Info("Stopped WorkspaceExec at the Workspace maximum run duration", "name", process.Name, "workspace", workspace.Name)
+	}
+	return nil
 }
 
 func earlierResult(a, b ctrl.Result) ctrl.Result {

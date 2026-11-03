@@ -382,6 +382,7 @@ func (options runOptions) targetRequest(flags *pflag.FlagSet) (workspaceservice.
 		RetentionPolicy:      retention,
 		Environment:          options.environment,
 		IdleTimeout:          command.Duration(options.lifecycle.IdleTimeout),
+		MaxRunDuration:       command.Duration(options.lifecycle.MaxRunDuration),
 		DeleteAfterSuspended: command.Duration(options.lifecycle.DeleteAfterSuspended),
 	}, nil
 }
@@ -395,6 +396,7 @@ func runLifecycleNotice(workspace *workspacesv1alpha1.Workspace) string {
 	}
 
 	return message + durationNotice("idleTimeout", workspace.Spec.IdleTimeout) +
+		durationNotice("maxRunDuration", workspace.Spec.MaxRunDuration) +
 		durationNotice("deleteAfterSuspended", workspace.Spec.DeleteAfterSuspended)
 }
 

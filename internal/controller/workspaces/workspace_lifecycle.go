@@ -14,14 +14,34 @@ import (
 type workspaceDeadlines struct {
 	idleSuspendAt *time.Time
 	deleteAt      *time.Time
+	// maxRunSuspendAt is not blocked by active executions: it bounds work
+	// that never goes idle.
+	maxRunSuspendAt *time.Time
 	// recheck bounds the wait when a deadline is not known yet.
 	recheck time.Duration
 }
 
-// lifecycleDeadlines is the single place that derives idle-suspend and delete
-// deadlines from persisted clocks. Active executions block every stage.
-// Callers persist lastActivityTime and a legacy suspendedAt stamp first.
+// lifecycleDeadlines is the single place that derives the automatic deadlines
+// from persisted clocks. Active executions block every stage except the
+// maximum run. Callers persist lastActivityTime, runningSince, and a legacy
+// suspendedAt stamp first.
 func lifecycleDeadlines(workspace *workspacesv1alpha1.Workspace, processes workspaceProcesses) workspaceDeadlines {
+	deadlines := idleAndDeleteDeadlines(workspace, processes)
+	deadlines.maxRunSuspendAt = maxRunDeadline(workspace)
+	return deadlines
+}
+
+// maxRunDeadline is when the current run reaches maxRunDuration.
+func maxRunDeadline(workspace *workspacesv1alpha1.Workspace) *time.Time {
+	if workspace.Spec.DesiredState == workspacesv1alpha1.WorkspaceDesiredStateSuspended ||
+		workspace.Spec.MaxRunDuration == nil || workspace.Spec.MaxRunDuration.Duration <= 0 || workspace.Status.RunningSince == nil {
+		return nil
+	}
+	deadline := workspace.Status.RunningSince.Add(workspace.Spec.MaxRunDuration.Duration)
+	return &deadline
+}
+
+func idleAndDeleteDeadlines(workspace *workspacesv1alpha1.Workspace, processes workspaceProcesses) workspaceDeadlines {
 	if processes.active > 0 {
 		return workspaceDeadlines{}
 	}
@@ -66,7 +86,11 @@ func suspendedDeletionEnabled(workspace *workspacesv1alpha1.Workspace) bool {
 // caller and are never requeued here.
 func (d workspaceDeadlines) requeueAfter(now time.Time) time.Duration {
 	wait := d.recheck
-	for _, deadline := range []*time.Time{d.idleSuspendAt, d.deleteAt} {
+	for _, deadline := range []*time.Time{
+		d.idleSuspendAt,
+		d.deleteAt,
+		d.maxRunSuspendAt,
+	} {
 		if deadline == nil {
 			continue
 		}
@@ -79,13 +103,19 @@ func (d workspaceDeadlines) requeueAfter(now time.Time) time.Duration {
 
 // status publishes the deadlines. API times have second precision, so round up:
 // a published deadline never precedes the action, and an unchanged deadline
-// compares equal after a round trip.
-func (d workspaceDeadlines) status(active int32) *workspacesv1alpha1.WorkspaceLifecycleStatus {
-	return &workspacesv1alpha1.WorkspaceLifecycleStatus{
+// compares equal after a round trip. The last automatic suspend reason is
+// history, not a deadline, so it is carried over from previous.
+func (d workspaceDeadlines) status(active int32, previous *workspacesv1alpha1.WorkspaceLifecycleStatus) *workspacesv1alpha1.WorkspaceLifecycleStatus {
+	status := &workspacesv1alpha1.WorkspaceLifecycleStatus{
 		IdleSuspendAt:    ceilSecond(d.idleSuspendAt),
 		DeleteAt:         ceilSecond(d.deleteAt),
+		MaxRunSuspendAt:  ceilSecond(d.maxRunSuspendAt),
 		ActiveExecutions: active,
 	}
+	if previous != nil {
+		status.LastAutomaticSuspendReason = previous.LastAutomaticSuspendReason
+	}
+	return status
 }
 
 func ceilSecond(t *time.Time) *metav1.Time {

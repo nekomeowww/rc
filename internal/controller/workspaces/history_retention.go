@@ -41,6 +41,11 @@ type HistoryPruner interface {
 	PruneHistory(context.Context, processruntime.Target, processruntime.HistoryPolicy) error
 }
 
+// ActivityReader reads the work a running supervisor recorded.
+type ActivityReader interface {
+	LastActivity(context.Context, processruntime.Target) (processruntime.Activity, error)
+}
+
 // historyRetention sends each running target's executionRetention to its
 // supervisor at most once per interval. The supervisor owns its history; a
 // stopped target has nothing to prune. Pass times are kept per runtime Pod, so

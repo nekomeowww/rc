@@ -263,8 +263,9 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&workspacescontroller.WorkspaceRetentionReconciler{
-		Client:  mgr.GetClient(),
-		History: processRuntime,
+		Client:   mgr.GetClient(),
+		History:  processRuntime,
+		Activity: processRuntime,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "workspaces-workspace-retention")
 		os.Exit(1)

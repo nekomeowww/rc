@@ -113,6 +113,15 @@ func (server *Server) handle(serverContext context.Context, connection net.Conn)
 		}
 		_, err := server.supervisor.PruneHistory(*request.History, time.Now())
 		server.writeState(connection, processruntime.State{}, err)
+	case "touch":
+		server.supervisor.Touch(time.Now())
+		server.writeState(connection, processruntime.State{}, nil)
+	case "activity":
+		response := protocolResponse{}
+		if last := server.supervisor.LastActivity(); !last.IsZero() {
+			response.LastActivity = &last
+		}
+		_ = writeProtocolResponse(connection, response)
 	case "list":
 		entries, err := server.supervisor.List()
 		if err != nil {

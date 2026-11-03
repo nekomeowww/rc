@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"time"
 
 	processruntime "github.com/nekomeowww/rc/internal/execution"
 )
@@ -54,6 +55,30 @@ func (client *Client) Stop(ctx context.Context, id string) (processruntime.State
 func (client *Client) PruneHistory(ctx context.Context, policy processruntime.HistoryPolicy) error {
 	_, err := client.stateRequest(ctx, protocolRequest{Action: "prune-history", History: &policy})
 	return err
+}
+
+// Touch reports work happening inside the runtime, so idle suspension waits.
+func (client *Client) Touch(ctx context.Context) error {
+	_, err := client.stateRequest(ctx, protocolRequest{Action: "touch"})
+	return err
+}
+
+// LastActivity returns the last activity the supervisor recorded, or the zero
+// time when it recorded none.
+func (client *Client) LastActivity(ctx context.Context) (time.Time, error) {
+	connection, _, response, err := client.open(ctx, protocolRequest{Action: "activity"})
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer func() { _ = connection.Close() }()
+	if err := responseError(response); err != nil {
+		return time.Time{}, err
+	}
+	if response.LastActivity == nil {
+		return time.Time{}, nil
+	}
+
+	return *response.LastActivity, nil
 }
 
 // List returns every process the supervisor has recorded, newest first.

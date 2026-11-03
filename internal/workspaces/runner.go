@@ -60,6 +60,7 @@ type RunRequest struct {
 	// before this request reaches the runner.
 	RetentionPolicy              workspacesv1alpha1.WorkspaceRetentionPolicy
 	IdleTimeout                  *metav1.Duration
+	MaxRunDuration               *metav1.Duration
 	DeleteAfterSuspended         *metav1.Duration
 	Name                         string
 	Environment                  string
@@ -332,6 +333,7 @@ func (runner *Runner) createTarget(ctx context.Context, request RunRequest) (tar
 			AutomountServiceAccountToken: request.AutomountServiceAccountToken,
 			RetentionPolicy:              request.RetentionPolicy,
 			IdleTimeout:                  request.IdleTimeout,
+			MaxRunDuration:               request.MaxRunDuration,
 			DeleteAfterSuspended:         request.DeleteAfterSuspended,
 			Env:                          append([]corev1.EnvVar(nil), request.Env...),
 		},

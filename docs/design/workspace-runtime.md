@@ -342,10 +342,17 @@ unmounts and remounts the Worktree. If cleanup fails, the controller keeps the
 Worktree holder and reports `HotMountCleanup`. An operator must clear a busy mount.
 
 Retained Workspaces remain running unless stopped or configured with
-`spec.idleTimeout`.
+`spec.idleTimeout` or `spec.maxRunDuration`.
 Zero-execution Workspaces can become idle too. The independent retention
 controller starts at creation and advances activity on Ready, resume, and the
 latest execution completion. Pending and running executions prevent suspension.
+At an idle deadline it also asks the runtime supervisor for activity reported
+with `rc-kube process touch`, such as tool calls served by a resident agent,
+and postpones the suspension when that activity is newer.
+
+`spec.maxRunDuration` suspends compute that long after a run started,
+whatever its activity: the controller stops running executions first.
+See [runtime activity and maximum run](../adr/0008-runtime-activity-and-maximum-run.md).
 
 `spec.deleteAfterSuspended` optionally deletes owned storage
 after confirmed suspension. It defaults to disabled. The persisted
@@ -854,10 +861,11 @@ not override an explicit lifecycle policy.
 A Workspace with `DeleteAfterProcessesExit`, as created by an unnamed `run`
 or `run --rm`, is deleted after the terminal grace period, independently of the
 CLI connection; this command lifetime takes precedence over idle stages.
-The optional `spec.idleTimeout` and `spec.deleteAfterSuspended` clocks both
-remain disabled when omitted or zero. `run` and `workspace create` expose
-`--idle-timeout` and `--delete-after-suspended` directly; Environments do not
-provide lifecycle defaults. CLI and direct API creation use the same fields.
+The optional `spec.idleTimeout`, `spec.maxRunDuration`, and
+`spec.deleteAfterSuspended` clocks all remain disabled when omitted or zero.
+`run` and `workspace create` expose `--idle-timeout`, `--max-run-duration`, and
+`--delete-after-suspended` directly; Environments do not provide lifecycle
+defaults. CLI and direct API creation use the same fields.
 
 Automatic deletion first closes a persistent execution admission fence on the
 Workspace, then scans active executions. Before every runtime start the

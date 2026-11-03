@@ -188,6 +188,32 @@ func TestRunnerWritesEnvironmentToTemporaryWorkspace(t *testing.T) {
 	assert.Equal(t, environment, target.Workspace.Spec.Env, "put registry defaults on the temporary Workspace")
 }
 
+func TestRunnerWritesRuntimePodMetadataAndPriorityToNewWorkspace(t *testing.T) {
+	t.Parallel()
+	requirements := require.New(t)
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	requirements.NoError(repositoriesv1alpha1.AddToScheme(scheme), "register Repository API types")
+	requirements.NoError(workspacesv1alpha1.AddToScheme(scheme), "register Workspace API types")
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	runner := &Runner{Client: kubeClient, NameGenerator: func(string) string { return "with-metadata" }}
+	metadata := &workspacesv1alpha1.WorkspacePodMetadata{
+		Labels:      map[string]string{"example.com/tenant": "team-a"},
+		Annotations: map[string]string{"karpenter.sh/do-not-disrupt": "true"},
+	}
+
+	target, err := runner.Prepare(context.Background(), RunRequest{
+		Namespace:         runnerTestNamespace,
+		Create:            true,
+		Image:             runnerTestImage,
+		PodMetadata:       metadata,
+		PriorityClassName: "workspace-high",
+	})
+	requirements.NoError(err, "prepare temporary Workspace")
+	assert.Equal(t, metadata, target.Workspace.Spec.PodMetadata, "put runtime Pod metadata on the new Workspace")
+	assert.Equal(t, "workspace-high", target.Workspace.Spec.PriorityClassName, "put runtime Pod priority on the new Workspace")
+}
+
 func TestRunnerUsesDefaultWorkspaceWhenNoCodeSourceIsSelected(t *testing.T) {
 	t.Parallel()
 	assertions := assert.New(t)

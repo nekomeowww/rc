@@ -49,6 +49,7 @@ import (
 
 type runOptions struct {
 	placement        command.PlacementOptions
+	runtimePod       command.RuntimePodOptions
 	workspace        string
 	createWorkspace  bool
 	remove           bool
@@ -164,6 +165,7 @@ func addRunFlags(cmd *cobra.Command, options *runOptions) {
 		cmd.Flags().StringVar(&options.size, "size", "20Gi", "Home volume size for a new blank Workspace")
 		cmd.Flags().StringVar(&options.serviceAccount, "service-account", "", "Same-namespace ServiceAccount for a new Workspace")
 		cmd.Flags().BoolVar(&options.noServiceAccount, "no-service-account", false, "Disable ServiceAccount token mounting for a new Workspace")
+		options.runtimePod.AddFlags(cmd.Flags())
 	}
 	cmd.Flags().StringVar(&options.npmRegistry, "npm-registry", "", "npm registry URL for this command")
 	options.gpu.AddFlags(cmd.Flags())
@@ -202,6 +204,10 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 	osName, tolerations, placementErr := options.placement.Resolve()
 	if placementErr != nil {
 		return placementErr
+	}
+	podMetadata, priorityClass, err := options.runtimePod.Resolve()
+	if err != nil {
+		return err
 	}
 	resources, err := options.gpu.ResourceRequirements(cmd.Flags().Changed("gpu"), cmd.Flags().Changed("gpu-vram"))
 	if err != nil {
@@ -267,6 +273,8 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 	runRequest.Resources = resources
 	runRequest.ServiceAccountName = options.serviceAccount
 	runRequest.AutomountServiceAccountToken = automount
+	runRequest.PodMetadata = podMetadata
+	runRequest.PriorityClassName = priorityClass
 	runRequest.NamePrefix = agentType
 	routeNPMRegistryEnvironment(options.createWorkspace, &runRequest, values, registryEnvironment)
 	target, err := (&workspaceservice.Runner{Client: clusterClient.Kube}).Prepare(cmd.Context(), runRequest)

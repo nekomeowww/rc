@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -62,6 +63,7 @@ const darwinOSName corev1.OSName = "darwin"
 
 type createOptions struct {
 	placement        command.PlacementOptions
+	runtimePod       command.RuntimePodOptions
 	environment      string
 	image            string
 	storageClass     string
@@ -125,6 +127,10 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			podMetadata, priorityClass, err := options.runtimePod.Resolve()
+			if err != nil {
+				return err
+			}
 			if osName == darwinOSName && options.environment != "" {
 				return fmt.Errorf("darwin Workspaces do not support --environment")
 			}
@@ -151,6 +157,8 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 					Image: options.image, DefaultWorkingDirectory: options.defaultCwd,
 					ServiceAccountName: options.serviceAccount,
 					Resources:          resources,
+					PodMetadata:        podMetadata,
+					PriorityClassName:  priorityClass,
 				},
 			}
 			if err := applyWorkspaceNPMRegistry(workspace, options.npmRegistry); err != nil {
@@ -213,6 +221,7 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&options.environment, "environment", "", "WorkspaceEnvironment to clone")
 	options.placement.AddFlags(cmd.Flags())
+	options.runtimePod.AddFlags(cmd.Flags())
 	cmd.Flags().StringVar(&options.image, "image", "", "Runner image for a blank Workspace")
 	cmd.Flags().StringVar(&options.storageClass, "storage-class", "", "StorageClass for a blank Workspace")
 	cmd.Flags().StringVar(&options.size, "size", "20Gi", "Home volume size for a blank Workspace")
@@ -990,6 +999,11 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 	if workspace.Spec.RuntimeClassName != nil {
 		runtimeClass = clioutput.ValueOrDash(*workspace.Spec.RuntimeClassName)
 	}
+	var podLabels, podAnnotations map[string]string
+	if workspace.Spec.PodMetadata != nil {
+		podLabels = workspace.Spec.PodMetadata.Labels
+		podAnnotations = workspace.Spec.PodMetadata.Annotations
+	}
 	lifecycle := "-"
 	if workspace.Spec.Lifecycle != nil {
 		lifecycle = fmt.Sprintf("%d initialize, %d before-stop", len(workspace.Spec.Lifecycle.Initialize), len(workspace.Spec.Lifecycle.BeforeStop))
@@ -1017,6 +1031,9 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 		{Name: "Service account", Value: clioutput.ValueOrDash(workspace.Spec.ServiceAccountName)},
 		{Name: "Automount service account token", Value: automountToken},
 		{Name: "Runtime class", Value: runtimeClass},
+		{Name: "Priority class", Value: clioutput.ValueOrDash(workspace.Spec.PriorityClassName)},
+		{Name: "Pod labels", Value: podMetadataSummary(podLabels)},
+		{Name: "Pod annotations", Value: podMetadataSummary(podAnnotations)},
 		{Name: "Idle timeout", Value: durationOrDisabled(workspace.Spec.IdleTimeout)},
 		{Name: "Max run duration", Value: durationOrDisabled(workspace.Spec.MaxRunDuration)},
 		{Name: "Delete after suspended", Value: durationOrDisabled(workspace.Spec.DeleteAfterSuspended)},
@@ -1036,6 +1053,16 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 		{Name: "Lifecycle", Value: lifecycle},
 		{Name: "Conditions", Value: clioutput.Conditions(workspace.Status.Conditions)},
 	}
+}
+
+// podMetadataSummary renders key=value pairs sorted by key.
+func podMetadataSummary(values map[string]string) string {
+	pairs := make([]string, 0, len(values))
+	for _, key := range slices.Sorted(maps.Keys(values)) {
+		pairs = append(pairs, key+"="+values[key])
+	}
+
+	return clioutput.ValueOrDash(strings.Join(pairs, ", "))
 }
 
 func workspaceEnvironmentNames(environment []corev1.EnvVar) string {

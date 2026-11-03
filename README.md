@@ -366,6 +366,27 @@ propagation path. Windows Workspaces retain Pod replacement for mount changes.
 If a mount helper crashes, rc cleans the node bind mount and reports the failure.
 Unmount and remount that Worktree to retry.
 
+#### Scheduling and runtime Pod metadata
+
+`workspace create` and `run` place the runtime Pod with `--node-selector`,
+`--toleration`, and `--priority-class NAME`. They also add labels and
+annotations to that Pod with the repeatable `--pod-label key=value` and
+`--pod-annotation key=value` flags, for example to keep node consolidation
+from evicting a running Workspace or to select it in a NetworkPolicy:
+
+```sh
+rcctl -n development workspace create dev --image ghcr.io/nekomeowww/rc/runner:latest --storage-class csi-hostpath-sc \
+  --priority-class workspace-standard \
+  --pod-label example.com/tenant=team-a \
+  --pod-annotation karpenter.sh/do-not-disrupt=true
+```
+
+These values apply only to the Workspace runtime Pod, and `workspace get`
+shows them. Keys with an `rc.ayaka.io` prefix, or a prefix in one of its
+subdomains, are reserved for rc and rejected. Changing only `spec.podMetadata`
+updates the running Pod in place. Changing `spec.priorityClassName` replaces an
+idle runtime Pod and waits while executions are active.
+
 #### Optimizations
 
 ##### npm

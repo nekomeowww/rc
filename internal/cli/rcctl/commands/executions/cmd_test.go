@@ -150,6 +150,17 @@ func TestExecRejectsWorkspaceCreationFlags(t *testing.T) {
 	}
 }
 
+func TestRuntimePodFlagsOnlyCreateWorkspaces(t *testing.T) {
+	t.Parallel()
+	for _, flag := range []string{"pod-label", "pod-annotation", "priority-class"} {
+		t.Run(flag, func(t *testing.T) {
+			t.Parallel()
+			assert.NotNil(t, newRunCommand(kubeconfig.NewFlags(), true).Flag(flag), "run exposes --%s for its new Workspace", flag)
+			assert.Nil(t, newRunCommand(kubeconfig.NewFlags(), false).Flag(flag), "exec cannot change an existing runtime Pod")
+		})
+	}
+}
+
 func TestExecPreservesCommandArguments(t *testing.T) {
 	t.Parallel()
 	command := newRunCommand(kubeconfig.NewFlags(), false)

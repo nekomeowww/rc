@@ -576,3 +576,29 @@ func TestWaitFailsFastWhenAdmissionRejectsWorkspace(t *testing.T) {
 	assert.ErrorContains(t, err, "exceeded quota: compute")
 	assert.ErrorContains(t, err, "rc keeps retrying")
 }
+
+func TestWorkspaceDetailShowsRuntimePodMetadataAndPriority(t *testing.T) {
+	t.Parallel()
+	workspace := &workspacesv1alpha1.Workspace{Spec: workspacesv1alpha1.WorkspaceSpec{
+		PriorityClassName: "workspace-high",
+		PodMetadata: &workspacesv1alpha1.WorkspacePodMetadata{
+			Labels: map[string]string{
+				"example.com/tenant": "team-a",
+				"billing":            "enabled",
+			},
+			Annotations: map[string]string{"karpenter.sh/do-not-disrupt": "true"},
+		},
+	}}
+
+	fields := workspaceDetailFields(workspace)
+
+	assert.Contains(t, fields, clioutput.Field{Name: "Priority class", Value: "workspace-high"})
+	assert.Contains(t, fields, clioutput.Field{Name: "Pod labels", Value: "billing=enabled, example.com/tenant=team-a"}, "sort labels by key")
+	assert.Contains(t, fields, clioutput.Field{Name: "Pod annotations", Value: "karpenter.sh/do-not-disrupt=true"})
+	assert.Equal(t, "-", podMetadataSummary(nil), "show absent metadata")
+
+	command := newCreateCommand(kubeconfig.NewFlags())
+	for _, flag := range []string{"pod-label", "pod-annotation", "priority-class"} {
+		assert.NotNil(t, command.Flag(flag), "workspace create exposes --%s", flag)
+	}
+}

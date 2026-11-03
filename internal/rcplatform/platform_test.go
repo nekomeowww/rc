@@ -118,3 +118,50 @@ func TestProcessCompilesLogicalRequest(t *testing.T) {
 	assert.NotContains(t, request.Environment, "CODEX_HOME")
 	assert.NotContains(t, request.Environment, "RC_CREDENTIALS_DIR")
 }
+
+func TestWorkspacePodSetsPriorityClassOnlyWhenRequested(t *testing.T) {
+	t.Parallel()
+	for _, osName := range []corev1.OSName{
+		corev1.Linux,
+		corev1.Windows,
+		Darwin,
+	} {
+		t.Run(string(osName), func(t *testing.T) {
+			t.Parallel()
+			assertions := assert.New(t)
+			requirements := require.New(t)
+			runtime, err := Resolve(Target{OS: osName})
+			requirements.NoError(err)
+			intent := WorkspacePodIntent{
+				Metadata:     metav1.ObjectMeta{Name: testProcessName},
+				Image:        testWindowsImage,
+				HomeClaim:    testProcessName,
+				HomeHostPath: "/var/lib/rc/" + testProcessName,
+			}
+
+			pod, err := runtime.WorkspacePod(intent)
+			requirements.NoError(err)
+			assertions.Empty(pod.Spec.PriorityClassName, "omit priority unless requested")
+
+			intent.PriorityClassName = "workspace-high"
+			pod, err = runtime.WorkspacePod(intent)
+			requirements.NoError(err)
+			assertions.Equal("workspace-high", pod.Spec.PriorityClassName, "set the requested PriorityClass on the runtime Pod")
+		})
+	}
+}
+
+func TestEditorPodHasNoPriorityClass(t *testing.T) {
+	t.Parallel()
+	runtime, err := Resolve(Target{})
+	require.NoError(t, err)
+
+	pod, err := runtime.EnvironmentEditorPod(EditorPodIntent{
+		Metadata:  metav1.ObjectMeta{Name: testProcessName},
+		Image:     testWindowsImage,
+		HomeClaim: testProcessName,
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, pod.Spec.PriorityClassName, "runtime priority applies only to Workspace runtime Pods")
+}

@@ -46,6 +46,8 @@ type WorkspacePodIntent struct {
 	AdditionalMounts  []corev1.VolumeMount
 	Initializers      []Initializer
 	BeforeStop        []lifecycle.Action
+	// PriorityClassName is set only on the long-lived Workspace runtime Pod.
+	PriorityClassName string
 }
 
 // WorkspacePod compiles a final Pod without post-construction platform rewrites.
@@ -135,11 +137,14 @@ func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, err
 		initContainers = nil
 	}
 
-	return &corev1.Pod{
+	pod := &corev1.Pod{
 		ObjectMeta: *intent.Metadata.DeepCopy(),
 		Spec: runtime.podSpec(intent.ServiceAccount, &intent.AutomountToken, corev1.RestartPolicyAlways,
 			initContainers, []corev1.Container{container}, volumes),
-	}, nil
+	}
+	pod.Spec.PriorityClassName = intent.PriorityClassName
+
+	return pod, nil
 }
 
 func (runtime Runtime) darwinWorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, error) {
@@ -183,10 +188,13 @@ func (runtime Runtime) darwinWorkspacePod(intent WorkspacePodIntent) (*corev1.Po
 		Name: runtimeContainerName, Image: intent.Image, Resources: intent.Resources,
 		Env: []corev1.EnvVar{{Name: darwinExecArgvEnv, Value: "1"}}, VolumeMounts: mounts, Lifecycle: containerLifecycle,
 	}
-	return &corev1.Pod{ObjectMeta: *intent.Metadata.DeepCopy(), Spec: runtime.podSpec(
+	pod := &corev1.Pod{ObjectMeta: *intent.Metadata.DeepCopy(), Spec: runtime.podSpec(
 		intent.ServiceAccount, &intent.AutomountToken, corev1.RestartPolicyAlways, nil,
 		[]corev1.Container{container}, volumes,
-	)}, nil
+	)}
+	pod.Spec.PriorityClassName = intent.PriorityClassName
+
+	return pod, nil
 }
 
 // EditorPodIntent describes the mutable WorkspaceEnvironment editor runtime.

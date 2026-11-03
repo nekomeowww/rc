@@ -17,6 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"strings"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -142,6 +144,41 @@ type WorkspaceLifecycle struct {
 	BeforeStop []WorkspaceLifecycleAction `json:"beforeStop,omitempty"`
 }
 
+// ReservedPodMetadataDomain is the DNS domain of the labels and annotations
+// that rc sets on its own Pods. Keys in this domain or any of its subdomains,
+// such as workspaces.rc.ayaka.io/workspace, are reserved for rc.
+const ReservedPodMetadataDomain = "rc.ayaka.io"
+
+// IsReservedPodMetadataKey reports whether a label or annotation key uses a
+// prefix that rc reserves for itself.
+func IsReservedPodMetadataKey(key string) bool {
+	prefix, _, found := strings.Cut(key, "/")
+	if !found {
+		return false
+	}
+
+	return prefix == ReservedPodMetadataDomain || strings.HasSuffix(prefix, "."+ReservedPodMetadataDomain)
+}
+
+// WorkspacePodMetadata adds labels and annotations to the Workspace runtime
+// Pod. Keys whose prefix is rc.ayaka.io or one of its subdomains (for example
+// workspaces.rc.ayaka.io/) are reserved for rc and rejected; every label and
+// annotation that rc sets on the runtime Pod uses such a key. Changing only
+// these maps updates the running Pod in place without restarting it.
+type WorkspacePodMetadata struct {
+	// labels are added to the runtime Pod, for example for NetworkPolicy
+	// selectors or cost attribution.
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.startsWith('rc.ayaka.io/') && !k.contains('.rc.ayaka.io/'))",message="label keys with an rc.ayaka.io prefix are reserved for rc"
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
+
+	// annotations are added to the runtime Pod, for example
+	// karpenter.sh/do-not-disrupt: "true".
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.startsWith('rc.ayaka.io/') && !k.contains('.rc.ayaka.io/'))",message="annotation keys with an rc.ayaka.io prefix are reserved for rc"
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
 // WorkspaceSpec defines a development machine with an explicit lifetime.
 type WorkspaceSpec struct {
 	// executionRetention bounds terminal execution history independently of this
@@ -244,6 +281,20 @@ type WorkspaceSpec struct {
 	// runtimeClassName selects a RuntimeClass for the runtime Pod.
 	// +optional
 	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
+
+	// podMetadata adds labels and annotations to the runtime Pod only. Keys
+	// with an rc.ayaka.io prefix, or a prefix in one of its subdomains, are
+	// reserved for rc. A change is applied to the running Pod in place.
+	// +optional
+	PodMetadata *WorkspacePodMetadata `json:"podMetadata,omitempty"`
+
+	// priorityClassName selects a PriorityClass for the runtime Pod. Pod
+	// priority is immutable, so a change replaces an idle runtime Pod like any
+	// other runtime change and waits while executions are active.
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
 
 	// idleTimeout suspends compute after inactivity. Zero or omitted disables it.
 	// Creation, Ready, resume, execution completion, and work reported to the

@@ -323,6 +323,11 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if desiredState == workspacesv1alpha1.WorkspaceDesiredStateSuspended {
 		return r.suspendWorkspace(ctx, workspace, resolved, active)
 	}
+	// The CRD rejects reserved keys; this also covers an older CRD and the label
+	// and annotation syntax the CRD does not check.
+	if reason, message := validateWorkspacePodMetadata(workspace.Spec.PodMetadata); reason != "" {
+		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reason, message)
+	}
 
 	if resolved.automountSAToken && resolved.serviceAccount == defaultWorkspaceServiceAccount {
 		if err := r.ensureWorkspaceAccess(ctx, workspace.Namespace); err != nil {
@@ -465,6 +470,11 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		// A newly requested writable mount conflicts; the runtime keeps running
 		// and the mount starts once the other writer releases the Worktree.
 		return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, claimReason, claimMessage)
+	}
+	// Labels and annotations are mutable, so they reach the running Pod even
+	// while a topology change waits for active executions.
+	if err := r.reconcileRuntimePodMetadata(ctx, workspace, pod); err != nil {
+		return ctrl.Result{}, err
 	}
 	if pod.Annotations[workspaceTopologyAnnotation] != expectedTopology {
 		if active {
@@ -1050,7 +1060,7 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 	if platform.OS() == corev1.Linux {
 		hotMountRoot = hotMountHostRoot(workspace)
 	}
-	return platform.WorkspacePod(rcplatform.WorkspacePodIntent{
+	pod, err := platform.WorkspacePod(rcplatform.WorkspacePodIntent{
 		Metadata: metav1.ObjectMeta{
 			Name:      workspace.Name,
 			Namespace: workspace.Namespace,
@@ -1066,7 +1076,14 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 		ServiceAccount:  resolved.serviceAccount, AutomountToken: resolved.automountSAToken,
 		Resources: workspace.Spec.Resources, AdditionalVolumes: resolved.volumes, AdditionalMounts: resolved.volumeMounts,
 		Initializers: initializers, BeforeStop: resolved.beforeStop,
+		PriorityClassName: workspace.Spec.PriorityClassName,
 	})
+	if err != nil {
+		return nil, err
+	}
+	applyWorkspacePodMetadata(pod, workspace.Spec.PodMetadata)
+
+	return pod, nil
 }
 
 func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *resolvedWorkspace) (string, error) {
@@ -1098,6 +1115,9 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 		RuntimeClassName *string
 		Lifecycle        *workspacesv1alpha1.WorkspaceLifecycle
 		HomeHostPath     string
+		// PriorityClassName is omitted when empty so that adding the field
+		// keeps the hash of existing runtime Pods and does not replace them.
+		PriorityClassName string `json:",omitempty"`
 	}{
 		RuntimePolicy: workspaceRuntimePolicyVersion, OS: resolved.runtime.OS(),
 		Image: resolved.image, Mounts: mounts, ConfigMapRefs: workspace.Spec.ConfigMapRefs,
@@ -1106,6 +1126,7 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 		AutomountSAToken: resolved.automountSAToken, Resources: workspace.Spec.Resources,
 		NodeSelector: workspace.Spec.NodeSelector, Tolerations: workspace.Spec.Tolerations,
 		Affinity: workspace.Spec.Affinity, RuntimeClassName: workspace.Spec.RuntimeClassName, Lifecycle: workspace.Spec.Lifecycle,
+		PriorityClassName: workspace.Spec.PriorityClassName,
 	}
 	data, err := json.Marshal(topology)
 	if err != nil {

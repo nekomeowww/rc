@@ -304,6 +304,29 @@ an process targets an existing Workspace, these flags are requirements:
 the command rejects a Workspace that does not already provide the requested
 quantities instead of mutating its runtime topology.
 
+#### Runtime Pod metadata and priority
+
+`spec.podMetadata.labels` and `spec.podMetadata.annotations` add labels and
+annotations to the Workspace runtime Pod, for example a node-consolidation
+opt-out, NetworkPolicy selectors, or cost-attribution labels. They do not apply
+to Environment editor Pods, hot-mount helper Pods, or one-shot helper Pods.
+Every label and annotation that rc sets on its Pods uses an `rc.ayaka.io` or
+`*.rc.ayaka.io` key prefix. Those prefixes are reserved: the CRD rejects such
+keys, and the controller reports `ReservedPodMetadataKey` and keeps rc's values
+if one reaches it. The controller also reports `InvalidPodMetadata` for label
+or annotation syntax that Kubernetes would reject. Pod metadata is mutable, so a
+change is patched onto the running Pod without a restart. The controller
+records the keys it applied in an rc annotation, so it removes a key dropped
+from the spec and leaves keys that other controllers set.
+
+`spec.priorityClassName` sets the runtime Pod priority. Pod priority is
+immutable, so the value is part of the runtime topology hash. A change follows
+the topology rules below: it replaces an idle runtime Pod and reports
+`TopologyChangeBlocked` while executions are active. An empty value does not
+change the hash, so existing Pods are not replaced when this field is added.
+`workspace create` and `run` expose `--pod-label`, `--pod-annotation`, and
+`--priority-class`.
+
 ### Start, suspend, and topology changes
 
 A Workspace has a desired runtime state:

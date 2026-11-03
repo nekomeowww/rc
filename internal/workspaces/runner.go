@@ -74,8 +74,11 @@ type RunRequest struct {
 	Resources                    corev1.ResourceRequirements
 	ServiceAccountName           string
 	AutomountServiceAccountToken *bool
-	NamePrefix                   string
-	Env                          []corev1.EnvVar
+	// PodMetadata and PriorityClassName apply only to a new Workspace.
+	PodMetadata       *workspacesv1alpha1.WorkspacePodMetadata
+	PriorityClassName string
+	NamePrefix        string
+	Env               []corev1.EnvVar
 }
 
 type RunTarget struct {
@@ -334,6 +337,8 @@ func (runner *Runner) createTarget(ctx context.Context, request RunRequest) (tar
 			Resources:                    request.Resources,
 			ServiceAccountName:           request.ServiceAccountName,
 			AutomountServiceAccountToken: request.AutomountServiceAccountToken,
+			PodMetadata:                  request.PodMetadata.DeepCopy(),
+			PriorityClassName:            request.PriorityClassName,
 			RetentionPolicy:              request.RetentionPolicy,
 			IdleTimeout:                  request.IdleTimeout,
 			MaxRunDuration:               request.MaxRunDuration,

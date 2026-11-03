@@ -1412,6 +1412,43 @@ spec:
                 x-kubernetes-validations:
                 - message: Workspace OS is immutable
                   rule: self == oldSelf
+              podMetadata:
+                description: |-
+                  podMetadata adds labels and annotations to the runtime Pod only. Keys
+                  with an rc.ayaka.io prefix, or a prefix in one of its subdomains, are
+                  reserved for rc. A change is applied to the running Pod in place.
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      annotations are added to the runtime Pod, for example
+                      karpenter.sh/do-not-disrupt: "true".
+                    type: object
+                    x-kubernetes-validations:
+                    - message: annotation keys with an rc.ayaka.io prefix are reserved
+                        for rc
+                      rule: self.all(k, !k.startsWith('rc.ayaka.io/') && !k.contains('.rc.ayaka.io/'))
+                  labels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      labels are added to the runtime Pod, for example for NetworkPolicy
+                      selectors or cost attribution.
+                    type: object
+                    x-kubernetes-validations:
+                    - message: label keys with an rc.ayaka.io prefix are reserved
+                        for rc
+                      rule: self.all(k, !k.startsWith('rc.ayaka.io/') && !k.contains('.rc.ayaka.io/'))
+                type: object
+              priorityClassName:
+                description: |-
+                  priorityClassName selects a PriorityClass for the runtime Pod. Pod
+                  priority is immutable, so a change replaces an idle runtime Pod like any
+                  other runtime change and waits while executions are active.
+                maxLength: 253
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                type: string
               resources:
                 description: resources are shared by all processes in the runtime
                   Pod.

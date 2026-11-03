@@ -151,6 +151,69 @@ func TestWorkspacePodSetsPriorityClassOnlyWhenRequested(t *testing.T) {
 	}
 }
 
+func TestWorkspacePodPassesServicesToSupervisor(t *testing.T) {
+	t.Parallel()
+	services := []processruntime.Service{
+		{
+			Name:            "agent",
+			Command:         []string{"device-agent", "serve"},
+			Environment:     map[string]string{"GATEWAY": "wss://gateway.example.com"},
+			EnvironmentFrom: map[string]string{"TOKEN": processruntime.ServiceEnvironmentPrefix + "0"},
+		},
+	}
+	environment := []corev1.EnvVar{
+		{
+			Name: processruntime.ServiceEnvironmentPrefix + "0",
+			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "agent-token"},
+				Key:                  "token",
+			}},
+		},
+	}
+
+	for _, testCase := range []struct {
+		name string
+		os   corev1.OSName
+	}{
+		{
+			name: "Linux",
+			os:   corev1.Linux,
+		},
+		{
+			name: "Windows",
+			os:   corev1.Windows,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			runtime, err := Resolve(Target{OS: testCase.os})
+			require.NoError(t, err)
+			pod, err := runtime.WorkspacePod(WorkspacePodIntent{
+				Metadata:           metav1.ObjectMeta{Name: testProcessName},
+				Image:              testWindowsImage,
+				HomeClaim:          testProcessName,
+				Services:           services,
+				ServiceEnvironment: environment,
+			})
+			require.NoError(t, err)
+			container := pod.Spec.Containers[0]
+			index := -1
+			for position, argument := range container.Args {
+				if argument == servicesArgument {
+					index = position
+				}
+			}
+			require.NotEqual(t, -1, index, "rc-kube serve receives the services argument")
+			require.Less(t, index+1, len(container.Args))
+			decoded, err := processruntime.DecodeServices(container.Args[index+1])
+			require.NoError(t, err)
+			assert.Equal(t, services, decoded)
+			assert.Equal(t, environment, container.Env, "Kubernetes resolves Secret values at container start")
+			assert.NotContains(t, container.Args[index+1], "agent-token", "the argument carries references by variable name only")
+		})
+	}
+}
+
 func TestEditorPodHasNoPriorityClass(t *testing.T) {
 	t.Parallel()
 	runtime, err := Resolve(Target{})
@@ -164,4 +227,33 @@ func TestEditorPodHasNoPriorityClass(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Empty(t, pod.Spec.PriorityClassName, "runtime priority applies only to Workspace runtime Pods")
+}
+
+func TestWorkspacePodWithoutServicesIsUnchanged(t *testing.T) {
+	t.Parallel()
+	runtime, err := Resolve(Target{OS: corev1.Linux})
+	require.NoError(t, err)
+	pod, err := runtime.WorkspacePod(WorkspacePodIntent{Metadata: metav1.ObjectMeta{Name: testProcessName}, Image: testWindowsImage, HomeClaim: testProcessName})
+	require.NoError(t, err)
+	container := pod.Spec.Containers[0]
+	assert.NotContains(t, container.Args, servicesArgument)
+	assert.Nil(t, container.Env)
+}
+
+func TestDarwinWorkspacePodRejectsServices(t *testing.T) {
+	t.Parallel()
+	runtime, err := Resolve(Target{OS: Darwin})
+	require.NoError(t, err)
+	_, err = runtime.WorkspacePod(WorkspacePodIntent{
+		Metadata:     metav1.ObjectMeta{Name: testProcessName},
+		Image:        "example/macos",
+		HomeHostPath: "/var/lib/rc/home",
+		Services: []processruntime.Service{
+			{
+				Name:    "agent",
+				Command: []string{"device-agent"},
+			},
+		},
+	})
+	require.ErrorContains(t, err, "do not support services")
 }

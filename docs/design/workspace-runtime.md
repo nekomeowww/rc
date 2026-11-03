@@ -422,6 +422,76 @@ an idempotent branch checkout in its first init container. The Worktree
 controller observes that init container and owns the final Worktree `Ready`
 condition. Ordinary independently managed Worktrees retain their bootstrap Job.
 
+### Resident services
+
+`spec.services` lists processes that the `rc-kube` supervisor starts each time
+the runtime starts and keeps running, such as an agent that connects out to a
+gateway and serves tool calls. A service is not a WorkspaceExec:
+
+```yaml
+spec:
+  env:
+    - name: GATEWAY_URL
+      value: wss://gateway.example.com
+  services:
+    - name: agent
+      command: ["device-agent", "serve"]
+      env:
+        - name: DEVICE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: device-token
+              key: token
+```
+
+- `name` is a DNS label, unique in the list. `command` is an exact argv.
+  `workingDirectory` defaults to `spec.defaultWorkingDirectory`, then to
+  `/workspace`.
+- A service receives the Workspace `env`, which a WorkspaceExec also receives
+  by default, overridden by its own `env`. Values may come from a Secret or
+  ConfigMap key. A service does not receive credentials or an Agent home.
+- `RC_KUBE_SOCKET` holds the local endpoint. `rc-kube process` commands use it
+  by default.
+
+The controller passes the list to `rc-kube serve` as one encoded argument. A
+value from a Secret or ConfigMap becomes an `RC_SERVICE_ENV_<n>` variable of the
+runtime container, so Kubernetes reads it at container start and the Pod spec
+holds only the reference. The supervisor resolves these variables and removes
+them from its own environment before it starts any process. Anyone who can
+exec into the runtime container can still read them, as with `secretRefs`.
+
+The list, the variables, and the Workspace `env` a service sees are part of the
+runtime topology. A change replaces the runtime Pod once no execution is
+active, as other topology changes do. A Secret value change takes effect at the
+next runtime start. Without services, the topology hash and Pod are unchanged.
+
+The supervisor starts every service once its endpoint listens. It restarts a
+service each time it exits, after a delay that starts at 1 second, doubles up
+to 1 minute, and starts over after a run of at least 1 minute. On shutdown it
+stops services with the same stop grace as other processes and does not
+restart them.
+
+Services never count as activity: starting or restarting one does not record
+activity, and services do not appear in `status.lifecycle.activeExecutions`.
+They do not block idle suspension, maximum-run suspension, topology changes,
+or deletion. A service that does real work reports it with
+`rc-kube process touch`, as described in
+[runtime activity and maximum run](../adr/0008-runtime-activity-and-maximum-run.md).
+
+Each run is a supervisor process record with the ID
+`service_<name>_<start time>`. `rcctl ps --id-prefix service_` lists runs, and
+`rcctl logs ID` and `rcctl inspect ID` read one. A
+Kubernetes object name never contains an underscore, so a run cannot collide
+with a WorkspaceExec. The supervisor keeps the five newest finished runs of
+each service. Restart notices go to the runtime container log.
+
+Linux and Windows runtimes support services. The Darwin runtime starts the
+supervisor from a VM provider hook and does not pass container variables to
+it, so the API rejects services on Darwin. `rcctl workspace create` has no
+service flags; declare services in the Workspace YAML or through the API.
+`rcctl workspace get` lists their names and commands.
+See [resident Workspace services](../adr/0009-resident-workspace-services.md).
+
 ## WorkspaceExec
 
 WorkspaceExec records a command running in a Workspace or Workspace Environment

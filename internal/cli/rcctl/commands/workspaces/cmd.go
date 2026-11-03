@@ -1051,6 +1051,7 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 		{Name: "Secrets", Value: workspaceReferenceNames(workspace.Spec.SecretRefs)},
 		{Name: "Environment variables", Value: workspaceEnvironmentNames(workspace.Spec.Env)},
 		{Name: "Lifecycle", Value: lifecycle},
+		{Name: "Services", Value: workspaceServiceSummary(workspace.Spec.Services)},
 		{Name: "Conditions", Value: clioutput.Conditions(workspace.Status.Conditions)},
 	}
 }
@@ -1072,6 +1073,17 @@ func workspaceEnvironmentNames(environment []corev1.EnvVar) string {
 	}
 
 	return clioutput.ValueOrDash(strings.Join(names, ", "))
+}
+
+// workspaceServiceSummary names each service with its command. Environment
+// values are left out, as for the Workspace env.
+func workspaceServiceSummary(services []workspacesv1alpha1.WorkspaceService) string {
+	summaries := make([]string, len(services))
+	for index, service := range services {
+		summaries[index] = fmt.Sprintf("%s (%s)", service.Name, strings.Join(service.Command, " "))
+	}
+
+	return clioutput.ValueOrDash(strings.Join(summaries, ", "))
 }
 
 func workspaceStorageSummary(storage workspacesv1alpha1.PersistentStorageSpec) string {

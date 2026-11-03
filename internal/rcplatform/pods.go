@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/lifecycle"
 	"github.com/nekomeowww/rc/internal/runtimepolicy"
 )
@@ -24,6 +25,7 @@ const (
 	unixShellExecutable  = "/bin/sh"
 	actionsArgument      = "--actions"
 	lifecycleCommand     = "lifecycle"
+	servicesArgument     = "--services"
 )
 
 // Initializer runs one lifecycle action before the runtime becomes ready.
@@ -48,11 +50,19 @@ type WorkspacePodIntent struct {
 	BeforeStop        []lifecycle.Action
 	// PriorityClassName is set only on the long-lived Workspace runtime Pod.
 	PriorityClassName string
+	// Services reach rc-kube serve as one argument. ServiceEnvironment holds
+	// the runtime container variables their Secret and ConfigMap values come
+	// from; both are part of the Pod, so a change takes a new runtime.
+	Services           []processruntime.Service
+	ServiceEnvironment []corev1.EnvVar
 }
 
 // WorkspacePod compiles a final Pod without post-construction platform rewrites.
 func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, error) {
 	if runtime.os == Darwin {
+		if len(intent.Services) > 0 {
+			return nil, fmt.Errorf("darwin Workspace runtimes do not support services")
+		}
 		return runtime.darwinWorkspacePod(intent)
 	}
 	volumes := make([]corev1.Volume, 0, len(intent.AdditionalVolumes)+4)
@@ -112,9 +122,17 @@ func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, err
 	if intent.TranscriptScope != "" {
 		serveArgs = append(serveArgs, "--transcript-scope", intent.TranscriptScope)
 	}
+	if len(intent.Services) > 0 {
+		encoded, err := processruntime.EncodeServices(intent.Services)
+		if err != nil {
+			return nil, fmt.Errorf("encode Workspace services: %w", err)
+		}
+		serveArgs = append(serveArgs, servicesArgument, encoded)
+	}
 	container := corev1.Container{
 		Name: runtimeContainerName, Image: intent.Image,
 		Command: []string{runtime.layout.executable, serveCommand}, Args: serveArgs,
+		Env:       slices.Clone(intent.ServiceEnvironment),
 		Resources: intent.Resources, VolumeMounts: mounts, Lifecycle: containerLifecycle,
 		ReadinessProbe: runtime.readinessProbe(), SecurityContext: runtimepolicy.ContainerSecurityContext(runtime.os),
 	}

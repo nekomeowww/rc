@@ -166,6 +166,28 @@ func TestWorkspaceDetailShowsEnvironmentVariableNames(t *testing.T) {
 	assert.Contains(t, fields, clioutput.Field{Name: "Environment variables", Value: "NPM_CONFIG_REGISTRY, FROM_SECRET"}, "show names without exposing values")
 }
 
+const testServicesField = "Services"
+
+func TestWorkspaceDetailListsServices(t *testing.T) {
+	t.Parallel()
+	workspace := &workspacesv1alpha1.Workspace{Spec: workspacesv1alpha1.WorkspaceSpec{Services: []workspacesv1alpha1.WorkspaceService{
+		{
+			Name:    "agent",
+			Command: []string{"device-agent", "serve"},
+			Env: []corev1.EnvVar{
+				{Name: "TOKEN", Value: "must-not-appear"},
+			},
+		},
+		{
+			Name:    "proxy",
+			Command: []string{"proxy"},
+		},
+	}}}
+
+	assert.Contains(t, workspaceDetailFields(workspace), clioutput.Field{Name: testServicesField, Value: "agent (device-agent serve), proxy (proxy)"}, "list names and commands without env values")
+	assert.Contains(t, workspaceDetailFields(&workspacesv1alpha1.Workspace{}), clioutput.Field{Name: testServicesField, Value: "-"})
+}
+
 func TestWorkspaceListTableUsesHumanAgeAndWideMetadata(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)

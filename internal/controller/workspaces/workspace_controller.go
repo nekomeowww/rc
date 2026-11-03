@@ -46,6 +46,7 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/lifecycle"
 	"github.com/nekomeowww/rc/internal/rcplatform"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
@@ -106,6 +107,8 @@ type resolvedWorkspace struct {
 	worktreeMounts       []*repositoriesv1alpha1.Worktree
 	initializers         []workspaceInitializer
 	beforeStop           []lifecycle.Action
+	services             []processruntime.Service
+	serviceEnvironment   []corev1.EnvVar
 	homeHostPath         string
 	// storageReady is published as StorageReady once home storage has been
 	// evaluated in this pass; nil leaves the previous condition unchanged.
@@ -703,6 +706,9 @@ func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspac
 		if len(workspace.Spec.ConfigMapRefs) > 0 || len(workspace.Spec.SecretRefs) > 0 {
 			return resolved, "UnsupportedDarwinProjection", "Darwin Workspaces do not support ConfigMap or Secret volume mounts", nil
 		}
+		if len(workspace.Spec.Services) > 0 {
+			return resolved, "UnsupportedDarwinServices", "Darwin Workspaces do not support services", nil
+		}
 		if r.DarwinWorkspaceRoot == "" {
 			return resolved, "DarwinWorkspaceRootRequired", "The controller must configure --darwin-workspace-root", nil
 		}
@@ -895,6 +901,9 @@ func (r *WorkspaceReconciler) resolveWorkspaceDependencies(ctx context.Context, 
 			resolved.beforeStop = append(resolved.beforeStop, resolvedAction)
 		}
 	}
+	if reason, message, err := r.resolveWorkspaceServices(ctx, workspace, resolved); err != nil || reason != "" {
+		return resolved, reason, message, err
+	}
 
 	resolved.automountSAToken = workspace.Spec.AutomountServiceAccountToken == nil || *workspace.Spec.AutomountServiceAccountToken
 	if resolved.runtime.OS() == rcplatform.Darwin && workspace.Spec.AutomountServiceAccountToken == nil {
@@ -1077,6 +1086,7 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 		Resources: workspace.Spec.Resources, AdditionalVolumes: resolved.volumes, AdditionalMounts: resolved.volumeMounts,
 		Initializers: initializers, BeforeStop: resolved.beforeStop,
 		PriorityClassName: workspace.Spec.PriorityClassName,
+		Services:          resolved.services, ServiceEnvironment: resolved.serviceEnvironment,
 	})
 	if err != nil {
 		return nil, err
@@ -1118,6 +1128,9 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 		// PriorityClassName is omitted when empty so that adding the field
 		// keeps the hash of existing runtime Pods and does not replace them.
 		PriorityClassName string `json:",omitempty"`
+		// Omitted when empty, so Workspaces without services keep their hash.
+		Services           []processruntime.Service `json:",omitempty"`
+		ServiceEnvironment []corev1.EnvVar          `json:",omitempty"`
 	}{
 		RuntimePolicy: workspaceRuntimePolicyVersion, OS: resolved.runtime.OS(),
 		Image: resolved.image, Mounts: mounts, ConfigMapRefs: workspace.Spec.ConfigMapRefs,
@@ -1127,6 +1140,7 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 		NodeSelector: workspace.Spec.NodeSelector, Tolerations: workspace.Spec.Tolerations,
 		Affinity: workspace.Spec.Affinity, RuntimeClassName: workspace.Spec.RuntimeClassName, Lifecycle: workspace.Spec.Lifecycle,
 		PriorityClassName: workspace.Spec.PriorityClassName,
+		Services:          resolved.services, ServiceEnvironment: resolved.serviceEnvironment,
 	}
 	data, err := json.Marshal(topology)
 	if err != nil {

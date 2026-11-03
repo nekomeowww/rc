@@ -179,7 +179,41 @@ type WorkspacePodMetadata struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
+// WorkspaceService is one resident process that the runtime supervisor starts
+// whenever the runtime starts and restarts whenever it exits. It is not a
+// WorkspaceExec: it never counts as activity and never blocks suspension or
+// deletion. A service reports its own work with `rc-kube process touch`.
+type WorkspaceService struct {
+	// name identifies the service in process history and logs.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+	// +required
+	Name string `json:"name"`
+
+	// command is executed as an exact argv without shell interpretation.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:MinLength=1
+	// +required
+	Command []string `json:"command"`
+
+	// workingDirectory defaults to the Workspace defaultWorkingDirectory, then
+	// to /workspace.
+	// +optional
+	WorkingDirectory string `json:"workingDirectory,omitempty"`
+
+	// env overrides the Workspace env for this service. Values may come from a
+	// Secret or ConfigMap key; they are read when the runtime starts.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:XValidation:rule="self.all(variable, !has(variable.valueFrom) || has(variable.valueFrom.secretKeyRef) || has(variable.valueFrom.configMapKeyRef))",message="service env valueFrom supports only secretKeyRef and configMapKeyRef"
+	// +optional
+	Env []corev1.EnvVar `json:"env,omitempty"`
+}
+
 // WorkspaceSpec defines a development machine with an explicit lifetime.
+// +kubebuilder:validation:XValidation:rule="!has(self.services) || size(self.services) == 0 || !has(self.os) || self.os != 'darwin'",message="Darwin Workspaces do not support services"
 type WorkspaceSpec struct {
 	// executionRetention bounds terminal execution history independently of this
 	// target's lifetime. Omission preserves existing history on upgrade.
@@ -253,6 +287,16 @@ type WorkspaceSpec struct {
 	// lifecycle configures commands and scripts around each runtime Pod.
 	// +optional
 	Lifecycle *WorkspaceLifecycle `json:"lifecycle,omitempty"`
+
+	// services are resident processes kept running in the runtime, such as an
+	// agent that serves tool calls. Each one receives the Workspace env, like a
+	// WorkspaceExec, plus RC_KUBE_SOCKET. A change replaces the runtime Pod once
+	// no execution is active. Linux and Windows runtimes only.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=16
+	// +optional
+	Services []WorkspaceService `json:"services,omitempty"`
 
 	// serviceAccountName overrides the namespace rc-workspace ServiceAccount.
 	// +optional

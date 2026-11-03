@@ -133,6 +133,10 @@ type Supervisor struct {
 	processes    map[string]*supervisedProcess
 	maxLog       int64
 	aliases      map[string]*credentialAlias
+	// services are started by Serve and kept running until it returns.
+	services       []processruntime.Service
+	serviceLog     io.Writer
+	serviceBackoff serviceBackoff
 }
 
 type credentialAlias struct {
@@ -163,6 +167,7 @@ func NewSupervisor(stateDir string, stopGrace time.Duration, options ...Supervis
 	supervisor := &Supervisor{
 		stateDir: stateDir, runtimeRoot: filepath.Join(os.TempDir(), "rc-kube"), stopGrace: stopGrace,
 		processes: make(map[string]*supervisedProcess), maxLog: 64 << 20, aliases: make(map[string]*credentialAlias),
+		serviceLog: io.Discard, serviceBackoff: defaultServiceBackoff,
 	}
 	for _, option := range options {
 		option(supervisor)
@@ -208,11 +213,19 @@ func (supervisor *Supervisor) Shutdown() {
 	pending.Wait()
 }
 
-// Start launches a command once for the (ID, UID) identity.
+// Start launches a command once for the (ID, UID) identity and records the
+// start as activity.
 // ctx governs preparation; launched children remain owned by the supervisor.
 // The protocol server passes its service context, so client disconnection does
 // not cancel an accepted start. Shutdown must run after pending starts finish.
 func (supervisor *Supervisor) Start(ctx context.Context, request processruntime.StartRequest) (processruntime.State, error) {
+	return supervisor.start(ctx, request, true)
+}
+
+// start launches a command once. Only requested work records activity: a
+// resident service starting or restarting is not work, or a crash loop would
+// keep the Workspace awake.
+func (supervisor *Supervisor) start(ctx context.Context, request processruntime.StartRequest, activity bool) (processruntime.State, error) {
 	if err := ctx.Err(); err != nil {
 		return processruntime.State{}, err
 	}
@@ -225,7 +238,9 @@ func (supervisor *Supervisor) Start(ctx context.Context, request processruntime.
 	if len(request.Command) == 0 || request.Command[0] == "" {
 		return processruntime.State{}, errors.New("process command is required")
 	}
-	supervisor.Touch(time.Now())
+	if activity {
+		supervisor.Touch(time.Now())
+	}
 
 	supervisor.mu.Lock()
 	defer supervisor.mu.Unlock()

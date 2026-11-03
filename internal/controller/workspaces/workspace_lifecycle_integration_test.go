@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/rcplatform"
 )
 
 var _ = Describe("Workspace lifecycle API", func() {
@@ -40,6 +41,55 @@ var _ = Describe("Workspace lifecycle API", func() {
 		Expect(k8sClient.Update(ctx, workspace)).NotTo(Succeed())
 		workspace.Spec.DeleteAfterSuspended.Duration = 24 * time.Hour
 		Expect(k8sClient.Update(ctx, workspace)).To(Succeed())
+	})
+	It("validates services", func() {
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "services-"}}
+		Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, namespace)).To(Succeed()) })
+		workspace := &workspacesv1alpha1.Workspace{
+			ObjectMeta: metav1.ObjectMeta{Name: "device", Namespace: namespace.Name},
+			Spec: workspacesv1alpha1.WorkspaceSpec{Services: []workspacesv1alpha1.WorkspaceService{
+				{
+					Name:    testServiceName,
+					Command: []string{testServiceCommand, testServiceArgument},
+					Env: []corev1.EnvVar{
+						{
+							Name: testServiceVariable,
+							ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+								LocalObjectReference: corev1.LocalObjectReference{Name: testServiceSecret},
+								Key:                  "token",
+							}},
+						},
+					},
+				},
+			}},
+		}
+		Expect(k8sClient.Create(ctx, workspace)).To(Succeed())
+
+		duplicate := workspace.DeepCopy()
+		duplicate.Spec.Services = append(duplicate.Spec.Services, *duplicate.Spec.Services[0].DeepCopy())
+		Expect(k8sClient.Update(ctx, duplicate)).NotTo(Succeed(), "service names are unique")
+
+		invalidName := workspace.DeepCopy()
+		invalidName.Spec.Services[0].Name = "Agent_1"
+		Expect(k8sClient.Update(ctx, invalidName)).NotTo(Succeed(), "a service name is a DNS label")
+
+		noCommand := workspace.DeepCopy()
+		noCommand.Spec.Services[0].Command = nil
+		Expect(k8sClient.Update(ctx, noCommand)).NotTo(Succeed())
+
+		fieldReference := workspace.DeepCopy()
+		fieldReference.Spec.Services[0].Env[0].ValueFrom = &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"}}
+		Expect(k8sClient.Update(ctx, fieldReference)).NotTo(Succeed(), "a WorkspaceExec cannot read field references either")
+
+		darwin := &workspacesv1alpha1.Workspace{
+			ObjectMeta: metav1.ObjectMeta{Name: "darwin", Namespace: namespace.Name},
+			Spec: workspacesv1alpha1.WorkspaceSpec{
+				OS:       rcplatform.Darwin,
+				Services: workspace.Spec.Services,
+			},
+		}
+		Expect(k8sClient.Create(ctx, darwin)).NotTo(Succeed(), "Darwin runtimes do not support services")
 	})
 	It("serializes unchanged status admission with closure and rejects a reopened DELETE snapshot", func() {
 		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "admission-"}}

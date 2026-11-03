@@ -42,6 +42,10 @@ import (
 const (
 	temporaryWorkspaceCleanupDelay = 5 * time.Minute
 	temporaryWorkspaceStartTimeout = 15 * time.Minute
+	// runtimeActivityTimeout bounds the activity query at an idle deadline.
+	// A runtime that accepts the exec but never answers must not hold the
+	// retention worker, which every Workspace's deadlines share.
+	runtimeActivityTimeout = 15 * time.Second
 )
 
 // WorkspaceRetentionReconciler applies idle suspension and deletes Workspaces
@@ -221,7 +225,9 @@ func (r *WorkspaceRetentionReconciler) postponeForRuntimeActivity(ctx context.Co
 	if err != nil {
 		return 0, fmt.Errorf("resolve runtime platform for activity: %w", err)
 	}
-	activity, err := r.Activity.LastActivity(ctx, platform.ProcessTarget(workspace.Namespace, pod.Name, runtimeContainerName))
+	queryCtx, cancel := context.WithTimeout(ctx, runtimeActivityTimeout)
+	defer cancel()
+	activity, err := r.Activity.LastActivity(queryCtx, platform.ProcessTarget(workspace.Namespace, pod.Name, runtimeContainerName))
 	if errors.Is(err, processruntime.ErrActivityUnsupported) {
 		return 0, nil
 	}

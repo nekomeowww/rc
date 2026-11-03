@@ -210,7 +210,14 @@ func startTestServer(t *testing.T, options ...SupervisorOption) (*Supervisor, *C
 	require.NoError(t, os.Remove(socketPath))
 	t.Cleanup(func() { _ = os.Remove(socketPath) })
 	supervisor := newTestSupervisor(t, t.TempDir(), 100*time.Millisecond, options...)
-	go func() { _ = NewServer(supervisor).Serve(t.Context(), socketPath) }()
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		_ = NewServer(supervisor).Serve(t.Context(), socketPath)
+	}()
+	// The test context ends before cleanups run. Wait for Serve to stop its
+	// services and processes before the state directory is removed.
+	t.Cleanup(func() { <-served })
 	client := NewClient(socketPath)
 	require.Eventually(t, func() bool { return client.Ping(context.Background()) == nil }, time.Second, 10*time.Millisecond)
 

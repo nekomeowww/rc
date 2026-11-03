@@ -39,10 +39,14 @@ type stubActivityReader struct {
 	calls    int
 	activity processruntime.Activity
 	err      error
+	// deadline records whether the query had a deadline, so a runtime that
+	// never answers cannot hold the retention worker.
+	deadline bool
 }
 
-func (reader *stubActivityReader) LastActivity(context.Context, processruntime.Target) (processruntime.Activity, error) {
+func (reader *stubActivityReader) LastActivity(ctx context.Context, _ processruntime.Target) (processruntime.Activity, error) {
 	reader.calls++
+	_, reader.deadline = ctx.Deadline()
 	return reader.activity, reader.err
 }
 
@@ -230,4 +234,19 @@ func TestRetentionKeepsWorkspaceWhenActivityCannotBeRead(t *testing.T) {
 	persisted := new(workspacesv1alpha1.Workspace)
 	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(workspace), persisted))
 	assert.Equal(t, workspacesv1alpha1.WorkspaceDesiredStateRunning, persisted.Spec.DesiredState, "do not suspend work that may be in progress")
+}
+
+func TestRetentionBoundsTheActivityQuery(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace, pod := runningWorkspace("silent", time.Now().Add(-2*time.Hour))
+	workspace.Spec.IdleTimeout = &metav1.Duration{Duration: time.Hour}
+	kubeClient := newRetentionTestClient(t, workspace, pod)
+	activity := &stubActivityReader{}
+	reconciler := &WorkspaceRetentionReconciler{Client: kubeClient, APIReader: kubeClient, Activity: activity}
+
+	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(workspace)})
+
+	require.NoError(t, err)
+	assert.True(t, activity.deadline, "the activity query always has a deadline")
 }

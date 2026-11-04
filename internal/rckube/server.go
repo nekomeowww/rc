@@ -51,6 +51,11 @@ func (server *Server) Serve(ctx context.Context, socketPath string) error {
 	if err != nil {
 		return fmt.Errorf("listen on rc-kube local endpoint: %w", err)
 	}
+	// Services start once the endpoint accepts their activity reports. Their
+	// wait runs after ctx is cancelled below and before Shutdown, so a stopped
+	// service is never restarted.
+	waitForServices := server.supervisor.runServices(ctx, socketPath)
+	defer waitForServices()
 	var handlers sync.WaitGroup
 	stop := context.AfterFunc(ctx, func() { _ = listener.Close() })
 	defer func() {
@@ -113,6 +118,15 @@ func (server *Server) handle(serverContext context.Context, connection net.Conn)
 		}
 		_, err := server.supervisor.PruneHistory(*request.History, time.Now())
 		server.writeState(connection, processruntime.State{}, err)
+	case "touch":
+		server.supervisor.Touch(time.Now())
+		server.writeState(connection, processruntime.State{}, nil)
+	case "activity":
+		response := protocolResponse{}
+		if last := server.supervisor.LastActivity(); !last.IsZero() {
+			response.LastActivity = &last
+		}
+		_ = writeProtocolResponse(connection, response)
 	case "list":
 		entries, err := server.supervisor.List()
 		if err != nil {

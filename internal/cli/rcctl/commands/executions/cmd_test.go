@@ -150,6 +150,17 @@ func TestExecRejectsWorkspaceCreationFlags(t *testing.T) {
 	}
 }
 
+func TestRuntimePodFlagsOnlyCreateWorkspaces(t *testing.T) {
+	t.Parallel()
+	for _, flag := range []string{"pod-label", "pod-annotation", "priority-class"} {
+		t.Run(flag, func(t *testing.T) {
+			t.Parallel()
+			assert.NotNil(t, newRunCommand(kubeconfig.NewFlags(), true).Flag(flag), "run exposes --%s for its new Workspace", flag)
+			assert.Nil(t, newRunCommand(kubeconfig.NewFlags(), false).Flag(flag), "exec cannot change an existing runtime Pod")
+		})
+	}
+}
+
 func TestExecPreservesCommandArguments(t *testing.T) {
 	t.Parallel()
 	command := newRunCommand(kubeconfig.NewFlags(), false)
@@ -346,4 +357,28 @@ func TestRunFlagsToWorkspaceClocks(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, time.Hour, request.IdleTimeout.Duration)
 	assert.Equal(t, 24*time.Hour, request.DeleteAfterSuspended.Duration)
+}
+
+func TestWaitWorkspaceReadyFailsFastWhenAdmissionRejectsWorkspace(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
+	workspace := &workspacesv1alpha1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{Name: testDevelopmentName, Namespace: "default"},
+		Status: workspacesv1alpha1.WorkspaceStatus{Conditions: []metav1.Condition{{
+			Type:    workspacesv1alpha1.WorkspaceConditionReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  workspacesv1alpha1.WorkspaceReasonAdmissionRejected,
+			Message: `Workspace runtime Pod was rejected by the API server: pods "dev" is forbidden: violates PodSecurity "restricted:latest"`,
+		}}},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace).Build()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	err := waitWorkspaceReady(ctx, kubeClient, workspace)
+
+	require.Error(t, err)
+	require.NotErrorIs(t, err, context.DeadlineExceeded, "the wait ends at once instead of waiting silently")
+	assert.ErrorContains(t, err, "violates PodSecurity")
 }

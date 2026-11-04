@@ -31,6 +31,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -118,6 +119,11 @@ type supervisedProcess struct {
 
 // Supervisor owns child processes independently of attach connections.
 type Supervisor struct {
+	// lastActivity is the Unix nanosecond time of the last reported or
+	// started work. It lives only in memory: a new runtime is fresh activity
+	// to the controller anyway.
+	lastActivity atomic.Int64
+
 	mu           sync.RWMutex
 	stateDir     string
 	homeDir      string
@@ -127,6 +133,10 @@ type Supervisor struct {
 	processes    map[string]*supervisedProcess
 	maxLog       int64
 	aliases      map[string]*credentialAlias
+	// services are started by Serve and kept running until it returns.
+	services       []processruntime.Service
+	serviceLog     io.Writer
+	serviceBackoff serviceBackoff
 }
 
 type credentialAlias struct {
@@ -157,11 +167,34 @@ func NewSupervisor(stateDir string, stopGrace time.Duration, options ...Supervis
 	supervisor := &Supervisor{
 		stateDir: stateDir, runtimeRoot: filepath.Join(os.TempDir(), "rc-kube"), stopGrace: stopGrace,
 		processes: make(map[string]*supervisedProcess), maxLog: 64 << 20, aliases: make(map[string]*credentialAlias),
+		serviceLog: io.Discard, serviceBackoff: defaultServiceBackoff,
 	}
 	for _, option := range options {
 		option(supervisor)
 	}
 	return supervisor
+}
+
+// Touch records work happening inside the runtime, such as an agent tool call
+// served by a resident service. It never moves the activity time backward.
+func (supervisor *Supervisor) Touch(now time.Time) {
+	value := now.UnixNano()
+	for {
+		current := supervisor.lastActivity.Load()
+		if current >= value || supervisor.lastActivity.CompareAndSwap(current, value) {
+			return
+		}
+	}
+}
+
+// LastActivity returns the last recorded activity, or the zero time when
+// nothing was recorded since the supervisor started.
+func (supervisor *Supervisor) LastActivity() time.Time {
+	value := supervisor.lastActivity.Load()
+	if value == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, value)
 }
 
 // Shutdown stops owned processes concurrently so one slow child cannot consume
@@ -180,11 +213,19 @@ func (supervisor *Supervisor) Shutdown() {
 	pending.Wait()
 }
 
-// Start launches a command once for the (ID, UID) identity.
+// Start launches a command once for the (ID, UID) identity and records the
+// start as activity.
 // ctx governs preparation; launched children remain owned by the supervisor.
 // The protocol server passes its service context, so client disconnection does
 // not cancel an accepted start. Shutdown must run after pending starts finish.
 func (supervisor *Supervisor) Start(ctx context.Context, request processruntime.StartRequest) (processruntime.State, error) {
+	return supervisor.start(ctx, request, true)
+}
+
+// start launches a command once. Only requested work records activity: a
+// resident service starting or restarting is not work, or a crash loop would
+// keep the Workspace awake.
+func (supervisor *Supervisor) start(ctx context.Context, request processruntime.StartRequest, activity bool) (processruntime.State, error) {
 	if err := ctx.Err(); err != nil {
 		return processruntime.State{}, err
 	}
@@ -196,6 +237,9 @@ func (supervisor *Supervisor) Start(ctx context.Context, request processruntime.
 	}
 	if len(request.Command) == 0 || request.Command[0] == "" {
 		return processruntime.State{}, errors.New("process command is required")
+	}
+	if activity {
+		supervisor.Touch(time.Now())
 	}
 
 	supervisor.mu.Lock()

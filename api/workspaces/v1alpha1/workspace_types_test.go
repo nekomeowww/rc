@@ -39,3 +39,22 @@ func TestWorkspaceSpecIsTemporary(t *testing.T) {
 		RetentionPolicy: WorkspaceRetentionPolicyDeleteAfterProcessesExit,
 	}).IsTemporary(), "derive temporary lifetime from the retention policy")
 }
+
+func TestIsReservedPodMetadataKey(t *testing.T) {
+	t.Parallel()
+
+	for key, reserved := range map[string]bool{
+		"workspaces.rc.ayaka.io/workspace":   true,
+		"workspaces.rc.ayaka.io/topology":    true,
+		"repositories.rc.ayaka.io/holders":   true,
+		"rc.ayaka.io/repository":             true,
+		"karpenter.sh/do-not-disrupt":        false,
+		"example.com/tenant":                 false,
+		"notrc.ayaka.io/tenant":              false,
+		"rc.ayaka.io":                        false,
+		"tenant":                             false,
+		"workspaces.rc.ayaka.io.example/key": false,
+	} {
+		assert.Equal(t, reserved, IsReservedPodMetadataKey(key), key)
+	}
+}

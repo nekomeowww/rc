@@ -29,6 +29,16 @@ var ErrNotFound = errors.New("process not found")
 // produced before the client attached and exceeded the transcript limit.
 var ErrTranscriptTruncated = errors.New("process output exceeded the transcript limit before this client read it, so part of it was not delivered; copy large files with rcctl cp")
 
+// ErrActivityUnsupported reports a supervisor too old to record activity.
+// Callers treat it as "no activity signal" rather than as a failure.
+var ErrActivityUnsupported = errors.New("rc-kube does not record activity")
+
+// Activity is what a supervisor recorded about work inside its runtime.
+type Activity struct {
+	// LastActivity is nil when nothing was recorded since the supervisor started.
+	LastActivity *time.Time `json:"lastActivity,omitempty"`
+}
+
 // Target identifies one rc-kube supervisor Pod.
 type Target struct {
 	Namespace  string

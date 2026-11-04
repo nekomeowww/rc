@@ -49,6 +49,7 @@ import (
 
 type runOptions struct {
 	placement        command.PlacementOptions
+	runtimePod       command.RuntimePodOptions
 	workspace        string
 	createWorkspace  bool
 	remove           bool
@@ -164,6 +165,7 @@ func addRunFlags(cmd *cobra.Command, options *runOptions) {
 		cmd.Flags().StringVar(&options.size, "size", "20Gi", "Home volume size for a new blank Workspace")
 		cmd.Flags().StringVar(&options.serviceAccount, "service-account", "", "Same-namespace ServiceAccount for a new Workspace")
 		cmd.Flags().BoolVar(&options.noServiceAccount, "no-service-account", false, "Disable ServiceAccount token mounting for a new Workspace")
+		options.runtimePod.AddFlags(cmd.Flags())
 	}
 	cmd.Flags().StringVar(&options.npmRegistry, "npm-registry", "", "npm registry URL for this command")
 	options.gpu.AddFlags(cmd.Flags())
@@ -202,6 +204,10 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 	osName, tolerations, placementErr := options.placement.Resolve()
 	if placementErr != nil {
 		return placementErr
+	}
+	podMetadata, priorityClass, err := options.runtimePod.Resolve()
+	if err != nil {
+		return err
 	}
 	resources, err := options.gpu.ResourceRequirements(cmd.Flags().Changed("gpu"), cmd.Flags().Changed("gpu-vram"))
 	if err != nil {
@@ -267,6 +273,8 @@ func runProcess(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, argv []st
 	runRequest.Resources = resources
 	runRequest.ServiceAccountName = options.serviceAccount
 	runRequest.AutomountServiceAccountToken = automount
+	runRequest.PodMetadata = podMetadata
+	runRequest.PriorityClassName = priorityClass
 	runRequest.NamePrefix = agentType
 	routeNPMRegistryEnvironment(options.createWorkspace, &runRequest, values, registryEnvironment)
 	target, err := (&workspaceservice.Runner{Client: clusterClient.Kube}).Prepare(cmd.Context(), runRequest)
@@ -382,6 +390,7 @@ func (options runOptions) targetRequest(flags *pflag.FlagSet) (workspaceservice.
 		RetentionPolicy:      retention,
 		Environment:          options.environment,
 		IdleTimeout:          command.Duration(options.lifecycle.IdleTimeout),
+		MaxRunDuration:       command.Duration(options.lifecycle.MaxRunDuration),
 		DeleteAfterSuspended: command.Duration(options.lifecycle.DeleteAfterSuspended),
 	}, nil
 }
@@ -395,6 +404,7 @@ func runLifecycleNotice(workspace *workspacesv1alpha1.Workspace) string {
 	}
 
 	return message + durationNotice("idleTimeout", workspace.Spec.IdleTimeout) +
+		durationNotice("maxRunDuration", workspace.Spec.MaxRunDuration) +
 		durationNotice("deleteAfterSuspended", workspace.Spec.DeleteAfterSuspended)
 }
 
@@ -531,8 +541,12 @@ func waitWorkspaceReady(ctx context.Context, kubeClient client.Client, workspace
 		if meta.IsStatusConditionTrue(current.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady) {
 			return true, nil
 		}
-		if condition := meta.FindStatusCondition(current.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady); condition != nil && condition.Status == "False" && condition.Reason == "InvalidSpec" {
+		condition := meta.FindStatusCondition(current.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady)
+		if condition != nil && condition.Status == "False" && condition.Reason == "InvalidSpec" {
 			return false, fmt.Errorf("workspace %q is invalid: %s", current.Name, condition.Message)
+		}
+		if condition != nil && condition.Status == "False" && condition.Reason == workspacesv1alpha1.WorkspaceReasonAdmissionRejected {
+			return false, fmt.Errorf("workspace %q cannot start until the cause is fixed; rc keeps retrying: %s", current.Name, condition.Message)
 		}
 		return false, nil
 	})

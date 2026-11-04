@@ -46,6 +46,7 @@ import (
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/lifecycle"
 	"github.com/nekomeowww/rc/internal/rcplatform"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
@@ -106,6 +107,8 @@ type resolvedWorkspace struct {
 	worktreeMounts       []*repositoriesv1alpha1.Worktree
 	initializers         []workspaceInitializer
 	beforeStop           []lifecycle.Action
+	services             []processruntime.Service
+	serviceEnvironment   []corev1.EnvVar
 	homeHostPath         string
 	// storageReady is published as StorageReady once home storage has been
 	// evaluated in this pass; nil leaves the previous condition unchanged.
@@ -153,6 +156,10 @@ type WorkspaceReconciler struct {
 	WindowsRunnerImage  string
 	DarwinRunnerImage   string
 	DarwinWorkspaceRoot string
+
+	// admissionRetries backs off creates the API server rejected; see
+	// admission_rejection.go. The zero value is ready to use.
+	admissionRetries admissionRetries
 }
 
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces,verbs=get;list;watch;create;update;patch;delete
@@ -226,14 +233,28 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, workspacesv1alpha1.ReasonVolumeClaimLost, message)
 		}
 		if home == nil {
+			retryKey := admissionRetryKey(workspace, admissionObjectHome)
+			if retryAfter, pending := r.admissionRetries.pending(retryKey); pending {
+				return ctrl.Result{RequeueAfter: retryAfter}, nil
+			}
 			resolved.setStorage(metav1.ConditionFalse, "Provisioning", "Workspace home volume is provisioning")
 			home = workspaceHomeVolumeClaim(workspace, resolved)
 			if err := controllerutil.SetControllerReference(workspace, home, r.Scheme); err != nil {
 				return ctrl.Result{}, fmt.Errorf("set Workspace owner on home PersistentVolumeClaim: %w", err)
 			}
 			if err := r.Create(ctx, home); err != nil {
-				return ctrl.Result{}, fmt.Errorf("create Workspace home PersistentVolumeClaim: %w", err)
+				if !admissionRejected(err) {
+					return ctrl.Result{}, fmt.Errorf("create Workspace home PersistentVolumeClaim: %w", err)
+				}
+				message := admissionRejectionMessage("Workspace home PersistentVolumeClaim", err)
+				log.Info("API server rejected Workspace home PersistentVolumeClaim", "name", home.Name, "message", err.Error())
+				resolved.setStorage(metav1.ConditionFalse, workspacesv1alpha1.WorkspaceReasonAdmissionRejected, message)
+				// A recorded home name is creation evidence; a missing recorded
+				// home is reported as lost. Record it only once the PVC exists.
+				resolved.homeClaimName = ""
+				return ctrl.Result{RequeueAfter: r.admissionRetries.record(retryKey)}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, workspacesv1alpha1.WorkspaceReasonAdmissionRejected, message)
 			}
+			r.admissionRetries.clear(retryKey)
 			log.Info("Created Workspace home PersistentVolumeClaim", "name", home.Name)
 
 			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "Provisioning", "Workspace home volume is provisioning")
@@ -305,6 +326,11 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if desiredState == workspacesv1alpha1.WorkspaceDesiredStateSuspended {
 		return r.suspendWorkspace(ctx, workspace, resolved, active)
 	}
+	// The CRD rejects reserved keys; this also covers an older CRD and the label
+	// and annotation syntax the CRD does not check.
+	if reason, message := validateWorkspacePodMetadata(workspace.Spec.PodMetadata); reason != "" {
+		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reason, message)
+	}
 
 	if resolved.automountSAToken && resolved.serviceAccount == defaultWorkspaceServiceAccount {
 		if err := r.ensureWorkspaceAccess(ctx, workspace.Namespace); err != nil {
@@ -330,6 +356,12 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		// claims before acquiring the current mounts for a replacement Pod.
 		if err := r.releaseClaims(ctx, workspace); err != nil {
 			return ctrl.Result{}, err
+		}
+		// The API server refused the last create for this generation. Wait out
+		// the backoff before taking holders again; Ready already explains why.
+		retryKey := admissionRetryKey(workspace, admissionObjectRuntimePod)
+		if retryAfter, pending := r.admissionRetries.pending(retryKey); pending {
+			return ctrl.Result{RequeueAfter: retryAfter}, nil
 		}
 		if reason, message, err := r.admitWorktreeMounts(ctx, workspace, resolved.worktreeMounts, worktreeModes(resolved)); err != nil {
 			return ctrl.Result{}, err
@@ -374,8 +406,20 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return ctrl.Result{}, fmt.Errorf("set Workspace owner on runtime Pod: %w", err)
 		}
 		if err := r.Create(ctx, pod); err != nil {
-			return ctrl.Result{}, fmt.Errorf("create Workspace runtime Pod: %w", err)
+			if !admissionRejected(err) {
+				return ctrl.Result{}, fmt.Errorf("create Workspace runtime Pod: %w", err)
+			}
+			message := admissionRejectionMessage("Workspace runtime Pod", err)
+			log.Info("API server rejected Workspace runtime Pod", "name", pod.Name, "message", err.Error())
+			// Nothing was created from the holders admitted above. Release them
+			// so a rejected Workspace does not block other writers or Repository
+			// updates while it waits for the cause to clear.
+			if err := r.releaseClaims(ctx, workspace); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: r.admissionRetries.record(retryKey)}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, workspacesv1alpha1.WorkspaceReasonAdmissionRejected, message)
 		}
+		r.admissionRetries.clear(retryKey)
 		log.Info("Created Workspace runtime Pod", "name", pod.Name)
 
 		return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reasonStarting, "Workspace runtime Pod is starting")
@@ -430,6 +474,11 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		// and the mount starts once the other writer releases the Worktree.
 		return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, claimReason, claimMessage)
 	}
+	// Labels and annotations are mutable, so they reach the running Pod even
+	// while a topology change waits for active executions.
+	if err := r.reconcileRuntimePodMetadata(ctx, workspace, pod); err != nil {
+		return ctrl.Result{}, err
+	}
 	if pod.Annotations[workspaceTopologyAnnotation] != expectedTopology {
 		if active {
 			return ctrl.Result{}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, "TopologyChangeBlocked", "Workspace topology changed while processes are active")
@@ -462,9 +511,15 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if err != nil {
 			return ctrl.Result{}, err
 		}
+		hotMountRetryKey := admissionRetryKey(workspace, admissionObjectHotMount)
 		if !ready {
-			return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reason, message)
+			requeue := workspaceDependencyRequeue
+			if reason == workspacesv1alpha1.WorkspaceReasonAdmissionRejected {
+				requeue = r.admissionRetries.record(hotMountRetryKey)
+			}
+			return ctrl.Result{RequeueAfter: requeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, reason, message)
 		}
+		r.admissionRetries.clear(hotMountRetryKey)
 		if err := r.releaseOldWorktreeMounts(ctx, workspace, pod, worktreeModes(resolved)); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -650,6 +705,9 @@ func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspac
 		}
 		if len(workspace.Spec.ConfigMapRefs) > 0 || len(workspace.Spec.SecretRefs) > 0 {
 			return resolved, "UnsupportedDarwinProjection", "Darwin Workspaces do not support ConfigMap or Secret volume mounts", nil
+		}
+		if len(workspace.Spec.Services) > 0 {
+			return resolved, "UnsupportedDarwinServices", "Darwin Workspaces do not support services", nil
 		}
 		if r.DarwinWorkspaceRoot == "" {
 			return resolved, "DarwinWorkspaceRootRequired", "The controller must configure --darwin-workspace-root", nil
@@ -843,6 +901,9 @@ func (r *WorkspaceReconciler) resolveWorkspaceDependencies(ctx context.Context, 
 			resolved.beforeStop = append(resolved.beforeStop, resolvedAction)
 		}
 	}
+	if reason, message, err := r.resolveWorkspaceServices(ctx, workspace, resolved); err != nil || reason != "" {
+		return resolved, reason, message, err
+	}
 
 	resolved.automountSAToken = workspace.Spec.AutomountServiceAccountToken == nil || *workspace.Spec.AutomountServiceAccountToken
 	if resolved.runtime.OS() == rcplatform.Darwin && workspace.Spec.AutomountServiceAccountToken == nil {
@@ -1008,7 +1069,7 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 	if platform.OS() == corev1.Linux {
 		hotMountRoot = hotMountHostRoot(workspace)
 	}
-	return platform.WorkspacePod(rcplatform.WorkspacePodIntent{
+	pod, err := platform.WorkspacePod(rcplatform.WorkspacePodIntent{
 		Metadata: metav1.ObjectMeta{
 			Name:      workspace.Name,
 			Namespace: workspace.Namespace,
@@ -1024,7 +1085,15 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 		ServiceAccount:  resolved.serviceAccount, AutomountToken: resolved.automountSAToken,
 		Resources: workspace.Spec.Resources, AdditionalVolumes: resolved.volumes, AdditionalMounts: resolved.volumeMounts,
 		Initializers: initializers, BeforeStop: resolved.beforeStop,
+		PriorityClassName: workspace.Spec.PriorityClassName,
+		Services:          resolved.services, ServiceEnvironment: resolved.serviceEnvironment,
 	})
+	if err != nil {
+		return nil, err
+	}
+	applyWorkspacePodMetadata(pod, workspace.Spec.PodMetadata)
+
+	return pod, nil
 }
 
 func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *resolvedWorkspace) (string, error) {
@@ -1056,6 +1125,12 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 		RuntimeClassName *string
 		Lifecycle        *workspacesv1alpha1.WorkspaceLifecycle
 		HomeHostPath     string
+		// PriorityClassName is omitted when empty so that adding the field
+		// keeps the hash of existing runtime Pods and does not replace them.
+		PriorityClassName string `json:",omitempty"`
+		// Omitted when empty, so Workspaces without services keep their hash.
+		Services           []processruntime.Service `json:",omitempty"`
+		ServiceEnvironment []corev1.EnvVar          `json:",omitempty"`
 	}{
 		RuntimePolicy: workspaceRuntimePolicyVersion, OS: resolved.runtime.OS(),
 		Image: resolved.image, Mounts: mounts, ConfigMapRefs: workspace.Spec.ConfigMapRefs,
@@ -1064,6 +1139,8 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 		AutomountSAToken: resolved.automountSAToken, Resources: workspace.Spec.Resources,
 		NodeSelector: workspace.Spec.NodeSelector, Tolerations: workspace.Spec.Tolerations,
 		Affinity: workspace.Spec.Affinity, RuntimeClassName: workspace.Spec.RuntimeClassName, Lifecycle: workspace.Spec.Lifecycle,
+		PriorityClassName: workspace.Spec.PriorityClassName,
+		Services:          resolved.services, ServiceEnvironment: resolved.serviceEnvironment,
 	}
 	data, err := json.Marshal(topology)
 	if err != nil {

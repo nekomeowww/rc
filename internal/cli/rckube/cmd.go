@@ -85,6 +85,16 @@ func newCopyToCommand() *cobra.Command {
 	}
 }
 
+// defaultEndpoint is the endpoint a client command reaches: the one rc-kube
+// serve gave a service, or the platform default.
+func defaultEndpoint() string {
+	if endpoint := os.Getenv(runtime.EndpointVariable); endpoint != "" {
+		return endpoint
+	}
+
+	return rcnative.Current().Endpoint
+}
+
 func newLifecycleCommand() *cobra.Command {
 	var encodedActions string
 	command := &cobra.Command{
@@ -113,12 +123,19 @@ func newServeCommand() *cobra.Command {
 	var stopGrace time.Duration
 	var maxTranscriptBytes int64
 	var initializeActions string
+	var encodedServices string
 	command := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the Workspace process supervisor",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			if err := ensureContainerInit(); err != nil {
+				return err
+			}
+			// Before anything else runs, so no other process inherits the
+			// service values Kubernetes placed in the environment.
+			services, err := runtime.PrepareServices(encodedServices)
+			if err != nil {
 				return err
 			}
 			if err := os.MkdirAll(rcnative.Current().Workspace, 0o755); err != nil {
@@ -140,6 +157,7 @@ func newServeCommand() *cobra.Command {
 			supervisor := runtime.NewSupervisor(stateDirectory, stopGrace,
 				runtime.WithRoots(native.Home, native.Workspace, native.Run),
 				runtime.WithMaxTranscriptBytes(maxTranscriptBytes),
+				runtime.WithServices(services, command.ErrOrStderr()),
 			)
 			if err := supervisor.RecoverHistory(time.Now()); err != nil {
 				return fmt.Errorf("recover process history: %w", err)
@@ -151,6 +169,7 @@ func newServeCommand() *cobra.Command {
 	command.Flags().StringVar(&transcriptScope, "transcript-scope", "", "Persistent target identity used to discard inherited transcript copies")
 	command.Flags().StringVar(&stateDirectory, "state-dir", rcnative.Current().StateDirectory(), "Persistent process state directory")
 	command.Flags().StringVar(&initializeActions, "initialize-actions", "", "Lifecycle actions run in the runtime container before readiness")
+	command.Flags().StringVar(&encodedServices, "services", "", "Base64url-encoded resident services to keep running")
 	command.Flags().DurationVar(&stopGrace, "stop-grace", 10*time.Second, "Process stop grace period before forced tree termination")
 	command.Flags().Int64Var(&maxTranscriptBytes, "max-transcript-bytes", 64<<20, "Maximum durable bytes retained per process; zero disables")
 
@@ -159,7 +178,7 @@ func newServeCommand() *cobra.Command {
 
 func newProcessCommand() *cobra.Command {
 	command := &cobra.Command{Use: "process", Short: "Bridge one request to the local supervisor"}
-	command.AddCommand(newStartCommand(), newStateCommand("inspect"), newStateCommand("stop"), newListCommand(), newPruneHistoryCommand(), newAttachCommand(), newLogsCommand(), newResizeCommand())
+	command.AddCommand(newStartCommand(), newStateCommand("inspect"), newStateCommand("stop"), newListCommand(), newPruneHistoryCommand(), newTouchCommand(), newActivityCommand(), newAttachCommand(), newLogsCommand(), newResizeCommand())
 
 	return command
 }
@@ -183,7 +202,7 @@ func newStartCommand() *cobra.Command {
 			return json.NewEncoder(command.OutOrStdout()).Encode(state)
 		},
 	}
-	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
+	command.Flags().StringVar(&socketPath, "socket", defaultEndpoint(), "Local Unix socket or Windows named pipe")
 
 	return command
 }
@@ -203,7 +222,7 @@ func newListCommand() *cobra.Command {
 			return json.NewEncoder(command.OutOrStdout()).Encode(entries)
 		},
 	}
-	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
+	command.Flags().StringVar(&socketPath, "socket", defaultEndpoint(), "Local Unix socket or Windows named pipe")
 
 	return command
 }
@@ -223,10 +242,55 @@ func newPruneHistoryCommand() *cobra.Command {
 			return json.NewEncoder(command.OutOrStdout()).Encode(processruntime.State{})
 		},
 	}
-	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
+	command.Flags().StringVar(&socketPath, "socket", defaultEndpoint(), "Local Unix socket or Windows named pipe")
 	command.Flags().DurationVar(&policy.TTLAfterFinished, "ttl-after-finished", 0, "Remove a finished record after this age; zero disables")
 	command.Flags().IntVar(&policy.MaxEntries, "max-entries", 0, "Keep at most this many finished records; zero disables")
 	command.Flags().DurationVar(&policy.TranscriptTTL, "transcript-ttl", 0, "Remove a finished transcript after this age; zero disables")
+
+	return command
+}
+
+func newTouchCommand() *cobra.Command {
+	var socketPath string
+	command := &cobra.Command{
+		Use:   "touch",
+		Short: "Report work in progress, so idle suspension waits",
+		Long: "Report work in progress inside the Workspace, such as a tool call served by a resident agent.\n" +
+			"The controller reads the last report before an idle suspension and postpones it when the report is newer.",
+		Args: cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			if err := runtime.NewClient(socketPath).Touch(command.Context()); err != nil {
+				return err
+			}
+
+			return json.NewEncoder(command.OutOrStdout()).Encode(processruntime.State{})
+		},
+	}
+	command.Flags().StringVar(&socketPath, "socket", defaultEndpoint(), "Local Unix socket or Windows named pipe")
+
+	return command
+}
+
+func newActivityCommand() *cobra.Command {
+	var socketPath string
+	command := &cobra.Command{
+		Use:   "activity",
+		Short: "Print the last recorded activity as JSON",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			last, err := runtime.NewClient(socketPath).LastActivity(command.Context())
+			if err != nil {
+				return err
+			}
+			activity := processruntime.Activity{}
+			if !last.IsZero() {
+				activity.LastActivity = &last
+			}
+
+			return json.NewEncoder(command.OutOrStdout()).Encode(activity)
+		},
+	}
+	command.Flags().StringVar(&socketPath, "socket", defaultEndpoint(), "Local Unix socket or Windows named pipe")
 
 	return command
 }
@@ -253,7 +317,7 @@ func newStateCommand(action string) *cobra.Command {
 			return json.NewEncoder(command.OutOrStdout()).Encode(state)
 		},
 	}
-	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
+	command.Flags().StringVar(&socketPath, "socket", defaultEndpoint(), "Local Unix socket or Windows named pipe")
 
 	return command
 }
@@ -270,7 +334,7 @@ func newAttachCommand() *cobra.Command {
 			return runtime.NewClient(socketPath).Attach(command.Context(), arguments[0], clientID, command.InOrStdin(), command.OutOrStdout(), options)
 		},
 	}
-	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
+	command.Flags().StringVar(&socketPath, "socket", defaultEndpoint(), "Local Unix socket or Windows named pipe")
 	command.Flags().StringVar(&clientID, "client-id", "", "Stable identity for foreground terminal arbitration")
 	command.Flags().Uint16Var(&options.Rows, "rows", 0, "Initial terminal rows")
 	command.Flags().Uint16Var(&options.Columns, "columns", 0, "Initial terminal columns")
@@ -290,7 +354,7 @@ func newLogsCommand() *cobra.Command {
 			return runtime.NewClient(socketPath).Logs(command.Context(), arguments[0], command.OutOrStdout())
 		},
 	}
-	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
+	command.Flags().StringVar(&socketPath, "socket", defaultEndpoint(), "Local Unix socket or Windows named pipe")
 
 	return command
 }
@@ -308,7 +372,7 @@ func newResizeCommand() *cobra.Command {
 			return runtime.NewClient(socketPath).Resize(command.Context(), arguments[0], clientID, rows, columns)
 		},
 	}
-	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
+	command.Flags().StringVar(&socketPath, "socket", defaultEndpoint(), "Local Unix socket or Windows named pipe")
 	command.Flags().Uint16Var(&rows, "rows", 0, "Terminal rows")
 	command.Flags().Uint16Var(&columns, "columns", 0, "Terminal columns")
 	command.Flags().StringVar(&clientID, "client-id", "", "Attach client controlling the shared viewport")
@@ -326,7 +390,7 @@ func newHealthCommand() *cobra.Command {
 			defer cancel()
 			return runtime.NewClient(address).Ping(ctx)
 		}}
-	command.Flags().StringVar(&address, "socket", rcnative.Current().Endpoint, "Local supervisor endpoint")
+	command.Flags().StringVar(&address, "socket", defaultEndpoint(), "Local supervisor endpoint")
 	return command
 }
 

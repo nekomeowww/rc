@@ -1,0 +1,37 @@
+# syntax=docker/dockerfile:1
+
+# Minimal Workspace runtime image for the Kind e2e suite. It holds rc-kube built
+# from this checkout, tini, and a POSIX shell, which is all a Linux runtime Pod
+# needs: rc-kube serve re-executes itself under tini when it runs as PID 1, and
+# the controller runs it as UID/GID 1000, mounts the home volume at
+# /home/agent and an emptyDir at /run/rc, and execs "rc-kube process ..." for
+# activity, history, and WorkspaceExec. The full Dockerfile.runner adds the
+# developer toolchains, which the e2e suite does not use.
+FROM --platform=$BUILDPLATFORM golang:1.27.3 AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+        go build -trimpath -o /out/rc-kube ./cmd/rc-kube
+
+FROM alpine:3.23
+
+RUN apk add --no-cache tini \
+    && addgroup -g 1000 agent \
+    && adduser -D -u 1000 -G agent -h /home/agent -s /bin/sh agent \
+    && install -d -m 0755 -o 1000 -g 1000 /workspace
+
+COPY --from=builder /out/rc-kube /usr/local/bin/rc-kube
+
+ENV SHELL="/bin/sh"
+
+USER 1000:1000
+WORKDIR /workspace
+
+ENTRYPOINT ["rc-kube"]

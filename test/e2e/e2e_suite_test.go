@@ -34,6 +34,10 @@ import (
 var (
 	// managerImage is the manager image to be built and loaded for testing.
 	managerImage = "example.com/rc:v0.0.1"
+	// runnerImage is the minimal Workspace runtime image built from
+	// test/e2e/Dockerfile.runner. Its tag is not "latest", so Kind uses the
+	// loaded image instead of pulling.
+	runnerImage = "example.com/rc-runner:v0.0.1"
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
 )
@@ -62,13 +66,71 @@ var _ = BeforeSuite(func() {
 	err = utils.LoadImageToKindClusterWithName(managerImage)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
 
+	By("building the e2e runner image")
+	cmd = exec.Command("make", "docker-build-e2e-runner", fmt.Sprintf("E2E_RUNNER_IMG=%s", runnerImage))
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the e2e runner image")
+
+	By("loading the e2e runner image on Kind")
+	err = utils.LoadImageToKindClusterWithName(runnerImage)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the e2e runner image into Kind")
+
 	configureKubectlKubeRC()
 	setupCertManager()
+	deployManager()
 })
 
 var _ = AfterSuite(func() {
+	undeployManager()
 	teardownCertManager()
 })
+
+// deployManager installs the CRDs and deploys the manager with the e2e runner
+// image into a namespace that enforces the restricted Pod Security Standard.
+// Every spec container shares this deployment, so it lives at suite level.
+func deployManager() {
+	By("creating manager namespace")
+	ExpectWithOffset(1, utils.CreateNamespace(namespace)).To(Succeed(), "Failed to create namespace")
+
+	By("labeling the namespace to enforce the restricted security policy")
+	cmd := exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
+		"pod-security.kubernetes.io/enforce=restricted")
+	_, err := utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
+
+	By("installing CRDs")
+	cmd = exec.Command("make", "install")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to install CRDs")
+
+	By("deploying the controller-manager")
+	err = utils.DeployManager(managerImage, runnerImage)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
+
+	By("waiting for the controller-manager rollout")
+	cmd = exec.Command("kubectl", "rollout", "status", "deployment/rc-controller-manager",
+		"-n", namespace,
+		"--timeout=3m",
+	)
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Controller-manager did not become available")
+}
+
+// undeployManager removes what deployManager created. Specs delete their own
+// Workspaces first, because the manager must run to release their finalizers.
+func undeployManager() {
+	By("undeploying the controller-manager")
+	cmd := exec.Command("make", "undeploy", "ignore-not-found=true")
+	_, _ = utils.Run(cmd)
+
+	By("uninstalling CRDs")
+	cmd = exec.Command("make", "uninstall", "ignore-not-found=true")
+	_, _ = utils.Run(cmd)
+
+	By("removing manager namespace")
+	cmd = exec.Command("kubectl", "delete", "ns", namespace, "--ignore-not-found")
+	_, _ = utils.Run(cmd)
+}
 
 // Disable kubectl kuberc by default for test isolation.
 // This prevents local kubectl configurations from affecting test behavior.

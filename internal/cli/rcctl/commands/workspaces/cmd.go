@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -62,6 +63,7 @@ const darwinOSName corev1.OSName = "darwin"
 
 type createOptions struct {
 	placement        command.PlacementOptions
+	runtimePod       command.RuntimePodOptions
 	environment      string
 	image            string
 	storageClass     string
@@ -125,6 +127,10 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			podMetadata, priorityClass, err := options.runtimePod.Resolve()
+			if err != nil {
+				return err
+			}
 			if osName == darwinOSName && options.environment != "" {
 				return fmt.Errorf("darwin Workspaces do not support --environment")
 			}
@@ -145,11 +151,14 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 					DesiredState:         workspacesv1alpha1.WorkspaceDesiredStateRunning,
 					RetentionPolicy:      workspacesv1alpha1.WorkspaceRetentionPolicyRetain,
 					IdleTimeout:          command.Duration(options.lifecycle.IdleTimeout),
+					MaxRunDuration:       command.Duration(options.lifecycle.MaxRunDuration),
 					DeleteAfterSuspended: command.Duration(options.lifecycle.DeleteAfterSuspended),
 					OS:                   osName, NodeSelector: options.placement.NodeSelector, Tolerations: tolerations,
 					Image: options.image, DefaultWorkingDirectory: options.defaultCwd,
 					ServiceAccountName: options.serviceAccount,
 					Resources:          resources,
+					PodMetadata:        podMetadata,
+					PriorityClassName:  priorityClass,
 				},
 			}
 			if err := applyWorkspaceNPMRegistry(workspace, options.npmRegistry); err != nil {
@@ -212,6 +221,7 @@ func newCreateCommand(kubeconfigFlags *kubeconfig.Flags) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&options.environment, "environment", "", "WorkspaceEnvironment to clone")
 	options.placement.AddFlags(cmd.Flags())
+	options.runtimePod.AddFlags(cmd.Flags())
 	cmd.Flags().StringVar(&options.image, "image", "", "Runner image for a blank Workspace")
 	cmd.Flags().StringVar(&options.storageClass, "storage-class", "", "StorageClass for a blank Workspace")
 	cmd.Flags().StringVar(&options.size, "size", "20Gi", "Home volume size for a blank Workspace")
@@ -989,6 +999,11 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 	if workspace.Spec.RuntimeClassName != nil {
 		runtimeClass = clioutput.ValueOrDash(*workspace.Spec.RuntimeClassName)
 	}
+	var podLabels, podAnnotations map[string]string
+	if workspace.Spec.PodMetadata != nil {
+		podLabels = workspace.Spec.PodMetadata.Labels
+		podAnnotations = workspace.Spec.PodMetadata.Annotations
+	}
 	lifecycle := "-"
 	if workspace.Spec.Lifecycle != nil {
 		lifecycle = fmt.Sprintf("%d initialize, %d before-stop", len(workspace.Spec.Lifecycle.Initialize), len(workspace.Spec.Lifecycle.BeforeStop))
@@ -1016,11 +1031,18 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 		{Name: "Service account", Value: clioutput.ValueOrDash(workspace.Spec.ServiceAccountName)},
 		{Name: "Automount service account token", Value: automountToken},
 		{Name: "Runtime class", Value: runtimeClass},
+		{Name: "Priority class", Value: clioutput.ValueOrDash(workspace.Spec.PriorityClassName)},
+		{Name: "Pod labels", Value: podMetadataSummary(podLabels)},
+		{Name: "Pod annotations", Value: podMetadataSummary(podAnnotations)},
 		{Name: "Idle timeout", Value: durationOrDisabled(workspace.Spec.IdleTimeout)},
+		{Name: "Max run duration", Value: durationOrDisabled(workspace.Spec.MaxRunDuration)},
 		{Name: "Delete after suspended", Value: durationOrDisabled(workspace.Spec.DeleteAfterSuspended)},
 		{Name: "Suspended at", Value: clioutput.OptionalTimestamp(workspace.Status.SuspendedAt)},
 		{Name: "Active executions", Value: status.ActiveExecutions},
 		{Name: "Idle suspend at", Value: clioutput.OptionalTimestamp(status.IdleSuspendAt)},
+		{Name: "Max run suspend at", Value: clioutput.OptionalTimestamp(status.MaxRunSuspendAt)},
+		{Name: "Running since", Value: clioutput.OptionalTimestamp(workspace.Status.RunningSince)},
+		{Name: "Last automatic suspend", Value: clioutput.ValueOrDash(status.LastAutomaticSuspendReason)},
 		{Name: "Delete at", Value: clioutput.OptionalTimestamp(status.DeleteAt)},
 		{Name: "Mounts", Value: workspaceMountSummary(workspace.Spec.Mounts)},
 		{Name: "Agent credentials", Value: workspaceReferenceNames(workspace.Spec.AgentCredentialRefs)},
@@ -1029,8 +1051,19 @@ func workspaceDetailFields(workspace *workspacesv1alpha1.Workspace) []clioutput.
 		{Name: "Secrets", Value: workspaceReferenceNames(workspace.Spec.SecretRefs)},
 		{Name: "Environment variables", Value: workspaceEnvironmentNames(workspace.Spec.Env)},
 		{Name: "Lifecycle", Value: lifecycle},
+		{Name: "Services", Value: workspaceServiceSummary(workspace.Spec.Services)},
 		{Name: "Conditions", Value: clioutput.Conditions(workspace.Status.Conditions)},
 	}
+}
+
+// podMetadataSummary renders key=value pairs sorted by key.
+func podMetadataSummary(values map[string]string) string {
+	pairs := make([]string, 0, len(values))
+	for _, key := range slices.Sorted(maps.Keys(values)) {
+		pairs = append(pairs, key+"="+values[key])
+	}
+
+	return clioutput.ValueOrDash(strings.Join(pairs, ", "))
 }
 
 func workspaceEnvironmentNames(environment []corev1.EnvVar) string {
@@ -1040,6 +1073,17 @@ func workspaceEnvironmentNames(environment []corev1.EnvVar) string {
 	}
 
 	return clioutput.ValueOrDash(strings.Join(names, ", "))
+}
+
+// workspaceServiceSummary names each service with its command. Environment
+// values are left out, as for the Workspace env.
+func workspaceServiceSummary(services []workspacesv1alpha1.WorkspaceService) string {
+	summaries := make([]string, len(services))
+	for index, service := range services {
+		summaries[index] = fmt.Sprintf("%s (%s)", service.Name, strings.Join(service.Command, " "))
+	}
+
+	return clioutput.ValueOrDash(strings.Join(summaries, ", "))
 }
 
 func workspaceStorageSummary(storage workspacesv1alpha1.PersistentStorageSpec) string {
@@ -1147,11 +1191,20 @@ func waitWorkspaceGenerationReady(ctx context.Context, kubeClient client.Client,
 		if condition != nil && condition.Status == metav1.ConditionFalse && condition.ObservedGeneration >= generation && condition.Reason == reasonWorktreeInUse {
 			return false, &worktreeInUseError{workspace: current.Name, message: condition.Message}
 		}
+		if condition != nil && condition.Status == metav1.ConditionFalse && condition.ObservedGeneration >= generation && condition.Reason == workspacesv1alpha1.WorkspaceReasonAdmissionRejected {
+			return false, admissionRejectedError(current.Name, condition.Message)
+		}
 		if condition != nil && condition.Status == metav1.ConditionFalse && condition.ObservedGeneration >= generation && !workspaceReadinessTransient(condition.Reason) {
 			return false, fmt.Errorf("workspace %q runtime failed for generation %d: %s", current.Name, generation, condition.Message)
 		}
 		return false, nil
 	})
+}
+
+// admissionRejectedError ends a wait the API server would keep failing. The
+// controller keeps retrying, so the Workspace still starts once the cause clears.
+func admissionRejectedError(workspace, message string) error {
+	return fmt.Errorf("workspace %q cannot start until the cause is fixed; rc keeps retrying: %s", workspace, message)
 }
 
 func workspaceReadinessTransient(reason string) bool {

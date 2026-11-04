@@ -304,6 +304,29 @@ an process targets an existing Workspace, these flags are requirements:
 the command rejects a Workspace that does not already provide the requested
 quantities instead of mutating its runtime topology.
 
+#### Runtime Pod metadata and priority
+
+`spec.podMetadata.labels` and `spec.podMetadata.annotations` add labels and
+annotations to the Workspace runtime Pod, for example a node-consolidation
+opt-out, NetworkPolicy selectors, or cost-attribution labels. They do not apply
+to Environment editor Pods, hot-mount helper Pods, or one-shot helper Pods.
+Every label and annotation that rc sets on its Pods uses an `rc.ayaka.io` or
+`*.rc.ayaka.io` key prefix. Those prefixes are reserved: the CRD rejects such
+keys, and the controller reports `ReservedPodMetadataKey` and keeps rc's values
+if one reaches it. The controller also reports `InvalidPodMetadata` for label
+or annotation syntax that Kubernetes would reject. Pod metadata is mutable, so a
+change is patched onto the running Pod without a restart. The controller
+records the keys it applied in an rc annotation, so it removes a key dropped
+from the spec and leaves keys that other controllers set.
+
+`spec.priorityClassName` sets the runtime Pod priority. Pod priority is
+immutable, so the value is part of the runtime topology hash. A change follows
+the topology rules below: it replaces an idle runtime Pod and reports
+`TopologyChangeBlocked` while executions are active. An empty value does not
+change the hash, so existing Pods are not replaced when this field is added.
+`workspace create` and `run` expose `--pod-label`, `--pod-annotation`, and
+`--priority-class`.
+
 ### Start, suspend, and topology changes
 
 A Workspace has a desired runtime state:
@@ -317,6 +340,18 @@ Named Workspaces default to `Running` when created.
 `rcctl workspace start` and `rcctl workspace stop` change this state. A normal
 stop is rejected while a process is active. A forced stop terminates the
 processes and then suspends the Workspace.
+
+The API server can refuse the runtime Pod, the home PVC, or a hot-mount helper
+Pod on policy grounds: a ResourceQuota or LimitRange, Pod Security admission,
+or an admission webhook or ValidatingAdmissionPolicy. A `Forbidden` or
+`Invalid` create error sets Ready to False with reason `AdmissionRejected`,
+and the message carries the API server's explanation, such as the quota and
+the exceeded resource. The controller releases the holders it took for that
+start and retries with a backoff that doubles from 5 seconds up to 1 minute,
+so the Workspace starts without user action once the quota is freed. A spec
+change retries at once. Server faults, such as an unreachable webhook, stay
+reconcile errors. `rcctl workspace create`, `mount`, and `run` stop waiting
+and print the message instead of waiting for Ready.
 
 Kubernetes does not permit adding PVC volumes to an existing Pod. Environment,
 Service Account, and projected-volume topology changes replace the runtime
@@ -342,10 +377,17 @@ unmounts and remounts the Worktree. If cleanup fails, the controller keeps the
 Worktree holder and reports `HotMountCleanup`. An operator must clear a busy mount.
 
 Retained Workspaces remain running unless stopped or configured with
-`spec.idleTimeout`.
+`spec.idleTimeout` or `spec.maxRunDuration`.
 Zero-execution Workspaces can become idle too. The independent retention
 controller starts at creation and advances activity on Ready, resume, and the
 latest execution completion. Pending and running executions prevent suspension.
+At an idle deadline it also asks the runtime supervisor for activity reported
+with `rc-kube process touch`, such as tool calls served by a resident agent,
+and postpones the suspension when that activity is newer.
+
+`spec.maxRunDuration` suspends compute that long after a run started,
+whatever its activity: the controller stops running executions first.
+See [runtime activity and maximum run](../adr/0008-runtime-activity-and-maximum-run.md).
 
 `spec.deleteAfterSuspended` optionally deletes owned storage
 after confirmed suspension. It defaults to disabled. The persisted
@@ -379,6 +421,76 @@ becomes `VolumeReady` as soon as the clone is bound; the Workspace then performs
 an idempotent branch checkout in its first init container. The Worktree
 controller observes that init container and owns the final Worktree `Ready`
 condition. Ordinary independently managed Worktrees retain their bootstrap Job.
+
+### Resident services
+
+`spec.services` lists processes that the `rc-kube` supervisor starts each time
+the runtime starts and keeps running, such as an agent that connects out to a
+gateway and serves tool calls. A service is not a WorkspaceExec:
+
+```yaml
+spec:
+  env:
+    - name: GATEWAY_URL
+      value: wss://gateway.example.com
+  services:
+    - name: agent
+      command: ["device-agent", "serve"]
+      env:
+        - name: DEVICE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: device-token
+              key: token
+```
+
+- `name` is a DNS label, unique in the list. `command` is an exact argv.
+  `workingDirectory` defaults to `spec.defaultWorkingDirectory`, then to
+  `/workspace`.
+- A service receives the Workspace `env`, which a WorkspaceExec also receives
+  by default, overridden by its own `env`. Values may come from a Secret or
+  ConfigMap key. A service does not receive credentials or an Agent home.
+- `RC_KUBE_SOCKET` holds the local endpoint. `rc-kube process` commands use it
+  by default.
+
+The controller passes the list to `rc-kube serve` as one encoded argument. A
+value from a Secret or ConfigMap becomes an `RC_SERVICE_ENV_<n>` variable of the
+runtime container, so Kubernetes reads it at container start and the Pod spec
+holds only the reference. The supervisor resolves these variables and removes
+them from its own environment before it starts any process. Anyone who can
+exec into the runtime container can still read them, as with `secretRefs`.
+
+The list, the variables, and the Workspace `env` a service sees are part of the
+runtime topology. A change replaces the runtime Pod once no execution is
+active, as other topology changes do. A Secret value change takes effect at the
+next runtime start. Without services, the topology hash and Pod are unchanged.
+
+The supervisor starts every service once its endpoint listens. It restarts a
+service each time it exits, after a delay that starts at 1 second, doubles up
+to 1 minute, and starts over after a run of at least 1 minute. On shutdown it
+stops services with the same stop grace as other processes and does not
+restart them.
+
+Services never count as activity: starting or restarting one does not record
+activity, and services do not appear in `status.lifecycle.activeExecutions`.
+They do not block idle suspension, maximum-run suspension, topology changes,
+or deletion. A service that does real work reports it with
+`rc-kube process touch`, as described in
+[runtime activity and maximum run](../adr/0008-runtime-activity-and-maximum-run.md).
+
+Each run is a supervisor process record with the ID
+`service_<name>_<start time>`. `rcctl ps --id-prefix service_` lists runs, and
+`rcctl logs ID` and `rcctl inspect ID` read one. A
+Kubernetes object name never contains an underscore, so a run cannot collide
+with a WorkspaceExec. The supervisor keeps the five newest finished runs of
+each service. Restart notices go to the runtime container log.
+
+Linux and Windows runtimes support services. The Darwin runtime starts the
+supervisor from a VM provider hook and does not pass container variables to
+it, so the API rejects services on Darwin. `rcctl workspace create` has no
+service flags; declare services in the Workspace YAML or through the API.
+`rcctl workspace get` lists their names and commands.
+See [resident Workspace services](../adr/0009-resident-workspace-services.md).
 
 ## WorkspaceExec
 
@@ -854,10 +966,11 @@ not override an explicit lifecycle policy.
 A Workspace with `DeleteAfterProcessesExit`, as created by an unnamed `run`
 or `run --rm`, is deleted after the terminal grace period, independently of the
 CLI connection; this command lifetime takes precedence over idle stages.
-The optional `spec.idleTimeout` and `spec.deleteAfterSuspended` clocks both
-remain disabled when omitted or zero. `run` and `workspace create` expose
-`--idle-timeout` and `--delete-after-suspended` directly; Environments do not
-provide lifecycle defaults. CLI and direct API creation use the same fields.
+The optional `spec.idleTimeout`, `spec.maxRunDuration`, and
+`spec.deleteAfterSuspended` clocks all remain disabled when omitted or zero.
+`run` and `workspace create` expose `--idle-timeout`, `--max-run-duration`, and
+`--delete-after-suspended` directly; Environments do not provide lifecycle
+defaults. CLI and direct API creation use the same fields.
 
 Automatic deletion first closes a persistent execution admission fence on the
 Workspace, then scans active executions. Before every runtime start the

@@ -166,6 +166,28 @@ func TestWorkspaceDetailShowsEnvironmentVariableNames(t *testing.T) {
 	assert.Contains(t, fields, clioutput.Field{Name: "Environment variables", Value: "NPM_CONFIG_REGISTRY, FROM_SECRET"}, "show names without exposing values")
 }
 
+const testServicesField = "Services"
+
+func TestWorkspaceDetailListsServices(t *testing.T) {
+	t.Parallel()
+	workspace := &workspacesv1alpha1.Workspace{Spec: workspacesv1alpha1.WorkspaceSpec{Services: []workspacesv1alpha1.WorkspaceService{
+		{
+			Name:    "agent",
+			Command: []string{"device-agent", "serve"},
+			Env: []corev1.EnvVar{
+				{Name: "TOKEN", Value: "must-not-appear"},
+			},
+		},
+		{
+			Name:    "proxy",
+			Command: []string{"proxy"},
+		},
+	}}}
+
+	assert.Contains(t, workspaceDetailFields(workspace), clioutput.Field{Name: testServicesField, Value: "agent (device-agent serve), proxy (proxy)"}, "list names and commands without env values")
+	assert.Contains(t, workspaceDetailFields(&workspacesv1alpha1.Workspace{}), clioutput.Field{Name: testServicesField, Value: "-"})
+}
+
 func TestWorkspaceListTableUsesHumanAgeAndWideMetadata(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)
@@ -540,4 +562,65 @@ func TestWaitEndsWithPendingMountWhenWorktreeIsInUse(t *testing.T) {
 	var inUse *worktreeInUseError
 	require.ErrorAs(t, err, &inUse)
 	assert.Contains(t, inUse.message, "WorktreeExec/build")
+}
+
+func TestWaitFailsFastWhenAdmissionRejectsWorkspace(t *testing.T) {
+	t.Parallel()
+	const quota = `Workspace runtime Pod was rejected by the API server: pods "dev" is forbidden: exceeded quota: compute`
+	scheme := runtime.NewScheme()
+	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
+	workspace := &workspacesv1alpha1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       testWorkspaceName,
+			Namespace:  testWorkspaceNamespace,
+			UID:        testWorkspaceUID,
+			Generation: 3,
+		},
+		Status: workspacesv1alpha1.WorkspaceStatus{
+			ObservedGeneration: 3,
+			Conditions: []metav1.Condition{{
+				Type:               workspacesv1alpha1.WorkspaceConditionReady,
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: 3,
+				Reason:             workspacesv1alpha1.WorkspaceReasonAdmissionRejected,
+				Message:            quota,
+			}},
+		},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace).Build()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	err := waitWorkspaceGenerationReady(ctx, kubeClient, workspace, 3)
+
+	require.Error(t, err)
+	require.NotErrorIs(t, err, context.DeadlineExceeded, "the wait ends at once instead of waiting silently")
+	assert.ErrorContains(t, err, "exceeded quota: compute")
+	assert.ErrorContains(t, err, "rc keeps retrying")
+}
+
+func TestWorkspaceDetailShowsRuntimePodMetadataAndPriority(t *testing.T) {
+	t.Parallel()
+	workspace := &workspacesv1alpha1.Workspace{Spec: workspacesv1alpha1.WorkspaceSpec{
+		PriorityClassName: "workspace-high",
+		PodMetadata: &workspacesv1alpha1.WorkspacePodMetadata{
+			Labels: map[string]string{
+				"example.com/tenant": "team-a",
+				"billing":            "enabled",
+			},
+			Annotations: map[string]string{"karpenter.sh/do-not-disrupt": "true"},
+		},
+	}}
+
+	fields := workspaceDetailFields(workspace)
+
+	assert.Contains(t, fields, clioutput.Field{Name: "Priority class", Value: "workspace-high"})
+	assert.Contains(t, fields, clioutput.Field{Name: "Pod labels", Value: "billing=enabled, example.com/tenant=team-a"}, "sort labels by key")
+	assert.Contains(t, fields, clioutput.Field{Name: "Pod annotations", Value: "karpenter.sh/do-not-disrupt=true"})
+	assert.Equal(t, "-", podMetadataSummary(nil), "show absent metadata")
+
+	command := newCreateCommand(kubeconfig.NewFlags())
+	for _, flag := range []string{"pod-label", "pod-annotation", "priority-class"} {
+		assert.NotNil(t, command.Flag(flag), "workspace create exposes --%s", flag)
+	}
 }

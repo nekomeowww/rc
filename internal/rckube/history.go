@@ -223,6 +223,12 @@ func (supervisor *Supervisor) List() ([]processruntime.HistoryEntry, error) {
 // at-most-once identity, which is safe only because no start request outlives
 // the policy age and a WorkspaceExec record is never started twice.
 func (supervisor *Supervisor) PruneHistory(policy processruntime.HistoryPolicy, now time.Time) (int, error) {
+	return supervisor.pruneHistory(policy, now, nil)
+}
+
+// pruneHistory applies policy to the finished records whose ID matches, or to
+// every finished record when matches is nil.
+func (supervisor *Supervisor) pruneHistory(policy processruntime.HistoryPolicy, now time.Time, matches func(string) bool) (int, error) {
 	if policy.TTLAfterFinished <= 0 && policy.MaxEntries <= 0 && policy.TranscriptTTL <= 0 {
 		return 0, nil
 	}
@@ -234,7 +240,7 @@ func (supervisor *Supervisor) PruneHistory(policy processruntime.HistoryPolicy, 
 	}
 	finished := make([]processruntime.HistoryEntry, 0, len(records))
 	for _, record := range records {
-		if !historyTerminal(record.Phase) || record.CompletedAt == nil {
+		if !historyTerminal(record.Phase) || record.CompletedAt == nil || matches != nil && !matches(record.ID) {
 			continue
 		}
 		if process := supervisor.processes[record.ID]; process != nil && !process.finished() {

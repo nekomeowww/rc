@@ -17,6 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"strings"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -46,6 +48,13 @@ const (
 
 // Ready and DeletionBlocked reasons published for a Workspace.
 const (
+	// WorkspaceReasonAdmissionRejected means the API server refused to create
+	// a Pod or PersistentVolumeClaim the Workspace needs, for example because
+	// of a ResourceQuota, a LimitRange, Pod Security admission, or an admission
+	// webhook or policy. The message carries the API server's explanation. The
+	// controller retries with a bounded backoff, so the Workspace starts once
+	// the cause is resolved.
+	WorkspaceReasonAdmissionRejected = "AdmissionRejected"
 	// WorkspaceReasonRuntimeMissing means a Ready runtime Pod disappeared and the
 	// controller is replacing it.
 	WorkspaceReasonRuntimeMissing = "RuntimeMissing"
@@ -60,6 +69,15 @@ const (
 	WorkspaceReasonWaitingForHotMounts = "WaitingForHotMounts"
 	// WorkspaceReasonWaitingForPods means deletion waits for the runtime Pod.
 	WorkspaceReasonWaitingForPods = "WaitingForPods"
+)
+
+// Reasons recorded in status.lifecycle.lastAutomaticSuspendReason.
+const (
+	// WorkspaceAutomaticSuspendIdle means idleTimeout passed without activity.
+	WorkspaceAutomaticSuspendIdle = "Idle"
+	// WorkspaceAutomaticSuspendMaxRunDuration means the run reached
+	// maxRunDuration, whatever its activity.
+	WorkspaceAutomaticSuspendMaxRunDuration = "MaxRunDuration"
 )
 
 // WorkspaceMount associates a stable path with a Worktree or Repository PVC.
@@ -126,7 +144,76 @@ type WorkspaceLifecycle struct {
 	BeforeStop []WorkspaceLifecycleAction `json:"beforeStop,omitempty"`
 }
 
+// ReservedPodMetadataDomain is the DNS domain of the labels and annotations
+// that rc sets on its own Pods. Keys in this domain or any of its subdomains,
+// such as workspaces.rc.ayaka.io/workspace, are reserved for rc.
+const ReservedPodMetadataDomain = "rc.ayaka.io"
+
+// IsReservedPodMetadataKey reports whether a label or annotation key uses a
+// prefix that rc reserves for itself.
+func IsReservedPodMetadataKey(key string) bool {
+	prefix, _, found := strings.Cut(key, "/")
+	if !found {
+		return false
+	}
+
+	return prefix == ReservedPodMetadataDomain || strings.HasSuffix(prefix, "."+ReservedPodMetadataDomain)
+}
+
+// WorkspacePodMetadata adds labels and annotations to the Workspace runtime
+// Pod. Keys whose prefix is rc.ayaka.io or one of its subdomains (for example
+// workspaces.rc.ayaka.io/) are reserved for rc and rejected; every label and
+// annotation that rc sets on the runtime Pod uses such a key. Changing only
+// these maps updates the running Pod in place without restarting it.
+type WorkspacePodMetadata struct {
+	// labels are added to the runtime Pod, for example for NetworkPolicy
+	// selectors or cost attribution.
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.startsWith('rc.ayaka.io/') && !k.contains('.rc.ayaka.io/'))",message="label keys with an rc.ayaka.io prefix are reserved for rc"
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
+
+	// annotations are added to the runtime Pod, for example
+	// karpenter.sh/do-not-disrupt: "true".
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.startsWith('rc.ayaka.io/') && !k.contains('.rc.ayaka.io/'))",message="annotation keys with an rc.ayaka.io prefix are reserved for rc"
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
+// WorkspaceService is one resident process that the runtime supervisor starts
+// whenever the runtime starts and restarts whenever it exits. It is not a
+// WorkspaceExec: it never counts as activity and never blocks suspension or
+// deletion. A service reports its own work with `rc-kube process touch`.
+type WorkspaceService struct {
+	// name identifies the service in process history and logs.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+	// +required
+	Name string `json:"name"`
+
+	// command is executed as an exact argv without shell interpretation.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:MinLength=1
+	// +required
+	Command []string `json:"command"`
+
+	// workingDirectory defaults to the Workspace defaultWorkingDirectory, then
+	// to /workspace.
+	// +optional
+	WorkingDirectory string `json:"workingDirectory,omitempty"`
+
+	// env overrides the Workspace env for this service. Values may come from a
+	// Secret or ConfigMap key; they are read when the runtime starts.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:XValidation:rule="self.all(variable, !has(variable.valueFrom) || has(variable.valueFrom.secretKeyRef) || has(variable.valueFrom.configMapKeyRef))",message="service env valueFrom supports only secretKeyRef and configMapKeyRef"
+	// +optional
+	Env []corev1.EnvVar `json:"env,omitempty"`
+}
+
 // WorkspaceSpec defines a development machine with an explicit lifetime.
+// +kubebuilder:validation:XValidation:rule="!has(self.services) || size(self.services) == 0 || !has(self.os) || self.os != 'darwin'",message="Darwin Workspaces do not support services"
 type WorkspaceSpec struct {
 	// executionRetention bounds terminal execution history independently of this
 	// target's lifetime. Omission preserves existing history on upgrade.
@@ -201,6 +288,16 @@ type WorkspaceSpec struct {
 	// +optional
 	Lifecycle *WorkspaceLifecycle `json:"lifecycle,omitempty"`
 
+	// services are resident processes kept running in the runtime, such as an
+	// agent that serves tool calls. Each one receives the Workspace env, like a
+	// WorkspaceExec, plus RC_KUBE_SOCKET. A change replaces the runtime Pod once
+	// no execution is active. Linux and Windows runtimes only.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=16
+	// +optional
+	Services []WorkspaceService `json:"services,omitempty"`
+
 	// serviceAccountName overrides the namespace rc-workspace ServiceAccount.
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`
@@ -229,12 +326,35 @@ type WorkspaceSpec struct {
 	// +optional
 	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
 
+	// podMetadata adds labels and annotations to the runtime Pod only. Keys
+	// with an rc.ayaka.io prefix, or a prefix in one of its subdomains, are
+	// reserved for rc. A change is applied to the running Pod in place.
+	// +optional
+	PodMetadata *WorkspacePodMetadata `json:"podMetadata,omitempty"`
+
+	// priorityClassName selects a PriorityClass for the runtime Pod. Pod
+	// priority is immutable, so a change replaces an idle runtime Pod like any
+	// other runtime change and waits while executions are active.
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+
 	// idleTimeout suspends compute after inactivity. Zero or omitted disables it.
-	// Creation, Ready, resume, and execution completion advance activity.
+	// Creation, Ready, resume, execution completion, and work reported to the
+	// runtime supervisor (rc-kube process touch) advance activity.
 	// Pending and running executions block suspension; attach alone is not activity.
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('0s')",message="idleTimeout must not be negative"
 	// +optional
 	IdleTimeout *metav1.Duration `json:"idleTimeout,omitempty"`
+
+	// maxRunDuration suspends compute this long after the runtime last
+	// started, whatever its activity: running executions are stopped first.
+	// It bounds stuck or runaway work that idle suspension never sees. Zero or
+	// omitted disables it. Each resume starts a new run.
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('0s')",message="maxRunDuration must not be negative"
+	// +optional
+	MaxRunDuration *metav1.Duration `json:"maxRunDuration,omitempty"`
 
 	// deleteAfterSuspended deletes the Workspace and owned storage after
 	// confirmed suspension. Zero or omitted keeps storage indefinitely. This
@@ -277,6 +397,16 @@ type WorkspaceLifecycleStatus struct {
 	// +optional
 	DeleteAt *metav1.Time `json:"deleteAt,omitempty"`
 
+	// maxRunSuspendAt is when the current run reaches maxRunDuration. Unlike
+	// idleSuspendAt, active executions do not postpone it.
+	// +optional
+	MaxRunSuspendAt *metav1.Time `json:"maxRunSuspendAt,omitempty"`
+
+	// lastAutomaticSuspendReason records why the retention controller last
+	// suspended the Workspace: Idle or MaxRunDuration.
+	// +optional
+	LastAutomaticSuspendReason string `json:"lastAutomaticSuspendReason,omitempty"`
+
 	// activeExecutions counts nonterminal WorkspaceExecs for this Workspace.
 	// +optional
 	ActiveExecutions int32 `json:"activeExecutions"`
@@ -307,6 +437,12 @@ type WorkspaceStatus struct {
 	// execution completion time so deleting execution history cannot shorten idle.
 	// +optional
 	LastActivityTime *metav1.Time `json:"lastActivityTime,omitempty"`
+
+	// runningSince is when the current run started: the first Ready after
+	// creation or resume. It is cleared once suspension is confirmed, and a
+	// runtime Pod restart does not reset it.
+	// +optional
+	RunningSince *metav1.Time `json:"runningSince,omitempty"`
 
 	// suspendedAt starts the storage grace period after the runtime is confirmed
 	// absent. It is cleared on resume and survives controller restarts. Workspaces

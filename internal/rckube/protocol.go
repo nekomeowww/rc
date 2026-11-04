@@ -16,8 +16,16 @@ limitations under the License.
 
 package rckube
 
-import processruntime "github.com/nekomeowww/rc/internal/execution"
+import (
+	"time"
 
+	processruntime "github.com/nekomeowww/rc/internal/execution"
+)
+
+// NOTICE: Adding an action or an optional field keeps the version. An older
+// supervisor answers a new action with "unknown action", which callers treat
+// as "no signal"; bumping the version would instead break every client during
+// a rolling upgrade.
 const protocolVersion = 4
 
 type protocolRequest struct {
@@ -39,6 +47,9 @@ type protocolResponse struct {
 	Version int                           `json:"version"`
 	State   processruntime.State          `json:"state,omitempty"`
 	Entries []processruntime.HistoryEntry `json:"entries,omitempty"`
-	Error   string                        `json:"error,omitempty"`
-	Code    string                        `json:"code,omitempty"`
+	// LastActivity answers the activity action. Nil means no activity was
+	// recorded since the supervisor started.
+	LastActivity *time.Time `json:"lastActivity,omitempty"`
+	Error        string     `json:"error,omitempty"`
+	Code         string     `json:"code,omitempty"`
 }

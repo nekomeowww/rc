@@ -38,7 +38,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/duration"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -362,11 +361,7 @@ func mountRepository(cmd *cobra.Command, kubeconfigFlags *kubeconfig.Flags, sele
 		if err := clusterClient.Kube.Create(cmd.Context(), worktree); err != nil {
 			return fmt.Errorf("create mounted Worktree: %w", err)
 		}
-		clientset, err := kubernetes.NewForConfig(clusterClient.Config)
-		if err != nil {
-			return cleanupGeneratedWorktree(cmd.Context(), clusterClient.Kube, worktree, fmt.Errorf("create Kubernetes clientset: %w", err))
-		}
-		worktreeClient := &repositoryservice.WorktreeClient{Client: clusterClient.Kube, Kubernetes: clientset}
+		worktreeClient := &repositoryservice.WorktreeClient{Client: clusterClient.Kube, Kubernetes: clusterClient.Kubernetes}
 		if err := worktreeClient.Wait(cmd.Context(), worktree, cmd.OutOrStdout()); err != nil {
 			return cleanupGeneratedWorktree(cmd.Context(), clusterClient.Kube, worktree, err)
 		}

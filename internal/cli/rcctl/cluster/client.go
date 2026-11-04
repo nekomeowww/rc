@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
 	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
 	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
@@ -36,7 +37,9 @@ import (
 )
 
 // Client bundles the Kubernetes clients rcctl commands use. Constructing it
-// performs no network I/O.
+// performs no network I/O. The clients share one HTTP client, so requests reuse
+// one connection. client-go does not share transports between configs that set
+// a proxy, and every new connection through a tunnel can cost seconds.
 type Client struct {
 	Kube       client.Client
 	Kubernetes kubernetes.Interface
@@ -49,11 +52,23 @@ func New(config *rest.Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	kubeClient, err := client.New(config, client.Options{Scheme: scheme})
+	httpClient, err := rest.HTTPClientFor(config)
+	if err != nil {
+		return nil, fmt.Errorf("create Kubernetes HTTP client: %w", err)
+	}
+	discoveryMapper, err := apiutil.NewDynamicRESTMapper(config, httpClient)
+	if err != nil {
+		return nil, fmt.Errorf("create Kubernetes REST mapper: %w", err)
+	}
+	kubeClient, err := client.New(config, client.Options{
+		Scheme:     scheme,
+		HTTPClient: httpClient,
+		Mapper:     newRESTMapper(scheme, discoveryMapper),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("create Kubernetes client: %w", err)
 	}
-	clientset, err := kubernetes.NewForConfig(config)
+	clientset, err := kubernetes.NewForConfigAndClient(config, httpClient)
 	if err != nil {
 		return nil, fmt.Errorf("create Kubernetes clientset: %w", err)
 	}

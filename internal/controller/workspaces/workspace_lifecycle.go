@@ -66,9 +66,26 @@ func idleAndDeleteDeadlines(workspace *workspacesv1alpha1.Workspace, processes w
 	case workspace.Spec.IdleTimeout == nil || workspace.Spec.IdleTimeout.Duration <= 0 || workspace.Status.LastActivityTime == nil:
 		return workspaceDeadlines{}
 	default:
-		deadline := workspace.Status.LastActivityTime.Add(workspace.Spec.IdleTimeout.Duration)
+		idle := workspace.Spec.IdleTimeout.Duration
+		if workspaceStarting(workspace) {
+			// A cold start (scheduling a node, pulling the image, attaching the
+			// volume) is not idle time. Grant at least the start timeout so a
+			// short idleTimeout cannot suspend a Workspace before it is ever
+			// Ready; Ready=True restarts the idle clock.
+			idle = max(idle, workspaceStartTimeout)
+		}
+		deadline := workspace.Status.LastActivityTime.Add(idle)
 		return workspaceDeadlines{idleSuspendAt: &deadline}
 	}
+}
+
+// workspaceStarting reports a Workspace that should run but is not Ready yet.
+func workspaceStarting(workspace *workspacesv1alpha1.Workspace) bool {
+	if workspace.Spec.DesiredState == workspacesv1alpha1.WorkspaceDesiredStateSuspended {
+		return false
+	}
+	ready := meta.FindStatusCondition(workspace.Status.Conditions, workspacesv1alpha1.WorkspaceConditionReady)
+	return ready == nil || ready.Status != metav1.ConditionTrue
 }
 
 // suspendedDeletionEnabled requires the opt-in and a confirmed suspension at

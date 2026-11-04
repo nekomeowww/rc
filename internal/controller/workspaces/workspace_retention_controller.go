@@ -42,6 +42,9 @@ import (
 const (
 	temporaryWorkspaceCleanupDelay = 5 * time.Minute
 	temporaryWorkspaceStartTimeout = 15 * time.Minute
+	// workspaceStartTimeout is the least idle time a starting Workspace gets
+	// before it is Ready, so a short idleTimeout does not cut a cold start.
+	workspaceStartTimeout = 15 * time.Minute
 	// runtimeActivityTimeout bounds the activity query at an idle deadline.
 	// A runtime that accepts the exec but never answers must not hold the
 	// retention worker, which every Workspace's deadlines share.

@@ -110,6 +110,9 @@ type resolvedWorkspace struct {
 	services             []processruntime.Service
 	serviceEnvironment   []corev1.EnvVar
 	homeHostPath         string
+	// lxcfsDir is the controller LXCFS directory for a Linux runtime, and
+	// empty for other operating systems or when LXCFS is disabled.
+	lxcfsDir string
 	// storageReady is published as StorageReady once home storage has been
 	// evaluated in this pass; nil leaves the previous condition unchanged.
 	storageReady *metav1.Condition
@@ -156,6 +159,10 @@ type WorkspaceReconciler struct {
 	WindowsRunnerImage  string
 	DarwinRunnerImage   string
 	DarwinWorkspaceRoot string
+	// LXCFSDir is the host directory where LXCFS serves its files. When set,
+	// Linux runtime Pods bind-mount the LXCFS /proc and /sys views. Empty
+	// disables LXCFS.
+	LXCFSDir string
 
 	// admissionRetries backs off creates the API server rejected; see
 	// admission_rejection.go. The zero value is ready to use.
@@ -772,6 +779,9 @@ func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspac
 	if resolved.image == "" {
 		return resolved, "ImageRequired", "Workspace runtime image is empty", nil
 	}
+	if platform.OS() == corev1.Linux {
+		resolved.lxcfsDir = r.LXCFSDir
+	}
 
 	return resolved, "", "", nil
 }
@@ -781,6 +791,13 @@ func (r *WorkspaceReconciler) resolveWorkspaceDependencies(ctx context.Context, 
 	if resolved.runtime.OS() == corev1.Linux {
 		if reason, message := validateHotMountPaths(workspace.Spec.Mounts); reason != "" {
 			return resolved, reason, message, nil
+		}
+	}
+	if resolved.lxcfsDir != "" {
+		for _, mount := range workspace.Spec.Mounts {
+			if strings.HasPrefix(mount.Name, rcplatform.LXCFSVolumePrefix) {
+				return resolved, "ReservedMountName", fmt.Sprintf("Mount name %s is reserved for LXCFS mounts", mount.Name), nil
+			}
 		}
 	}
 	initializerNames := make(map[string]struct{})
@@ -1087,6 +1104,7 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 		Initializers: initializers, BeforeStop: resolved.beforeStop,
 		PriorityClassName: workspace.Spec.PriorityClassName,
 		Services:          resolved.services, ServiceEnvironment: resolved.serviceEnvironment,
+		LXCFSDir: resolved.lxcfsDir,
 	})
 	if err != nil {
 		return nil, err
@@ -1131,6 +1149,9 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 		// Omitted when empty, so Workspaces without services keep their hash.
 		Services           []processruntime.Service `json:",omitempty"`
 		ServiceEnvironment []corev1.EnvVar          `json:",omitempty"`
+		// LXCFSDir is omitted when empty, so a controller without LXCFS keeps
+		// the hash of existing runtime Pods and does not replace them.
+		LXCFSDir string `json:",omitempty"`
 	}{
 		RuntimePolicy: workspaceRuntimePolicyVersion, OS: resolved.runtime.OS(),
 		Image: resolved.image, Mounts: mounts, ConfigMapRefs: workspace.Spec.ConfigMapRefs,
@@ -1141,6 +1162,7 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 		Affinity: workspace.Spec.Affinity, RuntimeClassName: workspace.Spec.RuntimeClassName, Lifecycle: workspace.Spec.Lifecycle,
 		PriorityClassName: workspace.Spec.PriorityClassName,
 		Services:          resolved.services, ServiceEnvironment: resolved.serviceEnvironment,
+		LXCFSDir: resolved.lxcfsDir,
 	}
 	data, err := json.Marshal(topology)
 	if err != nil {
@@ -1396,6 +1418,9 @@ func (r *WorkspaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	if r.DarwinWorkspaceRoot != "" && !path.IsAbs(r.DarwinWorkspaceRoot) {
 		return fmt.Errorf("darwin Workspace root must be absolute")
+	}
+	if r.LXCFSDir != "" && !path.IsAbs(r.LXCFSDir) {
+		return fmt.Errorf("LXCFS directory must be absolute")
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).

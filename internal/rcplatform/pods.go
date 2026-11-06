@@ -3,7 +3,9 @@ package rcplatform
 import (
 	"fmt"
 	"maps"
+	"path"
 	"slices"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -55,10 +57,62 @@ type WorkspacePodIntent struct {
 	// from; both are part of the Pod, so a change takes a new runtime.
 	Services           []processruntime.Service
 	ServiceEnvironment []corev1.EnvVar
+	// LXCFSDir is the host directory where LXCFS serves its files. When set,
+	// a Linux runtime bind-mounts the LXCFS views over the matching /proc and
+	// /sys files. Empty adds nothing.
+	LXCFSDir string
+}
+
+// LXCFSVolumePrefix starts the name of every LXCFS volume in a Workspace Pod.
+const LXCFSVolumePrefix = "lxcfs-"
+
+// lxcfsFiles are the files LXCFS virtualizes, as container paths. Each one is
+// served at the same path under the LXCFS directory on the host.
+var lxcfsFiles = []string{
+	"/proc/cpuinfo",
+	"/proc/meminfo",
+	"/proc/stat",
+	"/proc/uptime",
+	"/proc/loadavg",
+	"/proc/diskstats",
+	"/proc/swaps",
+	"/sys/devices/system/cpu/online",
+}
+
+// lxcfsVolumes returns read-only bind mounts of the LXCFS files in dir. The
+// hostPath type is File, so a node without LXCFS fails the mount instead of
+// mounting an empty path.
+func lxcfsVolumes(dir string) ([]corev1.Volume, []corev1.VolumeMount) {
+	if dir == "" {
+		return nil, nil
+	}
+	kind := corev1.HostPathFile
+	volumes := make([]corev1.Volume, 0, len(lxcfsFiles))
+	mounts := make([]corev1.VolumeMount, 0, len(lxcfsFiles))
+	for _, file := range lxcfsFiles {
+		name := LXCFSVolumePrefix + strings.ReplaceAll(strings.TrimPrefix(file, "/"), "/", "-")
+		volumes = append(volumes, corev1.Volume{
+			Name: name,
+			VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
+				Path: path.Join(dir, file),
+				Type: &kind,
+			}},
+		})
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      name,
+			MountPath: file,
+			ReadOnly:  true,
+		})
+	}
+
+	return volumes, mounts
 }
 
 // WorkspacePod compiles a final Pod without post-construction platform rewrites.
 func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, error) {
+	if intent.LXCFSDir != "" && runtime.os != corev1.Linux {
+		return nil, fmt.Errorf("LXCFS mounts require a Linux runtime")
+	}
 	if runtime.os == Darwin {
 		if len(intent.Services) > 0 {
 			return nil, fmt.Errorf("darwin Workspace runtimes do not support services")
@@ -77,7 +131,9 @@ func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, err
 			corev1.Volume{Name: "hot-worktree-roots", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: intent.HotMountRoot + "/roots", Type: &kind}}},
 		)
 	}
+	lxcfsVolumeList, lxcfsMounts := lxcfsVolumes(intent.LXCFSDir)
 	volumes = append(volumes, slices.Clone(intent.AdditionalVolumes)...)
+	volumes = append(volumes, lxcfsVolumeList...)
 	volumes = append(volumes, corev1.Volume{Name: runtimeVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
 	mounts := make([]corev1.VolumeMount, 0, len(intent.AdditionalMounts)+4)
 	mounts = append(mounts, corev1.VolumeMount{Name: homeVolumeName, MountPath: runtime.layout.home})
@@ -89,6 +145,7 @@ func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, err
 		)
 	}
 	mounts = append(mounts, slices.Clone(intent.AdditionalMounts)...)
+	mounts = append(mounts, lxcfsMounts...)
 	mounts = append(mounts, corev1.VolumeMount{Name: runtimeVolumeName, MountPath: runtime.layout.run})
 
 	initContainers := make([]corev1.Container, 0, len(intent.Initializers))

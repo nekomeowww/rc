@@ -327,6 +327,11 @@ change the hash, so existing Pods are not replaced when this field is added.
 `workspace create` and `run` expose `--pod-label`, `--pod-annotation`, and
 `--priority-class`.
 
+The manager flag `--lxcfs-dir` adds read-only LXCFS file mounts to Linux
+runtime Pods. The directory is part of the Linux topology hash, so a change
+follows the same topology rules. An empty value does not change the hash. See
+the [LXCFS guide](../guides/lxcfs.md).
+
 ### Start, suspend, and topology changes
 
 A Workspace has a desired runtime state:

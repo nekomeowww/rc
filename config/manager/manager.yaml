@@ -67,6 +67,7 @@ spec:
           - --windows-runner-image=$(RC_WINDOWS_RUNNER_IMAGE)
           - --darwin-runner-image=$(RC_DARWIN_RUNNER_IMAGE)
           - --darwin-workspace-root=$(RC_DARWIN_WORKSPACE_ROOT)
+          - --lxcfs-dir=$(RC_LXCFS_DIR)
         env:
           - name: RC_RUNNER_IMAGE
             value: runner:latest
@@ -75,6 +76,10 @@ spec:
           - name: RC_DARWIN_RUNNER_IMAGE
             value: ""
           - name: RC_DARWIN_WORKSPACE_ROOT
+            value: ""
+          # Host directory where LXCFS serves its files, for example
+          # /var/lib/lxcfs. Empty disables LXCFS. See docs/guides/lxcfs.md.
+          - name: RC_LXCFS_DIR
             value: ""
         image: controller:latest
         name: manager

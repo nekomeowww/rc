@@ -71,6 +71,7 @@ func main() {
 	var windowsRunnerImage string
 	var darwinRunnerImage string
 	var darwinWorkspaceRoot string
+	var lxcfsDir string
 
 	var secureMetrics bool
 	var enableHTTP2 bool
@@ -87,6 +88,9 @@ func main() {
 		"Default macOS-vz Workspace VM image, used when spec.image is omitted.")
 	flag.StringVar(&darwinWorkspaceRoot, "darwin-workspace-root", "",
 		"Absolute host directory root shared into persistent Darwin Workspaces.")
+	flag.StringVar(&lxcfsDir, "lxcfs-dir", "",
+		"Host directory where LXCFS serves its proc files, for example /var/lib/lxcfs. "+
+			"Linux Workspace runtime Pods bind-mount these files. Empty disables LXCFS.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -258,6 +262,7 @@ func main() {
 		WindowsRunnerImage:  windowsRunnerImage,
 		DarwinRunnerImage:   darwinRunnerImage,
 		DarwinWorkspaceRoot: darwinWorkspaceRoot,
+		LXCFSDir:            lxcfsDir,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "workspaces-workspace")
 		os.Exit(1)

@@ -82,6 +82,9 @@ The controller and Repository jobs run on Linux.
 See the [Windows](docs/guides/windows-workspaces.md),
 [macOS](docs/guides/darwin-workspaces.md), and
 [GUI](docs/guides/run-gui-applications.md) guides for setup and current limits.
+To show each Linux Workspace its own memory limit, CPU count, uptime, and load
+average, run LXCFS on the nodes and set `--lxcfs-dir`. See the
+[LXCFS guide](docs/guides/lxcfs.md).
 
 ## Install
 

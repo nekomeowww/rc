@@ -14,6 +14,9 @@ import (
 	"github.com/nekomeowww/rc/internal/rcplatform"
 )
 
+// testNoOpScript is a lifecycle script that does nothing and succeeds.
+const testNoOpScript = "true"
+
 var _ = Describe("Injected rc-kube", func() {
 	It("builds Linux runtime and editor Pods that the API server accepts", func() {
 		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "rc-kube-"}}
@@ -27,12 +30,12 @@ var _ = Describe("Injected rc-kube", func() {
 				Lifecycle: &workspacesv1alpha1.WorkspaceLifecycle{
 					Initialize: []workspacesv1alpha1.WorkspaceLifecycleAction{
 						{
-							Script: "true",
+							Script: testNoOpScript,
 						},
 					},
 					BeforeStop: []workspacesv1alpha1.WorkspaceLifecycleAction{
 						{
-							Script: "true",
+							Script: testNoOpScript,
 						},
 					},
 				},

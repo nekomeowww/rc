@@ -71,6 +71,14 @@ const (
 	WorkspaceReasonWaitingForPods = "WaitingForPods"
 )
 
+// Outdated reasons published for a blank Workspace.
+const (
+	// WorkspaceReasonImageChangePending means the runtime Pod uses an image
+	// other than the desired image: spec.image, or the controller's base image
+	// when spec.image is empty. The next runtime Pod uses the desired image.
+	WorkspaceReasonImageChangePending = "ImageChangePending"
+)
+
 // Reasons recorded in status.lifecycle.lastAutomaticSuspendReason.
 const (
 	// WorkspaceAutomaticSuspendIdle means idleTimeout passed without activity.
@@ -239,7 +247,8 @@ type WorkspaceSpec struct {
 	EnvironmentRef *LocalReference `json:"environmentRef,omitempty"`
 
 	// image is used only for a blank Workspace without environmentRef. When
-	// omitted, the controller's base Workspace image is used.
+	// omitted, the controller's base Workspace image is used. A change applies
+	// when the next runtime Pod starts; it never replaces a running Pod.
 	// +optional
 	Image string `json:"image,omitempty"`
 
@@ -454,7 +463,10 @@ type WorkspaceStatus struct {
 	// +optional
 	SourceEnvironmentRevision int64 `json:"sourceEnvironmentRevision,omitempty"`
 
-	// runtimeImage is the exact image string captured at Workspace creation.
+	// runtimeImage is the exact image string of the current or last runtime
+	// Pod. A blank Workspace records a new value when a runtime Pod starts on a
+	// changed spec.image or base image. An Environment clone keeps the image
+	// captured at creation.
 	// +optional
 	RuntimeImage string `json:"runtimeImage,omitempty"`
 

@@ -1262,7 +1262,8 @@ spec:
               image:
                 description: |-
                   image is used only for a blank Workspace without environmentRef. When
-                  omitted, the controller's base Workspace image is used.
+                  omitted, the controller's base Workspace image is used. A change applies
+                  when the next runtime Pod starts; it never replaces a running Pod.
                 type: string
               lifecycle:
                 description: lifecycle configures commands and scripts around each
@@ -1974,8 +1975,11 @@ spec:
                 format: date-time
                 type: string
               runtimeImage:
-                description: runtimeImage is the exact image string captured at Workspace
-                  creation.
+                description: |-
+                  runtimeImage is the exact image string of the current or last runtime
+                  Pod. A blank Workspace records a new value when a runtime Pod starts on a
+                  changed spec.image or base image. An Environment clone keeps the image
+                  captured at creation.
                 type: string
               runtimePodName:
                 description: runtimePodName is the active runtime Pod when desiredState

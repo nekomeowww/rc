@@ -147,6 +147,9 @@ replaced. Editor Pods have no topology hash and get injection when they are
 next created. Windows and Darwin runtimes still use the `rc-kube` of their
 image or VM.
 
+The topology hash includes the runtime image as `status.runtimeImage` records
+it, not the desired image. An image change thus never replaces a running Pod.
+
 The offline transcript reader that `rcctl` creates for a suspended Workspace
 still runs `rc-kube transcript` from the Workspace image, because `rcctl` does
 not know the rc-kube image of the controller.
@@ -260,11 +263,21 @@ references to its code, configuration, and credentials.
   PVC, records the source content revision, and snapshots the Environment's
   runner image string. Runtime replacements continue using that captured image;
   a later image or revision change only makes the Workspace `Outdated`;
-- without one, the Workspace receives a blank home volume and uses the rc base
-  Workspace image. The base contains `rc-kube`, `rcctl`, a shell, Git, CA
+- without one, the Workspace receives a blank home volume and uses
+  `spec.image`, or the rc base Workspace image when `spec.image` is empty. The
+  base contains `rc-kube`, `rcctl`, a shell, Git, CA
   certificates, Node.js with Corepack, common build and archive tools, and the
   proto and mise tool-version managers. It does not promise Python, Rust, or
   another language toolchain.
+
+The image of a blank Workspace can change; see
+[ADR 0011](../adr/0011-workspace-image-upgrades.md). A change of `spec.image`,
+or of the controller's base image when `spec.image` is empty, applies when the
+controller creates the next runtime Pod, usually at the next start after a
+suspend. A running Pod keeps its image, and the Workspace reports
+`Outdated=True` with reason `ImageChangePending`. Before it creates the new Pod,
+the controller writes the new image to `status.runtimeImage`. The home volume
+does not change. To roll back, set the earlier image again.
 
 The stable filesystem layout is:
 

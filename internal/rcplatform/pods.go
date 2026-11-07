@@ -148,6 +148,19 @@ func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, err
 	mounts = append(mounts, lxcfsMounts...)
 	mounts = append(mounts, corev1.VolumeMount{Name: runtimeVolumeName, MountPath: runtime.layout.run})
 
+	// A Linux runtime without a Service Account token hides the API server
+	// variables from every process that rc-kube starts. With a token, the
+	// variables stay, so in-cluster clients keep working.
+	var runtimeFlags []string
+	if runtime.os == corev1.Linux && !intent.AutomountToken {
+		runtimeFlags = []string{"--" + processruntime.HideKubernetesEnvironmentFlag}
+	}
+	lifecycleCommandLine := func(encoded string) []string {
+		command := []string{runtime.layout.executable, lifecycleCommand}
+		command = append(command, runtimeFlags...)
+		return append(command, actionsArgument, encoded)
+	}
+
 	initContainers := make([]corev1.Container, 0, len(intent.Initializers))
 	for _, initializer := range intent.Initializers {
 		if initializer.Image == "" {
@@ -159,7 +172,7 @@ func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, err
 		}
 		initContainers = append(initContainers, corev1.Container{
 			Name: initializer.Name, Image: initializer.Image,
-			Command:      []string{runtime.layout.executable, lifecycleCommand, actionsArgument, encoded},
+			Command:      lifecycleCommandLine(encoded),
 			VolumeMounts: slices.Clone(mounts), SecurityContext: runtimepolicy.ContainerSecurityContext(runtime.os),
 		})
 	}
@@ -171,11 +184,12 @@ func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, err
 			return nil, fmt.Errorf("encode Workspace beforeStop actions: %w", err)
 		}
 		containerLifecycle = &corev1.Lifecycle{PreStop: &corev1.LifecycleHandler{Exec: &corev1.ExecAction{
-			Command: []string{runtime.layout.executable, lifecycleCommand, actionsArgument, encoded},
+			Command: lifecycleCommandLine(encoded),
 		}}}
 	}
 
 	serveArgs := []string{socketArgument, runtime.layout.endpoint, stateDirectoryArgument, runtime.join(runtime.layout.home, ".rc", "processes")}
+	serveArgs = append(serveArgs, runtimeFlags...)
 	if intent.TranscriptScope != "" {
 		serveArgs = append(serveArgs, "--transcript-scope", intent.TranscriptScope)
 	}
@@ -218,6 +232,12 @@ func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, err
 			initContainers, []corev1.Container{container}, volumes),
 	}
 	pod.Spec.PriorityClassName = intent.PriorityClassName
+	if runtime.os == corev1.Linux {
+		// Do not add the other Services of the namespace to the environment
+		// of Workspace processes.
+		enableServiceLinks := false
+		pod.Spec.EnableServiceLinks = &enableServiceLinks
+	}
 
 	return pod, nil
 }

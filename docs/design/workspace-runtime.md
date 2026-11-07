@@ -760,6 +760,22 @@ available to callers and selected accounts. A more privileged account allows
 the Workspace agent to use ordinary Kubernetes and rcctl operations beyond the
 default rc Role.
 
+Linux Workspace runtime Pods set `enableServiceLinks: false`. Thus, the
+kubelet does not add the other Services of the namespace to the process
+environment. The kubelet always adds the `KUBERNETES_*` variables for the API
+server. When the Workspace sets `automountServiceAccountToken: false`, the
+controller starts rc-kube with `--hide-kubernetes-environment`. rc-kube then
+removes all `KUBERNETES_*` variables from its own environment before it starts
+a process. This applies to services, executions, terminals, and lifecycle
+actions. A `KUBERNETES_*` variable in `spec.env` stays, because it does not
+come from the container environment. When the token is mounted, the variables
+stay and in-cluster clients work. A `kubectl exec` into the runtime container
+does not go through rc-kube, so it still sees the variables.
+
+These two changes have no field in the topology hash. An upgrade does not
+replace a running runtime Pod. The new behavior starts with the next runtime
+Pod, for example after a suspend and start or a topology change.
+
 Inside a Pod, rcctl discovers its namespace from the mounted Service Account
 namespace file. Outside the cluster, namespace selection follows kubectl:
 explicit `--namespace` or `-n`, then the kubeconfig context namespace, then

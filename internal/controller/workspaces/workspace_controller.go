@@ -1135,6 +1135,9 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 		AgentCredentials []workspacesv1alpha1.LocalReference
 		Credentials      []workspacesv1alpha1.LocalReference
 		ServiceAccount   string
+		// AutomountSAToken also selects whether rc-kube hides the
+		// KUBERNETES_* variables. That flag and enableServiceLinks have no
+		// field of their own, so adding them did not replace existing Pods.
 		AutomountSAToken bool
 		Resources        corev1.ResourceRequirements
 		NodeSelector     map[string]string

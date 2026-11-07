@@ -34,14 +34,28 @@ import (
 	"github.com/nekomeowww/rc/internal/rcnative"
 )
 
+// lifecycleCommandName is the subcommand that runs Workspace lifecycle actions.
+const lifecycleCommandName = "lifecycle"
+
 // NewCommand creates the in-Pod runtime and bridge command tree.
 func NewCommand() *cobra.Command {
+	var hideKubernetesEnvironment bool
 	root := &cobra.Command{
 		Use:           "rc-kube",
 		Short:         "Supervise rc Workspace processes",
 		SilenceErrors: true,
 		SilenceUsage:  true,
+		// Before any subcommand runs, so no process that serve or lifecycle
+		// starts inherits the removed variables.
+		PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
+			if !hideKubernetesEnvironment {
+				return nil
+			}
+
+			return runtime.HideKubernetesEnvironment()
+		},
 	}
+	root.PersistentFlags().BoolVar(&hideKubernetesEnvironment, processruntime.HideKubernetesEnvironmentFlag, false, "Remove the KUBERNETES_* variables from the environment of started processes")
 	root.AddCommand(newServeCommand(), newProcessCommand(), newLifecycleCommand(), newHealthCommand(), newTranscriptCommand(), newCopyFromCommand(), newCopyToCommand())
 
 	return root
@@ -98,7 +112,7 @@ func defaultEndpoint() string {
 func newLifecycleCommand() *cobra.Command {
 	var encodedActions string
 	command := &cobra.Command{
-		Use:   "lifecycle",
+		Use:   lifecycleCommandName,
 		Short: "Run ordered Workspace lifecycle actions",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {

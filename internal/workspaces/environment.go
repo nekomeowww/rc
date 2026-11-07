@@ -22,6 +22,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	processruntime "github.com/nekomeowww/rc/internal/execution"
 )
 
 var environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -137,7 +139,7 @@ func callerEnvironmentExcluded(name string) bool {
 		}
 	}
 
-	return strings.HasPrefix(name, "KUBERNETES_") || strings.HasPrefix(name, "RC_")
+	return processruntime.IsKubernetesEnvironment(name) || strings.HasPrefix(name, "RC_")
 }
 
 func ReadEnvironmentFiles(paths []string) ([]map[string]string, error) {

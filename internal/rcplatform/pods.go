@@ -28,7 +28,54 @@ const (
 	actionsArgument      = "--actions"
 	lifecycleCommand     = "lifecycle"
 	servicesArgument     = "--services"
+	// rcKubeVolumeName is the emptyDir that holds the injected rc-kube.
+	rcKubeVolumeName = "rc-kube-bin"
+	// RCKubeInstallContainerName is the first init container of a Linux
+	// runtime Pod. It copies rc-kube and tini into RCKubeDirectory.
+	RCKubeInstallContainerName = "rc-kube-install"
+	// rcKubeImageExecutable is rc-kube in the rc-kube image. The image keeps
+	// tini in the same directory.
+	rcKubeImageExecutable = "/usr/local/bin/rc-kube"
+	rcKubeInstallCommand  = "install"
+	transcriptCommand     = "transcript"
 )
+
+// rcKubeInjection returns what a Linux Pod needs to run the rc-kube of the
+// controller instead of the one in its image: an init container that copies
+// rc-kube and tini from the rc-kube image, the emptyDir it copies them to,
+// and the read-only mount for the containers that run them.
+func rcKubeInjection(image string) (corev1.Container, corev1.Volume, corev1.VolumeMount, error) {
+	if image == "" {
+		return corev1.Container{}, corev1.Volume{}, corev1.VolumeMount{}, fmt.Errorf("linux runtime Pods require an rc-kube image")
+	}
+	install := corev1.Container{
+		Name:  RCKubeInstallContainerName,
+		Image: image,
+		Command: []string{
+			rcKubeImageExecutable,
+			rcKubeInstallCommand,
+			RCKubeDirectory,
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      rcKubeVolumeName,
+				MountPath: RCKubeDirectory,
+			},
+		},
+		SecurityContext: runtimepolicy.ContainerSecurityContext(corev1.Linux),
+	}
+	volume := corev1.Volume{
+		Name:         rcKubeVolumeName,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	}
+	mount := corev1.VolumeMount{
+		Name:      rcKubeVolumeName,
+		MountPath: RCKubeDirectory,
+		ReadOnly:  true,
+	}
+
+	return install, volume, mount, nil
+}
 
 // Initializer runs one lifecycle action before the runtime becomes ready.
 type Initializer struct {
@@ -61,6 +108,9 @@ type WorkspacePodIntent struct {
 	// a Linux runtime bind-mounts the LXCFS views over the matching /proc and
 	// /sys files. Empty adds nothing.
 	LXCFSDir string
+	// RCKubeImage provides the rc-kube and tini that a Linux runtime runs.
+	// It is required on Linux and not used on other operating systems.
+	RCKubeImage string
 }
 
 // LXCFSVolumePrefix starts the name of every LXCFS volume in a Workspace Pod.
@@ -135,6 +185,17 @@ func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, err
 	volumes = append(volumes, slices.Clone(intent.AdditionalVolumes)...)
 	volumes = append(volumes, lxcfsVolumeList...)
 	volumes = append(volumes, corev1.Volume{Name: runtimeVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+	var initContainers []corev1.Container
+	var rcKubeMounts []corev1.VolumeMount
+	if runtime.os == corev1.Linux {
+		install, volume, mount, err := rcKubeInjection(intent.RCKubeImage)
+		if err != nil {
+			return nil, err
+		}
+		initContainers = append(initContainers, install)
+		volumes = append(volumes, volume)
+		rcKubeMounts = append(rcKubeMounts, mount)
+	}
 	mounts := make([]corev1.VolumeMount, 0, len(intent.AdditionalMounts)+4)
 	mounts = append(mounts, corev1.VolumeMount{Name: homeVolumeName, MountPath: runtime.layout.home})
 	if intent.HotMountRoot != "" {
@@ -147,6 +208,7 @@ func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, err
 	mounts = append(mounts, slices.Clone(intent.AdditionalMounts)...)
 	mounts = append(mounts, lxcfsMounts...)
 	mounts = append(mounts, corev1.VolumeMount{Name: runtimeVolumeName, MountPath: runtime.layout.run})
+	mounts = append(mounts, rcKubeMounts...)
 
 	// A Linux runtime without a Service Account token hides the API server
 	// variables from every process that rc-kube starts. With a token, the
@@ -161,7 +223,6 @@ func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, err
 		return append(command, actionsArgument, encoded)
 	}
 
-	initContainers := make([]corev1.Container, 0, len(intent.Initializers))
 	for _, initializer := range intent.Initializers {
 		if initializer.Image == "" {
 			return nil, fmt.Errorf("workspace initializer %s has no runtime image", initializer.Name)
@@ -299,6 +360,8 @@ type EditorPodIntent struct {
 	Image           string
 	HomeClaim       string
 	ServiceAccount  string
+	// RCKubeImage has the same role as in WorkspacePodIntent.
+	RCKubeImage string
 }
 
 // EnvironmentEditorPod compiles a final editor Pod for the target OS.
@@ -327,7 +390,13 @@ func (runtime Runtime) EnvironmentEditorPod(intent EditorPodIntent) (*corev1.Pod
 		runAsRoot, runAsRootGroup := int64(0), int64(0)
 		runAsNonRoot, disallowPrivilegeEscalation, allowPrivilegeEscalation := false, false, true
 		container.SecurityContext = &corev1.SecurityContext{AllowPrivilegeEscalation: &allowPrivilegeEscalation}
-		initContainers = []corev1.Container{{
+		install, volume, mount, err := rcKubeInjection(intent.RCKubeImage)
+		if err != nil {
+			return nil, err
+		}
+		volumes = append(volumes, volume)
+		container.VolumeMounts = append(container.VolumeMounts, mount)
+		initContainers = []corev1.Container{install, {
 			Name: sudoersContainerName, Image: intent.Image, Command: []string{"/bin/sh", "-ec"},
 			Args: []string{fmt.Sprintf("chgrp 0 %[1]s && chmod 0755 %[1]s && printf '%%s\\n' %[2]q > %[3]s && chgrp 0 %[3]s && chmod 0440 %[3]s", sudoersMountPath, sudoersRule, sudoersFilePath)},
 			SecurityContext: &corev1.SecurityContext{
@@ -362,7 +431,7 @@ func (runtime Runtime) TranscriptReaderPod(intent TranscriptPodIntent) (*corev1.
 	automount := false
 	container := corev1.Container{
 		Name: "reader", Image: intent.Image,
-		Command:         []string{runtime.layout.executable, "transcript", intent.ProcessID},
+		Command:         []string{runtime.imageExecutable(), transcriptCommand, intent.ProcessID},
 		VolumeMounts:    []corev1.VolumeMount{{Name: homeVolumeName, MountPath: runtime.layout.home, ReadOnly: true}},
 		SecurityContext: runtimepolicy.ContainerSecurityContext(runtime.os),
 	}
@@ -371,6 +440,17 @@ func (runtime Runtime) TranscriptReaderPod(intent TranscriptPodIntent) (*corev1.
 		ObjectMeta: *intent.Metadata.DeepCopy(),
 		Spec:       runtime.podSpec("", &automount, corev1.RestartPolicyNever, nil, []corev1.Container{container}, volumes),
 	}, nil
+}
+
+// imageExecutable is the rc-kube of the Pod image. The transcript reader runs
+// it because rcctl, which creates the reader, does not know the rc-kube image
+// of the controller.
+func (runtime Runtime) imageExecutable() string {
+	if runtime.os == corev1.Linux {
+		return imageExecutable
+	}
+
+	return runtime.layout.executable
 }
 
 func (runtime Runtime) readinessProbe() *corev1.Probe {

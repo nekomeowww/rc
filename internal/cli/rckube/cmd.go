@@ -32,6 +32,7 @@ import (
 	"github.com/nekomeowww/rc/internal/lifecycle"
 	runtime "github.com/nekomeowww/rc/internal/rckube"
 	"github.com/nekomeowww/rc/internal/rcnative"
+	"github.com/nekomeowww/rc/internal/version"
 )
 
 // lifecycleCommandName is the subcommand that runs Workspace lifecycle actions.
@@ -43,11 +44,15 @@ func NewCommand() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "rc-kube",
 		Short:         "Supervise rc Workspace processes",
+		Version:       version.Version,
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		// Before any subcommand runs, so no process that serve or lifecycle
-		// starts inherits the removed variables.
+		// Before any subcommand runs, so every process that serve or lifecycle
+		// starts inherits this PATH and none inherits the removed variables.
 		PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
+			if err := addExecutableDirectoryToPath(); err != nil {
+				return err
+			}
 			if !hideKubernetesEnvironment {
 				return nil
 			}
@@ -56,7 +61,7 @@ func NewCommand() *cobra.Command {
 		},
 	}
 	root.PersistentFlags().BoolVar(&hideKubernetesEnvironment, processruntime.HideKubernetesEnvironmentFlag, false, "Remove the KUBERNETES_* variables from the environment of started processes")
-	root.AddCommand(newServeCommand(), newProcessCommand(), newLifecycleCommand(), newHealthCommand(), newTranscriptCommand(), newCopyFromCommand(), newCopyToCommand())
+	root.AddCommand(newServeCommand(), newProcessCommand(), newLifecycleCommand(), newHealthCommand(), newTranscriptCommand(), newCopyFromCommand(), newCopyToCommand(), newInstallCommand())
 
 	return root
 }
@@ -69,6 +74,22 @@ func copyPath(name string) string {
 	}
 
 	return filepath.Join(rcnative.Current().Workspace, name)
+}
+
+func newInstallCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "install DIRECTORY",
+		Short: "Copy this rc-kube and the tini next to it into DIRECTORY",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, arguments []string) error {
+			executable, err := os.Executable()
+			if err != nil {
+				return fmt.Errorf("resolve rc-kube executable: %w", err)
+			}
+
+			return runtime.Install(executable, arguments[0])
+		},
+	}
 }
 
 func newCopyFromCommand() *cobra.Command {

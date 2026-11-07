@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+# rc-kube serve runs this as PID 1 through RC_KUBE_INIT:
+#
+#   init RC-KUBE serve ARGUMENTS...
+#
+# RC-KUBE is the rc-kube that the controller injected. Record it, so that the
+# s6 rc-kube service runs it, and start the Wayland session with the same
+# argument file as the rc-kube wrapper on PATH.
+executable_file=/run/rc/rc-kube-serve.executable
+mkdir -p "$(dirname "${executable_file}")"
+printf '%s\n' "$1" > "${executable_file}"
+shift
+
+exec /usr/local/bin/rc-kube "$@"

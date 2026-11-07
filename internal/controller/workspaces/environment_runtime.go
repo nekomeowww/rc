@@ -47,7 +47,7 @@ func (r *WorkspaceExecReconciler) resolveEnvironmentProcessTarget(ctx context.Co
 		return nil, reasonTargetNotReady, "Target WorkspaceEnvironment current revision is not ready", nil
 	}
 
-	platform, platformErr := rcplatform.Resolve(rcplatform.Target{OS: environment.Spec.OS, Placement: rcplatform.Placement{
+	_, platformErr := rcplatform.Resolve(rcplatform.Target{OS: environment.Spec.OS, Placement: rcplatform.Placement{
 		NodeSelector: environment.Spec.NodeSelector, Tolerations: environment.Spec.Tolerations,
 	}})
 	if platformErr != nil {
@@ -90,9 +90,16 @@ func (r *WorkspaceExecReconciler) resolveEnvironmentProcessTarget(ctx context.Co
 	if err := (&WorkspaceReconciler{Client: r.Client}).ensureWorkspaceAccess(ctx, environment.Namespace); err != nil {
 		return nil, "", "", err
 	}
-	editor, reason, message, err := r.ensureEnvironmentEditor(ctx, environment, draft, platform)
+	editor, reason, message, err := r.ensureEnvironmentEditor(ctx, environment, draft)
 	if err != nil || reason != "" {
 		return nil, reason, message, err
+	}
+	// An editor Pod created before rc-kube was injected runs the rc-kube of
+	// its image, so the process target comes from the Pod itself.
+	platform, platformErr := rcplatform.FromPod(editor)
+	if platformErr != nil {
+		reason, message := runtimePlatformCondition(platformErr)
+		return nil, reason, message, nil
 	}
 
 	environmentVariables, err := r.resolveProcessOnlyEnvironment(ctx, process)
@@ -116,17 +123,13 @@ func (r *WorkspaceExecReconciler) resolveEnvironmentProcessTarget(ctx context.Co
 	}, "", "", nil
 }
 
-func (r *WorkspaceExecReconciler) ensureEnvironmentEditor(ctx context.Context, environment *workspacesv1alpha1.WorkspaceEnvironment, draft *corev1.PersistentVolumeClaim, platform rcplatform.Runtime) (*corev1.Pod, string, string, error) {
+func (r *WorkspaceExecReconciler) ensureEnvironmentEditor(ctx context.Context, environment *workspacesv1alpha1.WorkspaceEnvironment, draft *corev1.PersistentVolumeClaim) (*corev1.Pod, string, string, error) {
 	editorName := environment.Name + "-editor"
 	editor := new(corev1.Pod)
 	key := types.NamespacedName{Name: editorName, Namespace: environment.Namespace}
 	err := r.Get(ctx, key, editor)
 	if apierrors.IsNotFound(err) {
-		editor, err = platform.EnvironmentEditorPod(rcplatform.EditorPodIntent{
-			Metadata: metav1.ObjectMeta{Name: editorName, Namespace: environment.Namespace, Labels: map[string]string{environmentManagedByLabel: environment.Name}},
-			Image:    environment.Spec.Image, HomeClaim: draft.Name, ServiceAccount: defaultWorkspaceServiceAccount,
-			TranscriptScope: "environment/" + string(environment.UID) + "/" + draft.Name,
-		})
+		editor, err = environmentEditorPod(environment, draft.Name, rcKubeImageOrDefault(r.RCKubeImage))
 		if err != nil {
 			return nil, "", "", fmt.Errorf("build WorkspaceEnvironment editor Pod: %w", err)
 		}
@@ -155,7 +158,7 @@ func (r *WorkspaceExecReconciler) ensureEnvironmentEditor(ctx context.Context, e
 	return editor, "", "", nil
 }
 
-func environmentEditorPod(environment *workspacesv1alpha1.WorkspaceEnvironment, draftClaimName string) (*corev1.Pod, error) {
+func environmentEditorPod(environment *workspacesv1alpha1.WorkspaceEnvironment, draftClaimName, rcKubeImage string) (*corev1.Pod, error) {
 	platform, err := rcplatform.Resolve(rcplatform.Target{OS: environment.Spec.OS, Placement: rcplatform.Placement{
 		NodeSelector: environment.Spec.NodeSelector, Tolerations: environment.Spec.Tolerations,
 	}})
@@ -166,6 +169,7 @@ func environmentEditorPod(environment *workspacesv1alpha1.WorkspaceEnvironment, 
 		Metadata: metav1.ObjectMeta{Name: environment.Name + "-editor", Namespace: environment.Namespace, Labels: map[string]string{environmentManagedByLabel: environment.Name}},
 		Image:    environment.Spec.Image, HomeClaim: draftClaimName, ServiceAccount: defaultWorkspaceServiceAccount,
 		TranscriptScope: "environment/" + string(environment.UID) + "/" + draftClaimName,
+		RCKubeImage:     rcKubeImage,
 	})
 }
 

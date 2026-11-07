@@ -251,7 +251,7 @@ func KubectlApply(manifest string) error {
 // "make deploy" rewrites config/manager/kustomization.yaml in place, so this
 // sets the images on a temporary copy of config/ instead: the checkout is
 // never modified, even when suites run concurrently or are interrupted.
-func DeployManager(managerImage, runnerImage string) error {
+func DeployManager(managerImage, runnerImage, rcKubeImage string) error {
 	dir, err := GetProjectDir()
 	if err != nil {
 		return err
@@ -273,6 +273,7 @@ func DeployManager(managerImage, runnerImage string) error {
 	edit := exec.Command(kustomize, "edit", "set", "image",
 		"controller="+managerImage,
 		"runner="+runnerImage,
+		"rc-kube="+rcKubeImage,
 	)
 	edit.Dir = filepath.Join(config, "manager")
 	if output, err := edit.CombinedOutput(); err != nil {

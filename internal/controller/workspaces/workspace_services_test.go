@@ -173,7 +173,13 @@ func TestWorkspaceTopologyTracksServices(t *testing.T) {
 
 	workspace.Spec.Env = append(workspace.Spec.Env, corev1.EnvVar{Name: "EXTRA", Value: "1"})
 	services, environment, _, _ = compileWorkspaceServices(workspace)
-	withServices = &resolvedWorkspace{runtime: platform, image: testLinuxImage, services: services, serviceEnvironment: environment}
+	withServices = &resolvedWorkspace{
+		runtime:            platform,
+		image:              testLinuxImage,
+		services:           services,
+		serviceEnvironment: environment,
+		rcKubeImage:        testRCKubeImage,
+	}
 	second, err := workspaceTopologyHash(workspace, withServices)
 	require.NoError(t, err)
 	assert.NotEqual(t, first, second, "a service sees the Workspace env, so a change takes a new runtime")

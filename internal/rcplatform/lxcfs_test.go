@@ -18,6 +18,7 @@ func testLXCFSIntent() WorkspacePodIntent {
 		Image:        testWindowsImage,
 		HomeClaim:    testProcessName,
 		HomeHostPath: "/var/lib/rc/" + testProcessName,
+		RCKubeImage:  testRCKubeImage,
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 const (
 	testWindowsImage = "example/windows"
 	testProcessName  = "electron"
+	testRCKubeImage  = "example/rc-kube:1.2.3"
 )
 
 func TestResolveOwnsOSPlacement(t *testing.T) {
@@ -137,6 +138,7 @@ func TestWorkspacePodSetsPriorityClassOnlyWhenRequested(t *testing.T) {
 				Image:        testWindowsImage,
 				HomeClaim:    testProcessName,
 				HomeHostPath: "/var/lib/rc/" + testProcessName,
+				RCKubeImage:  testRCKubeImage,
 			}
 
 			pod, err := runtime.WorkspacePod(intent)
@@ -194,6 +196,7 @@ func TestWorkspacePodPassesServicesToSupervisor(t *testing.T) {
 				HomeClaim:          testProcessName,
 				Services:           services,
 				ServiceEnvironment: environment,
+				RCKubeImage:        testRCKubeImage,
 			})
 			require.NoError(t, err)
 			container := pod.Spec.Containers[0]
@@ -220,9 +223,10 @@ func TestEditorPodHasNoPriorityClass(t *testing.T) {
 	require.NoError(t, err)
 
 	pod, err := runtime.EnvironmentEditorPod(EditorPodIntent{
-		Metadata:  metav1.ObjectMeta{Name: testProcessName},
-		Image:     testWindowsImage,
-		HomeClaim: testProcessName,
+		Metadata:    metav1.ObjectMeta{Name: testProcessName},
+		Image:       testWindowsImage,
+		HomeClaim:   testProcessName,
+		RCKubeImage: testRCKubeImage,
 	})
 
 	require.NoError(t, err)
@@ -233,7 +237,12 @@ func TestWorkspacePodWithoutServicesIsUnchanged(t *testing.T) {
 	t.Parallel()
 	runtime, err := Resolve(Target{OS: corev1.Linux})
 	require.NoError(t, err)
-	pod, err := runtime.WorkspacePod(WorkspacePodIntent{Metadata: metav1.ObjectMeta{Name: testProcessName}, Image: testWindowsImage, HomeClaim: testProcessName})
+	pod, err := runtime.WorkspacePod(WorkspacePodIntent{
+		Metadata:    metav1.ObjectMeta{Name: testProcessName},
+		Image:       testWindowsImage,
+		HomeClaim:   testProcessName,
+		RCKubeImage: testRCKubeImage,
+	})
 	require.NoError(t, err)
 	container := pod.Spec.Containers[0]
 	assert.NotContains(t, container.Args, servicesArgument)

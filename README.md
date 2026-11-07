@@ -100,19 +100,48 @@ kubectl rollout status deployment/rc-controller-manager -n rc-system
 Each release publishes matching versions of these public images:
 
 - `ghcr.io/nekomeowww/rc/controller`
+- `ghcr.io/nekomeowww/rc/rc-kube`
 - `ghcr.io/nekomeowww/rc/runner`
 - `ghcr.io/nekomeowww/rc/runner-wayland`
 - `ghcr.io/nekomeowww/rc/runner-windows`
 
-The install manifest configures the controller and Linux runner. Select the
-experimental Windows runner explicitly on a Windows Workspace or through the
-manager's `--windows-runner-image` flag.
+The install manifest configures the controller, the rc-kube image, and the
+Linux runner. Select the experimental Windows runner explicitly on a Windows
+Workspace or through the manager's `--windows-runner-image` flag.
 
-When `rc-kube serve` starts as Linux PID 1, it starts itself under Tini. Tini
-reaps orphaned descendants while rc-kube keeps ownership of direct command
-exit statuses. The Linux runner includes `tini`; custom images that run
-`rc-kube serve` as PID 1 must provide it on `PATH`. Existing init systems and
-Windows/macOS runtimes do not use this wrapper.
+### Custom Linux images
+
+The controller adds `rc-kube` and `tini` of its own version to every Linux
+Workspace and WorkspaceEnvironment Pod. They come from the
+`ghcr.io/nekomeowww/rc/rc-kube` image, which the manager flag
+`--rc-kube-image` selects. The default is the image of the same release. If
+your cluster pulls through a mirror, mirror this image and set the flag. A
+first init container copies both files to `/opt/rc/bin`, and the runtime runs
+`/opt/rc/bin/rc-kube`. Thus a controller upgrade cannot break a Workspace that
+uses an older image.
+
+A custom Linux image therefore does not need `rc-kube` or `tini`. It needs:
+
+- the processes and tools that your Workspace runs, and a POSIX shell for
+  lifecycle scripts;
+- files that UID and GID 1000 can use, because the runtime runs as that
+  user; and
+- `rc-kube` on `PATH` only to read the logs of a suspended Workspace with
+  `rcctl`. The helper Pod for those logs uses the Workspace image.
+
+Processes that `rc-kube` starts find the injected `rc-kube` first on `PATH`.
+A process that replaces `PATH`, or a login shell that resets it, can call
+`/opt/rc/bin/rc-kube` directly.
+
+When `rc-kube serve` starts as Linux PID 1, it starts itself under the
+injected Tini. Tini reaps orphaned descendants while rc-kube keeps ownership of
+direct command exit statuses. An image with its own init system sets
+`RC_KUBE_INIT` to a program. `rc-kube serve` then runs
+`$RC_KUBE_INIT <rc-kube path> serve <arguments>` instead of Tini, as the
+`runner-wayland` image does. Windows and macOS images still provide their own
+`rc-kube`. See
+[ADR 0010](docs/adr/0010-inject-rc-kube-from-the-controller.md) for the upgrade
+behavior.
 
 Run `bash hack/test-runner-reaping.sh <runner-image>` to check orphan cleanup,
 command exit status, and supervisor shutdown in an isolated Docker container.
@@ -120,7 +149,7 @@ command exit status, and supervisor shutdown in an isolated Docker container.
 Releases also publish `openai-codex-cli` (Linux amd64/arm64) and
 `openai-codex-cli-windows` (Windows amd64) under the same GHCR namespace.
 These derived images use `rc-<rc-version>` and `<codex-version>-rc.<rc-version>`
-tags, plus `latest`; the four runtime images use `<rc-version>` tags.
+tags, plus `latest`; the other images use `<rc-version>` tags.
 For example, release `v0.12.1` with Codex `0.154.0` publishes
 `openai-codex-cli:rc-0.12.1` and `openai-codex-cli:0.154.0-rc.0.12.1`.
 Existing tags containing only the Codex version remain available but are no
@@ -128,7 +157,7 @@ longer updated by this workflow.
 
 Push a stable `vMAJOR.MINOR.PATCH` tag to start the complete release. GitHub
 Release assets are staged as a draft, and the release becomes public only after
-all six images and their attestations succeed. Linux Codex extends the exact
+all seven images and their attestations succeed. Linux Codex extends the exact
 runner version from that release. A failed release stays a draft; fix the
 failure and rerun the failed jobs before treating that version as complete.
 Image tags can become visible while the draft is building.
@@ -468,23 +497,26 @@ WorkspaceExec resources: recreating them requests a new command execution.
 To deploy images built from the checkout into the local Kind cluster, build and load both images with matching development tags:
 
 ```sh
-make docker-build IMG=rc-controller:dev
+make docker-build IMG=rc-controller:dev RC_KUBE_IMG=rc-kube:dev
 make docker-build-runner RUNNER_IMG=rc-runner:dev
-kind load docker-image rc-controller:dev rc-runner:dev --name rc-dev
-make deploy IMG=rc-controller:dev RUNNER_IMG=rc-runner:dev
+kind load docker-image rc-controller:dev rc-kube:dev rc-runner:dev --name rc-dev
+make deploy IMG=rc-controller:dev RC_KUBE_IMG=rc-kube:dev RUNNER_IMG=rc-runner:dev
 ```
+
+`make docker-build` builds the controller image and the rc-kube image that it
+injects. Deploy them together.
 
 To publish the images, replace the commented registry names with repositories that the target cluster can pull:
 
 ```sh
-# make docker-build docker-push IMG=REGISTRY/rc/controller:TAG
+# make docker-build docker-push IMG=REGISTRY/rc/controller:TAG RC_KUBE_IMG=REGISTRY/rc/rc-kube:TAG
 # make docker-build-runner docker-push-runner RUNNER_IMG=REGISTRY/rc/runner:TAG
 ```
 
 To generate one distributable manifest for the locally loaded images, run:
 
 ```sh
-make build-installer IMG=rc-controller:dev RUNNER_IMG=rc-runner:dev
+make build-installer IMG=rc-controller:dev RC_KUBE_IMG=rc-kube:dev RUNNER_IMG=rc-runner:dev
 kubectl apply -f dist/install.yaml
 ```
 

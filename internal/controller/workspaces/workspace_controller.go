@@ -50,6 +50,7 @@ import (
 	"github.com/nekomeowww/rc/internal/lifecycle"
 	"github.com/nekomeowww/rc/internal/rcplatform"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
+	"github.com/nekomeowww/rc/internal/version"
 	"github.com/nekomeowww/rc/internal/volumeclaim"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
 	"github.com/nekomeowww/rc/internal/worktreeownership"
@@ -113,6 +114,9 @@ type resolvedWorkspace struct {
 	// lxcfsDir is the controller LXCFS directory for a Linux runtime, and
 	// empty for other operating systems or when LXCFS is disabled.
 	lxcfsDir string
+	// rcKubeImage provides the rc-kube that a Linux runtime runs, and is
+	// empty for other operating systems.
+	rcKubeImage string
 	// storageReady is published as StorageReady once home storage has been
 	// evaluated in this pass; nil leaves the previous condition unchanged.
 	storageReady *metav1.Condition
@@ -163,6 +167,9 @@ type WorkspaceReconciler struct {
 	// Linux runtime Pods bind-mount the LXCFS /proc and /sys views. Empty
 	// disables LXCFS.
 	LXCFSDir string
+	// RCKubeImage provides the rc-kube and tini that Linux runtime Pods run.
+	// Empty selects the official image of the controller version.
+	RCKubeImage string
 
 	// admissionRetries backs off creates the API server rejected; see
 	// admission_rejection.go. The zero value is ready to use.
@@ -781,6 +788,7 @@ func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspac
 	}
 	if platform.OS() == corev1.Linux {
 		resolved.lxcfsDir = r.LXCFSDir
+		resolved.rcKubeImage = rcKubeImageOrDefault(r.RCKubeImage)
 	}
 
 	return resolved, "", "", nil
@@ -1104,7 +1112,8 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 		Initializers: initializers, BeforeStop: resolved.beforeStop,
 		PriorityClassName: workspace.Spec.PriorityClassName,
 		Services:          resolved.services, ServiceEnvironment: resolved.serviceEnvironment,
-		LXCFSDir: resolved.lxcfsDir,
+		LXCFSDir:    resolved.lxcfsDir,
+		RCKubeImage: resolved.rcKubeImage,
 	})
 	if err != nil {
 		return nil, err
@@ -1155,6 +1164,11 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 		// LXCFSDir is omitted when empty, so a controller without LXCFS keeps
 		// the hash of existing runtime Pods and does not replace them.
 		LXCFSDir string `json:",omitempty"`
+		// RCKube is where a Linux runtime runs rc-kube from. It is not the
+		// rc-kube image: a controller upgrade does not replace running Pods.
+		// Adding the field replaced each idle Linux runtime once, so Pods
+		// that run the rc-kube of their image move to the injected one.
+		RCKube string `json:",omitempty"`
 	}{
 		RuntimePolicy: workspaceRuntimePolicyVersion, OS: resolved.runtime.OS(),
 		Image: resolved.image, Mounts: mounts, ConfigMapRefs: workspace.Spec.ConfigMapRefs,
@@ -1166,6 +1180,9 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 		PriorityClassName: workspace.Spec.PriorityClassName,
 		Services:          resolved.services, ServiceEnvironment: resolved.serviceEnvironment,
 		LXCFSDir: resolved.lxcfsDir,
+	}
+	if resolved.runtime.OS() == corev1.Linux {
+		topology.RCKube = rcplatform.RCKubeDirectory
 	}
 	data, err := json.Marshal(topology)
 	if err != nil {
@@ -1477,4 +1494,14 @@ func (r *WorkspaceReconciler) workspacesForWorktree(ctx context.Context, object 
 	}
 
 	return requests
+}
+
+// rcKubeImageOrDefault returns the configured rc-kube image, or the official
+// image of the controller version when none is configured.
+func rcKubeImageOrDefault(image string) string {
+	if image != "" {
+		return image
+	}
+
+	return version.DefaultRCKubeImage()
 }

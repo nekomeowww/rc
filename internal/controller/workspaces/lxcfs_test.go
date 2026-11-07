@@ -88,9 +88,9 @@ func TestLXCFSDirTopologyHash(t *testing.T) {
 
 	baseHash, err := workspaceTopologyHash(workspace, resolved)
 	require.NoError(t, err)
-	// The same hash as before LXCFS support existed. An empty directory must
-	// not replace existing runtime Pods.
-	assert.Equal(t, "965105d34b7fc53be3e718b27fe1284cdbc1097ae9a87b9d8edca936d5241004", baseHash)
+	// An empty directory keeps the hash of a runtime without LXCFS, so it
+	// does not replace existing runtime Pods.
+	assert.Equal(t, testLinuxTopologyHash, baseHash)
 
 	resolved.lxcfsDir = testLXCFSDir
 	lxcfsHash, err := workspaceTopologyHash(workspace, resolved)

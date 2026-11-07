@@ -11,6 +11,9 @@ images:
 - name: runner
   newName: ghcr.io/nekomeowww/rc/runner
   newTag: dev-20260824-submodules
+- name: rc-kube
+  newName: ghcr.io/nekomeowww/rc/rc-kube
+  newTag: latest
 
 configurations:
 - kustomizeconfig.yaml

@@ -38,6 +38,10 @@ var (
 	// test/e2e/Dockerfile.runner. Its tag is not "latest", so Kind uses the
 	// loaded image instead of pulling.
 	runnerImage = "example.com/rc-runner:v0.0.1"
+	// rcKubeImage is the rc-kube image that the manager injects into the
+	// runtime Pods. The runner image has no rc-kube or tini, so every runtime
+	// spec also checks the injection.
+	rcKubeImage = "example.com/rc-kube:v0.0.1"
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
 )
@@ -55,16 +59,18 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
-	By("building the manager image")
-	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
+	By("building the manager and rc-kube images")
+	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage), fmt.Sprintf("RC_KUBE_IMG=%s", rcKubeImage))
 	_, err := utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager image")
 
 	// TODO(user): If you want to change the e2e test vendor from Kind,
 	// ensure the image is built and available, then remove the following block.
-	By("loading the manager image on Kind")
+	By("loading the manager and rc-kube images on Kind")
 	err = utils.LoadImageToKindClusterWithName(managerImage)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
+	err = utils.LoadImageToKindClusterWithName(rcKubeImage)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the rc-kube image into Kind")
 
 	By("building the e2e runner image")
 	cmd = exec.Command("make", "docker-build-e2e-runner", fmt.Sprintf("E2E_RUNNER_IMG=%s", runnerImage))
@@ -104,7 +110,7 @@ func deployManager() {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to install CRDs")
 
 	By("deploying the controller-manager")
-	err = utils.DeployManager(managerImage, runnerImage)
+	err = utils.DeployManager(managerImage, runnerImage, rcKubeImage)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
 
 	By("waiting for the controller-manager rollout")

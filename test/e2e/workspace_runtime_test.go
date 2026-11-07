@@ -109,6 +109,8 @@ var _ = Describe("Workspace runtime", Ordered, func() {
 				workspaceStorageClass, fmt.Sprintf(`  idleTimeout: %s
   services:
     - name: agent
+      # rc-kube is not in the image. The injected rc-kube puts itself on
+      # PATH for the processes it starts.
       command: ["sh", "-c", "while true; do rc-kube process touch; sleep 10; done"]
 `, activeIdleTimeout)))).To(Succeed())
 		})
@@ -446,10 +448,11 @@ func podMap(g Gomega, ns, name, jsonPath string) map[string]string {
 }
 
 // runtimeProcesses lists the supervisor's process records through Pod exec,
-// the same bridge the controller uses.
+// the same bridge the controller uses. The runner image has no rc-kube, so
+// this also checks that the controller injected one.
 func runtimeProcesses(g Gomega, ns, name string) []processEntry {
 	pod := workspaceField(g, ns, name, "{.status.runtimePodName}")
-	output, err := utils.Kubectl("exec", pod, "-n", ns, "-c", "rc-kube", "--", "rc-kube", "process", "list")
+	output, err := utils.Kubectl("exec", pod, "-n", ns, "-c", "rc-kube", "--", "/opt/rc/bin/rc-kube", "process", "list")
 	g.Expect(err).NotTo(HaveOccurred())
 	entries := []processEntry{}
 	g.Expect(json.Unmarshal([]byte(output), &entries)).To(Succeed(), "unexpected process list %q", output)

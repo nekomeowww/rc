@@ -15,8 +15,19 @@ import (
 	processruntime "github.com/nekomeowww/rc/internal/execution"
 )
 
+// RCKubeDirectory is where a Linux runtime Pod holds the rc-kube and tini that
+// the controller injects. The directory is an emptyDir volume, mounted read-only
+// into every container that runs rc-kube.
+const RCKubeDirectory = "/opt/rc/bin"
+
+// RCKubeExecutable is the injected rc-kube in a Linux runtime Pod.
+const RCKubeExecutable = RCKubeDirectory + "/" + runtimeContainerName
+
 const (
-	runtimeContainerName   = "rc-kube"
+	runtimeContainerName = "rc-kube"
+	// imageExecutable is the rc-kube that an image provides on PATH. Linux
+	// runtime Pods created before the controller injected rc-kube use it.
+	imageExecutable        = runtimeContainerName
 	windowsExecutable      = "rc-kube.exe"
 	darwinExecutable       = "/usr/local/bin/rc-kube"
 	darwinHome             = "/Volumes/My Shared Files/home"
@@ -72,7 +83,7 @@ func Resolve(target Target) (Runtime, error) {
 	var targetLayout layout
 	switch osName {
 	case corev1.Linux:
-		targetLayout = layout{home: "/home/agent", run: "/run/rc", executable: runtimeContainerName, endpoint: "/run/rc/rc-kube.sock"}
+		targetLayout = layout{home: "/home/agent", run: "/run/rc", executable: RCKubeExecutable, endpoint: "/run/rc/rc-kube.sock"}
 	case corev1.Windows:
 		targetLayout = layout{home: `C:\home\agent`, run: `C:\run\rc`, executable: windowsExecutable, endpoint: `\\.\pipe\rc-kube`}
 	case Darwin:
@@ -103,7 +114,9 @@ func Resolve(target Target) (Runtime, error) {
 	return Runtime{os: osName, layout: targetLayout, placement: placement}, nil
 }
 
-// FromPod restores the target runtime recorded on an existing Pod.
+// FromPod restores the target runtime recorded on an existing Pod. A Linux
+// Pod created before the controller injected rc-kube keeps using the rc-kube
+// of its image.
 func FromPod(pod *corev1.Pod) (Runtime, error) {
 	osName := corev1.OSName("")
 	if pod.Spec.OS != nil {
@@ -111,10 +124,30 @@ func FromPod(pod *corev1.Pod) (Runtime, error) {
 	} else {
 		osName = corev1.OSName(pod.Spec.NodeSelector[corev1.LabelOSStable])
 	}
-	return Resolve(Target{OS: osName, Placement: Placement{
+	runtime, err := Resolve(Target{OS: osName, Placement: Placement{
 		NodeSelector: pod.Spec.NodeSelector, Tolerations: pod.Spec.Tolerations,
 		Affinity: pod.Spec.Affinity, RuntimeClassName: pod.Spec.RuntimeClassName,
 	}})
+	if err != nil {
+		return Runtime{}, err
+	}
+	if runtime.os == corev1.Linux && !injectsRCKube(pod) {
+		runtime.layout.executable = imageExecutable
+	}
+
+	return runtime, nil
+}
+
+// injectsRCKube reports whether the runtime container of a Pod starts the
+// injected rc-kube.
+func injectsRCKube(pod *corev1.Pod) bool {
+	for _, container := range pod.Spec.Containers {
+		if container.Name == runtimeContainerName {
+			return len(container.Command) > 0 && container.Command[0] == RCKubeExecutable
+		}
+	}
+
+	return false
 }
 
 // OS returns the validated Kubernetes Pod OS.

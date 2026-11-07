@@ -179,7 +179,7 @@ func TestDarwinRuntimeUsesConfiguredHostStorage(t *testing.T) {
 func TestWindowsEnvironmentEditor(t *testing.T) {
 	t.Parallel()
 	environment := &workspacesv1alpha1.WorkspaceEnvironment{Spec: workspacesv1alpha1.WorkspaceEnvironmentSpec{OS: corev1.Windows, Image: "example/windows"}}
-	pod, err := environmentEditorPod(environment, "draft")
+	pod, err := environmentEditorPod(environment, "draft", testRCKubeImage)
 	require.NoError(t, err)
 	assert.Equal(t, corev1.Windows, pod.Spec.OS.Name)
 	assert.Empty(t, pod.Spec.InitContainers, "Windows has no sudoers initialization")

@@ -148,6 +148,9 @@ RUN apt-get update \
     && git config --system --add safe.directory '*'
 
 COPY --from=builder /out/rcctl /usr/local/bin/rcctl
+# Linux runtime Pods run the rc-kube and tini that the controller injects from
+# the rc-kube image. This copy serves tools that use the image directly, such as
+# the rcctl reader for the logs of a suspended Workspace.
 COPY --from=builder /out/rc-kube /usr/local/bin/rc-kube
 COPY --from=tool-downloader /out/mise /usr/local/bin/mise
 COPY --from=tool-downloader /out/proto /usr/local/bin/proto

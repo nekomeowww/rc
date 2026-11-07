@@ -68,9 +68,14 @@ spec:
           - --darwin-runner-image=$(RC_DARWIN_RUNNER_IMAGE)
           - --darwin-workspace-root=$(RC_DARWIN_WORKSPACE_ROOT)
           - --lxcfs-dir=$(RC_LXCFS_DIR)
+          - --rc-kube-image=$(RC_KUBE_IMAGE)
         env:
           - name: RC_RUNNER_IMAGE
             value: runner:latest
+          # The image that provides rc-kube and tini to Linux runtime Pods.
+          # Use the release of the controller, or a mirror of it.
+          - name: RC_KUBE_IMAGE
+            value: rc-kube:latest
           - name: RC_WINDOWS_RUNNER_IMAGE
             value: ""
           - name: RC_DARWIN_RUNNER_IMAGE

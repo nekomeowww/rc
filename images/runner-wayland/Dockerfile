@@ -247,6 +247,7 @@ RUN chmod 0755 \
 ENV DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/1000/bus" \
     HOME="/home/agent" \
     PATH="/opt/auv:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    RC_KUBE_INIT="/usr/local/libexec/rc-wayland/init" \
     RC_WAYLAND_DISPLAY="rc-wayland" \
     S6_CMD_WAIT_FOR_SERVICES="1" \
     S6_KEEP_ENV="1" \

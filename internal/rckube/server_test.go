@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -273,6 +274,45 @@ func TestLosslessAttachDeliversEveryByteToASlowReader(t *testing.T) {
 	reader := &slowWriter{}
 	require.NoError(t, client.Attach(ctx, request.ID, "bulk", nil, reader, processruntime.AttachOptions{Lossless: true}))
 	require.Equal(t, size, reader.written, "a slow lossless client receives every byte")
+}
+
+// stallAfterExitWriter reads slowly, so the process waits on it, and stalls
+// once the process has written its last byte, as a busy reader can.
+type stallAfterExitWriter struct {
+	slowWriter
+	marker  string
+	stall   time.Duration
+	stalled bool
+}
+
+func (writer *stallAfterExitWriter) Write(data []byte) (int, error) {
+	if !writer.stalled {
+		if _, err := os.Stat(writer.marker); err == nil {
+			writer.stalled = true
+			time.Sleep(writer.stall)
+		}
+	}
+	return writer.slowWriter.Write(data)
+}
+
+func TestLosslessAttachKeepsOutputWhenTheReaderStallsAfterExit(t *testing.T) {
+	t.Parallel()
+	const stopGrace = 100 * time.Millisecond
+	_, client := startTestServer(t)
+	const size = 8 << 20
+	marker := filepath.Join(t.TempDir(), "written")
+	// The marker appears after head has written its last byte into the pipe.
+	// The reader is the bottleneck, so output is still waiting in the pipe.
+	script := fmt.Sprintf("head -c %d /dev/zero && : > %s", size, marker)
+	request := processruntime.StartRequest{ID: "stall", UID: testProcessUID, Command: []string{"sh", "-c", script}}
+	_, err := client.Start(t.Context(), request)
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	reader := &stallAfterExitWriter{marker: marker, stall: 10 * stopGrace}
+	require.NoError(t, client.Attach(ctx, request.ID, "stall", nil, reader, processruntime.AttachOptions{Lossless: true}))
+	require.True(t, reader.stalled, "the reader stalled after the process wrote its output")
+	require.Equal(t, size, reader.written, "a lossless client that stalls longer than the stop grace still receives every byte")
 }
 
 func TestTruncatedReplayIsReportedNotSilent(t *testing.T) {

@@ -39,6 +39,8 @@ const (
 	managerNamespace = "rc-system"
 	// fakeImage is never pulled: no container runs on a kwok Node.
 	fakeImage = "registry.invalid/rc/fake-runtime:v1"
+	// rcKubeImage is built with the manager but never pulled either.
+	rcKubeImage = "example.com/rc-kube:v0.0.1"
 
 	fakeNodeName  = "kwok-node-0"
 	fakeNodeLabel = "type"
@@ -62,7 +64,7 @@ func TestKwok(t *testing.T) {
 
 var _ = BeforeSuite(func() {
 	By("building the manager image")
-	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
+	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage), fmt.Sprintf("RC_KUBE_IMG=%s", rcKubeImage))
 	_, err := utils.Run(cmd)
 	Expect(err).NotTo(HaveOccurred(), "Failed to build the manager image")
 
@@ -88,7 +90,7 @@ var _ = BeforeSuite(func() {
 	_, err = utils.Run(exec.Command("make", "install"))
 	Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
 	// The runner image is never pulled on kwok Nodes; every Workspace sets image.
-	Expect(utils.DeployManager(managerImage, fakeImage)).To(Succeed())
+	Expect(utils.DeployManager(managerImage, fakeImage, rcKubeImage)).To(Succeed())
 	_, err = utils.Kubectl("rollout", "status", "deployment/rc-controller-manager", "-n", managerNamespace,
 		"--timeout=3m")
 	Expect(err).NotTo(HaveOccurred(), "Controller-manager did not become available")

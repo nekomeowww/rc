@@ -2,6 +2,12 @@
 IMG ?= ghcr.io/nekomeowww/rc/controller:latest
 # Shared image used by Repository and Worktree Jobs and Workspace runtimes.
 RUNNER_IMG ?= ghcr.io/nekomeowww/rc/runner:latest
+# rc-kube image that the controller injects into Linux runtime Pods. Build it
+# together with the controller: the controller runs this rc-kube.
+RC_KUBE_IMG ?= ghcr.io/nekomeowww/rc/rc-kube:latest
+# VERSION is the release version stamped into the manager and rc-kube, without
+# the "v" prefix. Empty builds a development version.
+VERSION ?=
 # Minimal Workspace runtime image built from this checkout for the e2e suite.
 E2E_RUNNER_IMG ?= example.com/rc-runner:v0.0.1
 # INSTALLER_OUTPUT defines where build-installer writes the consolidated manifest.
@@ -231,12 +237,20 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
-docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build -t ${IMG} .
+docker-build: docker-build-rc-kube ## Build docker images with the manager and the rc-kube it injects.
+	$(CONTAINER_TOOL) build --build-arg VERSION="$(VERSION)" -t ${IMG} .
 
 .PHONY: docker-push
-docker-push: ## Push docker image with the manager.
+docker-push: docker-push-rc-kube ## Push docker images with the manager and the rc-kube it injects.
 	$(CONTAINER_TOOL) push ${IMG}
+
+.PHONY: docker-build-rc-kube
+docker-build-rc-kube: ## Build the rc-kube image that the manager injects into Linux runtime Pods.
+	$(CONTAINER_TOOL) build --build-arg VERSION="$(VERSION)" -f Dockerfile.rc-kube -t ${RC_KUBE_IMG} .
+
+.PHONY: docker-push-rc-kube
+docker-push-rc-kube: ## Push the rc-kube image.
+	$(CONTAINER_TOOL) push ${RC_KUBE_IMG}
 
 .PHONY: docker-build-runner
 docker-build-runner: ## Build the shared Repository, Worktree, and Workspace runner image.
@@ -266,6 +280,13 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile .
 	- $(CONTAINER_TOOL) buildx rm rc-builder
 
+.PHONY: docker-buildx-rc-kube
+docker-buildx-rc-kube: ## Build and push the rc-kube image for cross-platform support
+	- $(CONTAINER_TOOL) buildx create --name rc-builder
+	$(CONTAINER_TOOL) buildx use rc-builder
+	$(CONTAINER_TOOL) buildx build --push --platform=$(RUNNER_PLATFORMS) --build-arg VERSION="$(VERSION)" --tag ${RC_KUBE_IMG} -f Dockerfile.rc-kube .
+	- $(CONTAINER_TOOL) buildx rm rc-builder
+
 .PHONY: docker-buildx-runner
 docker-buildx-runner: ## Build and push the shared runner image for cross-platform support
 	- $(CONTAINER_TOOL) buildx create --name rc-builder
@@ -276,7 +297,7 @@ docker-buildx-runner: ## Build and push the shared runner image for cross-platfo
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
 	mkdir -p "$(dir $(INSTALLER_OUTPUT))"
-	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG} runner=${RUNNER_IMG}
+	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG} runner=${RUNNER_IMG} rc-kube=${RC_KUBE_IMG}
 	"$(KUSTOMIZE)" build config/default > "$(INSTALLER_OUTPUT)"
 
 ##@ Deployment
@@ -297,7 +318,7 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 
 .PHONY: deploy
 deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
-	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG} runner=${RUNNER_IMG}
+	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG} runner=${RUNNER_IMG} rc-kube=${RC_KUBE_IMG}
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" apply -f -
 
 .PHONY: undeploy

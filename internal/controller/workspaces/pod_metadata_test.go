@@ -172,9 +172,9 @@ func TestPriorityClassSupportKeepsExistingTopologyHash(t *testing.T) {
 
 	baseHash, err := workspaceTopologyHash(workspace, resolved)
 	require.NoError(t, err)
-	// The hash a runtime Pod received before priorityClassName existed. An
-	// unchanged hash means the upgrade does not replace existing Pods.
-	assert.Equal(t, "965105d34b7fc53be3e718b27fe1284cdbc1097ae9a87b9d8edca936d5241004", baseHash)
+	// Adding priorityClassName kept the hash of existing Pods, so that
+	// upgrade did not replace them. Injecting rc-kube changed it once.
+	assert.Equal(t, testLinuxTopologyHash, baseHash)
 
 	workspace.Spec.PodMetadata = &workspacesv1alpha1.WorkspacePodMetadata{Labels: map[string]string{testTenantLabel: testTenantA}}
 	metadataHash, err := workspaceTopologyHash(workspace, resolved)

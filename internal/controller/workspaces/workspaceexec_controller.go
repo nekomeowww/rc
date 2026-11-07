@@ -81,6 +81,10 @@ type WorkspaceExecReconciler struct {
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
 	Runtime   processruntime.Runtime
+	// RCKubeImage provides the rc-kube and tini that Linux WorkspaceEnvironment
+	// editor Pods run. Empty selects the official image of the controller
+	// version.
+	RCKubeImage string
 	// Now allows deterministic result-window tests; defaults to time.Now.
 	Now func() time.Time
 }

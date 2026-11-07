@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	"github.com/nekomeowww/rc/internal/rcplatform"
 )
 
 func TestWorkspaceEnvironmentReconcileCreatesCurrentVolume(t *testing.T) {
@@ -94,13 +95,14 @@ func TestEnvironmentEditorPodSupportsPasswordlessSudo(t *testing.T) {
 		},
 	}
 
-	pod, err := environmentEditorPod(environment, "sudo-draft-1")
+	pod, err := environmentEditorPod(environment, "sudo-draft-1", testRCKubeImage)
 	requirements.NoError(err)
 	requirements.NotNil(pod.Spec.SecurityContext, "editor Pod has a security context")
 	requirements.NotNil(pod.Spec.SecurityContext.FSGroupChangePolicy, "editor skips recursive ownership changes when the volume root already matches")
 	assertions.Equal(corev1.FSGroupChangeOnRootMismatch, *pod.Spec.SecurityContext.FSGroupChangePolicy)
-	requirements.Len(pod.Spec.InitContainers, 1, "editor Pod has one sudoers setup container")
-	setup := pod.Spec.InitContainers[0]
+	requirements.Len(pod.Spec.InitContainers, 2, "editor Pod installs rc-kube and has one sudoers setup container")
+	assertions.Equal(rcplatform.RCKubeInstallContainerName, pod.Spec.InitContainers[0].Name)
+	setup := pod.Spec.InitContainers[1]
 	assertions.Equal("configure-sudo", setup.Name, "use a dedicated sudoers setup container")
 	assertions.Equal(environment.Spec.Image, setup.Image, "configure sudoers with the Environment image")
 	assertions.Equal([]string{"/bin/sh", "-ec"}, setup.Command, "run the fixed sudoers setup script")
@@ -123,12 +125,14 @@ func TestEnvironmentEditorPodSupportsPasswordlessSudo(t *testing.T) {
 	requirements.NotNil(pod.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation, "editor container declares privilege escalation policy")
 	assertions.True(*pod.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation, "allow passwordless sudo to execute its setuid helper")
 	assertions.Nil(pod.Spec.Containers[0].SecurityContext.Capabilities, "retain the runtime default capability set for useful container root")
-	requirements.Len(pod.Spec.Containers[0].VolumeMounts, 3, "editor mounts home, runtime state, and sudoers")
-	assertions.Equal("sudoers", pod.Spec.Containers[0].VolumeMounts[2].Name, "inject sudoers only into the editor")
-	assertions.True(pod.Spec.Containers[0].VolumeMounts[2].ReadOnly, "keep injected sudoers immutable in the editor")
-	requirements.Len(pod.Spec.Volumes, 3, "editor Pod has an isolated sudoers volume")
-	assertions.Equal("sudoers", pod.Spec.Volumes[2].Name, "name the editor-only sudoers volume")
-	requirements.NotNil(pod.Spec.Volumes[2].EmptyDir, "discard injected sudoers with the editor Pod")
+	requirements.Len(pod.Spec.Containers[0].VolumeMounts, 4, "editor mounts home, runtime state, rc-kube, and sudoers")
+	assertions.Equal(rcplatform.RCKubeDirectory, pod.Spec.Containers[0].VolumeMounts[2].MountPath, "mount the injected rc-kube")
+	assertions.True(pod.Spec.Containers[0].VolumeMounts[2].ReadOnly, "keep the injected rc-kube immutable in the editor")
+	assertions.Equal("sudoers", pod.Spec.Containers[0].VolumeMounts[3].Name, "inject sudoers only into the editor")
+	assertions.True(pod.Spec.Containers[0].VolumeMounts[3].ReadOnly, "keep injected sudoers immutable in the editor")
+	requirements.Len(pod.Spec.Volumes, 4, "editor Pod has an isolated sudoers volume")
+	assertions.Equal("sudoers", pod.Spec.Volumes[3].Name, "name the editor-only sudoers volume")
+	requirements.NotNil(pod.Spec.Volumes[3].EmptyDir, "discard injected sudoers with the editor Pod")
 }
 
 func TestWorkspaceEnvironmentReplacesEditorAfterSpecChange(t *testing.T) {
@@ -144,7 +148,7 @@ func TestWorkspaceEnvironmentReplacesEditorAfterSpecChange(t *testing.T) {
 			ObservedGeneration: 1, EditorPodName: "editor-update-editor",
 		},
 	}
-	editor, err := environmentEditorPod(environment, "editor-update-draft-1")
+	editor, err := environmentEditorPod(environment, "editor-update-draft-1", testRCKubeImage)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(environment, editor, scheme))
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&workspacesv1alpha1.WorkspaceExec{}, executionTargetIndex, executionTargetNames).
@@ -188,7 +192,7 @@ func TestWorkspaceEnvironmentReconcileCommitsIdleDraft(t *testing.T) {
 	}
 	current := environmentVolumeClaim(environment, "python-current-1", "")
 	draft := environmentVolumeClaim(environment, "python-draft-2", current.Name)
-	editor, err := environmentEditorPod(environment, draft.Name)
+	editor, err := environmentEditorPod(environment, draft.Name, testRCKubeImage)
 	requirements.NoError(err)
 	requirements.NoError(controllerutil.SetControllerReference(environment, current, scheme), "own current PVC")
 	requirements.NoError(controllerutil.SetControllerReference(environment, draft, scheme), "own draft PVC")

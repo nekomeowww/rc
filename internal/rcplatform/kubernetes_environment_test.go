@@ -29,7 +29,8 @@ func testKubernetesEnvironmentIntent(automountToken bool) WorkspacePodIntent {
 				Action: action,
 			},
 		},
-		BeforeStop: []lifecycle.Action{action},
+		BeforeStop:  []lifecycle.Action{action},
+		RCKubeImage: testRCKubeImage,
 	}
 }
 
@@ -37,14 +38,20 @@ func testKubernetesEnvironmentIntent(automountToken bool) WorkspacePodIntent {
 // initializers, serve, and the beforeStop hook.
 func rcKubeCommandLines(t *testing.T, pod *corev1.Pod) map[string][]string {
 	t.Helper()
-	require.Len(t, pod.Spec.InitContainers, 1)
+	initializers := make([]corev1.Container, 0, 1)
+	for _, initContainer := range pod.Spec.InitContainers {
+		if initContainer.Name != RCKubeInstallContainerName {
+			initializers = append(initializers, initContainer)
+		}
+	}
+	require.Len(t, initializers, 1)
 	require.Len(t, pod.Spec.Containers, 1)
 	container := pod.Spec.Containers[0]
 	require.NotNil(t, container.Lifecycle)
 	require.NotNil(t, container.Lifecycle.PreStop)
 
 	return map[string][]string{
-		"initializer": pod.Spec.InitContainers[0].Command,
+		"initializer": initializers[0].Command,
 		"serve":       append(slices.Clone(container.Command), container.Args...),
 		"beforeStop":  container.Lifecycle.PreStop.Exec.Command,
 	}

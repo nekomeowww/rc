@@ -89,9 +89,11 @@ disconnected bridge does not own or stop the supervised process.
 
 ## Runtime images
 
-rc publishes two core images under one product path:
+rc publishes three core images under one product path:
 
-- `ghcr.io/nekomeowww/rc/controller` contains the distroless manager; and
+- `ghcr.io/nekomeowww/rc/controller` contains the distroless manager;
+- `ghcr.io/nekomeowww/rc/rc-kube` contains only a static `rc-kube` and a static
+  `tini`. The controller injects them into Linux runtime Pods; and
 - `ghcr.io/nekomeowww/rc/runner` contains `rc-kube`, `rcctl`, the shell, Git,
   certificates, SSH, the LobeHub CLI (`lh`, `lobe`, and `lobehub`), and the
   system tools required by runtime processes.
@@ -102,12 +104,52 @@ reuses its cloned Repository root is initialized in the consuming Workspace Pod
 with the controller's runner image, avoiding a second Pod and iSCSI attach cycle
 for a one-second checkout. User-configured Workspace lifecycle actions still run
 in the Workspace runtime image so they see the same toolchain. Workspace
-Environment images may extend or replace the runner image, provided they retain
-the matching `rc-kube` runtime contract.
+Environment images may extend or replace the runner image. A Linux image does
+not need `rc-kube` or `tini`; see [Injected rc-kube](#injected-rc-kube).
 
-Controller and runner images from one release use the same version tag. Release
-manifests pass the corresponding runner image to the controller explicitly;
-runtime Pods do not follow an unrelated `latest` tag.
+Controller, rc-kube, and runner images from one release use the same version
+tag. Release manifests pass the corresponding runner and rc-kube images to the
+controller explicitly; runtime Pods do not follow an unrelated `latest` tag.
+
+### Injected rc-kube
+
+The controller writes the `rc-kube` command lines of a runtime Pod for its own
+version. On Linux it therefore also supplies the binary, as
+[ADR 0010](../adr/0010-inject-rc-kube-from-the-controller.md) records. The
+manager flag `--rc-kube-image` selects the rc-kube image. Its default is the
+image of the controller release; a development build uses `latest`.
+
+Every Linux Workspace runtime Pod and WorkspaceEnvironment editor Pod starts
+with the init container `rc-kube-install`. It runs
+`rc-kube install /opt/rc/bin`, which copies `rc-kube` and `tini` into an
+emptyDir. The runtime container and every Workspace initializer container
+mount that emptyDir read-only at `/opt/rc/bin`. `serve`, lifecycle
+initializers, the `beforeStop` hook, the readiness probe, and Pod exec run
+`/opt/rc/bin/rc-kube`. The socket, the state directory, and the home layout do
+not change.
+
+As PID 1, `rc-kube serve` starts itself under the `tini` next to it. An image
+with its own init system sets `RC_KUBE_INIT`; `rc-kube serve` then runs
+`$RC_KUBE_INIT <rc-kube path> serve <arguments>` instead. An image built
+before injection that put an `rc-kube` script on `PATH` keeps that start
+sequence. On Linux, `rc-kube` also puts its own directory first on `PATH` for
+the processes that it starts, so `rc-kube process touch` works in an image
+without `rc-kube`. A process that replaces `PATH` can call
+`/opt/rc/bin/rc-kube` directly.
+
+The Linux topology hash records `/opt/rc/bin` as the source of `rc-kube`, not
+the rc-kube image. The upgrade that adds injection replaces each Linux runtime
+Pod once, under the normal topology rules. A later controller upgrade does not
+replace a running Pod; the next runtime Pod gets the new `rc-kube`. The
+controller reads the executable of an existing Pod from the Pod, so a Pod from
+an older controller keeps using the `rc-kube` of its image until it is
+replaced. Editor Pods have no topology hash and get injection when they are
+next created. Windows and Darwin runtimes still use the `rc-kube` of their
+image or VM.
+
+The offline transcript reader that `rcctl` creates for a suspended Workspace
+still runs `rc-kube transcript` from the Workspace image, because `rcctl` does
+not know the rc-kube image of the controller.
 
 ## Workspace Environment
 
@@ -1167,8 +1209,8 @@ volume from the first implementation.
 Add an `rc-kube` entry point and a versioned local protocol. Implement
 idempotent start by WorkspaceExec UID, process groups, PTY and non-PTY I/O,
 signals, exit observation, bounded transcript persistence, and Unix-socket
-attach. The base Workspace image must contain compatible `rc-kube` and `rcctl`
-binaries.
+attach. The base Workspace image must contain a compatible `rcctl` binary. On
+Linux the controller injects `rc-kube`; Windows and Darwin images contain it.
 
 ### 5. Reconcile processes
 

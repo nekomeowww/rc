@@ -19,6 +19,8 @@ package rckube
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
 
@@ -28,6 +30,8 @@ import (
 	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/lifecycle"
 )
+
+const testActionsFlag = "--actions"
 
 func TestLifecycleCommandRunsEncodedActions(t *testing.T) {
 	t.Parallel()
@@ -41,7 +45,7 @@ func TestLifecycleCommandRunsEncodedActions(t *testing.T) {
 	require.NoError(t, err)
 	output := new(bytes.Buffer)
 	command := NewCommand()
-	command.SetArgs([]string{lifecycleCommandName, "--actions", encoded})
+	command.SetArgs([]string{lifecycleCommandName, testActionsFlag, encoded})
 	command.SetOut(output)
 	command.SetErr(output)
 
@@ -62,11 +66,33 @@ func TestLifecycleCommandHidesKubernetesEnvironment(t *testing.T) {
 	require.NoError(t, err)
 	output := new(bytes.Buffer)
 	command := NewCommand()
-	command.SetArgs([]string{lifecycleCommandName, "--" + processruntime.HideKubernetesEnvironmentFlag, "--actions", encoded})
+	command.SetArgs([]string{lifecycleCommandName, "--" + processruntime.HideKubernetesEnvironmentFlag, testActionsFlag, encoded})
 	command.SetOut(output)
 	command.SetErr(output)
 
 	require.NoError(t, command.ExecuteContext(context.Background()))
 	assert.NotContains(t, output.String(), "KUBERNETES_", "a lifecycle action does not inherit Kubernetes variables")
 	assert.Contains(t, output.String(), "RC_TEST_ORDINARY=kept", "a lifecycle action inherits other variables")
+}
+
+func TestLifecycleCommandPutsItsDirectoryOnPath(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("only Linux runtime Pods run an injected rc-kube")
+	}
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	t.Setenv("PATH", "/usr/bin:/bin")
+	encoded, err := lifecycle.Encode([]lifecycle.Action{{
+		Command:          []string{"/bin/sh", "-c", `printf '%s' "$PATH"`},
+		WorkingDirectory: t.TempDir(),
+	}})
+	require.NoError(t, err)
+	output := new(bytes.Buffer)
+	command := NewCommand()
+	command.SetArgs([]string{lifecycleCommandName, testActionsFlag, encoded})
+	command.SetOut(output)
+	command.SetErr(output)
+
+	require.NoError(t, command.ExecuteContext(context.Background()))
+	assert.Equal(t, filepath.Dir(executable)+":/usr/bin:/bin", output.String(), "a started process finds this rc-kube first")
 }

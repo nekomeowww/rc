@@ -41,6 +41,7 @@ import (
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/holdset"
 	"github.com/nekomeowww/rc/internal/lifecycle"
+	"github.com/nekomeowww/rc/internal/rcplatform"
 	"github.com/nekomeowww/rc/internal/worktreebootstrap"
 	"github.com/nekomeowww/rc/internal/worktreeownership"
 )
@@ -49,6 +50,7 @@ const (
 	lifecycleRepositoryTestName = "repository"
 	lifecycleToolTestName       = "tool"
 	testRunnerImage             = "ghcr.io/example/rc/runner:test"
+	testRCKubeImage             = "ghcr.io/example/rc/rc-kube:test"
 )
 
 func TestWorkspaceCreatesHomeWhileWorktreeIsProvisioning(t *testing.T) {
@@ -150,19 +152,20 @@ func TestWorkspaceRuntimeUsesDeferredWorktreeAndLifecycleActions(t *testing.T) {
 	requirements.NoError(err)
 	pod := new(corev1.Pod)
 	requirements.NoError(kubeClient.Get(ctx, key, pod))
-	requirements.Len(pod.Spec.InitContainers, 3, "run deferred Git bootstrap before user initializers")
-	assertions.Equal(worktreebootstrap.ContainerName(worktree.Namespace, worktree.Name, worktree.UID), pod.Spec.InitContainers[0].Name)
-	assertions.Equal(testRunnerImage, pod.Spec.InitContainers[0].Image, "use the controller runner for internal Git initialization")
-	bootstrapActions, err := lifecycle.Decode(pod.Spec.InitContainers[0].Command[3])
+	requirements.Len(pod.Spec.InitContainers, 4, "run deferred Git bootstrap before user initializers")
+	assertions.Equal(rcplatform.RCKubeInstallContainerName, pod.Spec.InitContainers[0].Name, "install rc-kube before the initializers that run it")
+	assertions.Equal(worktreebootstrap.ContainerName(worktree.Namespace, worktree.Name, worktree.UID), pod.Spec.InitContainers[1].Name)
+	assertions.Equal(testRunnerImage, pod.Spec.InitContainers[1].Image, "use the controller runner for internal Git initialization")
+	bootstrapActions, err := lifecycle.Decode(pod.Spec.InitContainers[1].Command[3])
 	requirements.NoError(err)
 	requirements.Len(bootstrapActions, 1)
 	assertions.Equal("/workspace/repository", bootstrapActions[0].WorkingDirectory)
 	assertions.Contains(bootstrapActions[0].Command, worktree.Spec.Branch)
-	initializeCommand, err := lifecycle.Decode(pod.Spec.InitContainers[1].Command[3])
+	initializeCommand, err := lifecycle.Decode(pod.Spec.InitContainers[2].Command[3])
 	requirements.NoError(err)
-	assertions.Equal(testRuntimeImage, pod.Spec.InitContainers[1].Image, "use the Workspace image for user lifecycle actions")
+	assertions.Equal(testRuntimeImage, pod.Spec.InitContainers[2].Image, "use the Workspace image for user lifecycle actions")
 	assertions.Equal([]string{lifecycleToolTestName, "prepare"}, initializeCommand[0].Command)
-	initializeScript, err := lifecycle.Decode(pod.Spec.InitContainers[2].Command[3])
+	initializeScript, err := lifecycle.Decode(pod.Spec.InitContainers[3].Command[3])
 	requirements.NoError(err)
 	assertions.Equal("printf initialized", initializeScript[0].Script)
 	requirements.NotNil(pod.Spec.Containers[0].Lifecycle)
@@ -319,13 +322,14 @@ func TestWorkspaceReconcileClonesEnvironmentAndCreatesRuntime(t *testing.T) {
 	requirements.NotNil(pod.Spec.Containers[0].SecurityContext, "runtime container has a SecurityContext")
 	requirements.NotNil(pod.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation, "runtime container declares privilege escalation policy")
 	assertions.Equal(environment.Status.CurrentImage, pod.Spec.Containers[0].Image, "use captured Environment image")
-	assertions.Equal([]string{runtimeContainerName, "serve"}, pod.Spec.Containers[0].Command, "run the supervisor")
+	assertions.Equal([]string{rcplatform.RCKubeExecutable, "serve"}, pod.Spec.Containers[0].Command, "run the injected supervisor")
 	assertions.Equal("rc-workspace", pod.Spec.ServiceAccountName, "inject default namespaced ServiceAccount")
 	assertions.Equal(workspaceRuntimePolicyVersion, pod.Annotations[workspaceRuntimePolicyAnnotation], "record the restricted runtime policy")
 	assertions.False(*pod.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation, "prevent processes from gaining root")
 	requirements.NotNil(pod.Spec.Containers[0].SecurityContext.Capabilities, "runtime container declares capabilities")
 	assertions.Equal([]corev1.Capability{"ALL"}, pod.Spec.Containers[0].SecurityContext.Capabilities.Drop, "drop every runtime capability")
-	assertions.Empty(pod.Spec.InitContainers, "normal Workspace does not inject sudoers")
+	requirements.Len(pod.Spec.InitContainers, 1, "normal Workspace does not inject sudoers")
+	assertions.Equal(rcplatform.RCKubeInstallContainerName, pod.Spec.InitContainers[0].Name, "install only rc-kube")
 	for _, volume := range pod.Spec.Volumes {
 		assertions.NotEqual("sudoers", volume.Name, "normal Workspace has no sudoers volume")
 	}

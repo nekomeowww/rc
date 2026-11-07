@@ -12,4 +12,12 @@ while IFS= read -r arg; do
   set -- "$@" "${arg}"
 done < "${args_file}"
 
-exec /usr/local/libexec/rc-kube "$@"
+# The init program records the rc-kube that the controller injected. A
+# runtime started without it runs the rc-kube of this image.
+executable=/usr/local/libexec/rc-kube
+executable_file=/run/rc/rc-kube-serve.executable
+if test -f "${executable_file}"; then
+  IFS= read -r executable < "${executable_file}"
+fi
+
+exec "${executable}" "$@"

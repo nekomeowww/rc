@@ -29,7 +29,8 @@ Before starting, make sure that:
 
 - rc is deployed and can create Workspaces and WorkspaceExecs;
 - the cluster provides GPU drivers and the `nvidia.com/gpu` resource;
-- a runner image containing Wayland, AUV, and `rc-kube` is available;
+- a runner image containing Wayland and AUV is available, and the controller
+  can pull its rc-kube image;
 - nodes trust the registry certificate and the Workspace ServiceAccount has
   pull credentials when the image is private; and
 - the application supports native Wayland or a Wayland backend provided by
@@ -142,8 +143,9 @@ COPY --chown=1000:1000 . /opt/gui-app
 USER 1000:1000
 ```
 
-The derived image must retain the runner's `rc-kube` wrapper, s6 services, and
-Wayland environment. Start the GUI application through an WorkspaceExec rather
+The derived image must retain the runner's `RC_KUBE_INIT` program, s6
+services, and Wayland environment. The controller injects `rc-kube`, and the
+`RC_KUBE_INIT` program starts it inside the s6 supervision tree. Start the GUI application through an WorkspaceExec rather
 than making it the Workspace container's main process.
 
 ## Step 3: Start the GUI application

@@ -42,6 +42,7 @@ import (
 	repositoriescontroller "github.com/nekomeowww/rc/internal/controller/repositories"
 	workspacescontroller "github.com/nekomeowww/rc/internal/controller/workspaces"
 	processruntime "github.com/nekomeowww/rc/internal/execution"
+	"github.com/nekomeowww/rc/internal/version"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -72,6 +73,7 @@ func main() {
 	var darwinRunnerImage string
 	var darwinWorkspaceRoot string
 	var lxcfsDir string
+	var rcKubeImage string
 
 	var secureMetrics bool
 	var enableHTTP2 bool
@@ -91,6 +93,9 @@ func main() {
 	flag.StringVar(&lxcfsDir, "lxcfs-dir", "",
 		"Host directory where LXCFS serves its proc files, for example /var/lib/lxcfs. "+
 			"Linux Workspace runtime Pods bind-mount these files. Empty disables LXCFS.")
+	flag.StringVar(&rcKubeImage, "rc-kube-image", version.DefaultRCKubeImage(),
+		"The image that provides rc-kube and tini to Linux Workspace and WorkspaceEnvironment runtime Pods. "+
+			"Empty selects the default, the official image of this controller version.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -263,6 +268,7 @@ func main() {
 		DarwinRunnerImage:   darwinRunnerImage,
 		DarwinWorkspaceRoot: darwinWorkspaceRoot,
 		LXCFSDir:            lxcfsDir,
+		RCKubeImage:         rcKubeImage,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "workspaces-workspace")
 		os.Exit(1)
@@ -284,9 +290,10 @@ func main() {
 	}
 
 	if err := (&workspacescontroller.WorkspaceExecReconciler{
-		Client:  mgr.GetClient(),
-		Scheme:  mgr.GetScheme(),
-		Runtime: processRuntime,
+		Client:      mgr.GetClient(),
+		Scheme:      mgr.GetScheme(),
+		Runtime:     processRuntime,
+		RCKubeImage: rcKubeImage,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "workspaces-workspaceexec")
 		os.Exit(1)
@@ -318,7 +325,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLog.Info("Starting manager")
+	setupLog.Info("Starting manager", "version", version.Version, "rcKubeImage", rcKubeImage)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)

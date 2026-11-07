@@ -159,11 +159,12 @@ cluster.
 | kwok | `make test-e2e-kwok` | [kwok](https://kwok.sigs.k8s.io) fake Nodes | Controller behavior only: placement, Pod metadata, priority, admission rejection, maximum run without a supervisor, many Workspaces at once |
 
 The runtime suite (`test/e2e`, build tag `e2e`) runs real containers. It
-builds the manager image and a minimal runner image from
-`test/e2e/Dockerfile.runner`, which contains only `rc-kube` from this checkout,
-`tini`, and a shell. The full `Dockerfile.runner` is not needed because the specs
-use only `rc-kube` and `sh`. The specs use short clocks, so the suite takes
-several minutes.
+builds the manager image, the rc-kube image, and a minimal runner image from
+`test/e2e/Dockerfile.runner`, which contains only a shell. The manager injects
+`rc-kube` and `tini` from this checkout into each runtime Pod, so every spec
+also checks the injection. The full `Dockerfile.runner` is not needed because
+the specs use only `rc-kube` and `sh`. The specs use short clocks, so the suite
+takes several minutes.
 
 The kwok suite (`test/e2e/kwok`, build tag `e2e_kwok`) installs a pinned kwok
 release (`KWOK_VERSION`) into a Kind cluster without the CSI driver. It adds a
@@ -188,17 +189,20 @@ command.
 
 ## Test development images in Kind
 
-Build both runtime images and load them into an existing Kind cluster:
+Build the controller, rc-kube, and runner images and load them into an
+existing Kind cluster. `make docker-build` builds the controller image and the
+rc-kube image that the controller injects into Linux runtime Pods:
 
 ```sh
 export KIND_CLUSTER=rc-dev
 export IMG=rc-controller:dev
+export RC_KUBE_IMG=rc-kube:dev
 export RUNNER_IMG=rc-runner:dev
 
-make docker-build IMG="$IMG"
+make docker-build IMG="$IMG" RC_KUBE_IMG="$RC_KUBE_IMG"
 make docker-build-runner RUNNER_IMG="$RUNNER_IMG"
-kind load docker-image "$IMG" "$RUNNER_IMG" --name "$KIND_CLUSTER"
-make deploy IMG="$IMG" RUNNER_IMG="$RUNNER_IMG"
+kind load docker-image "$IMG" "$RC_KUBE_IMG" "$RUNNER_IMG" --name "$KIND_CLUSTER"
+make deploy IMG="$IMG" RC_KUBE_IMG="$RC_KUBE_IMG" RUNNER_IMG="$RUNNER_IMG"
 ```
 
 Check the deployed controller with:

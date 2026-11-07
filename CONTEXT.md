@@ -98,8 +98,9 @@ _Avoid_: Workspace Template
 
 **Runner Image**:
 The execution image containing `rc-kube`, `rcctl`, Git, a shell, certificates,
-system libraries, and common system tools. Workspace Environment images retain
-the same runtime contract while selecting a different system foundation.
+system libraries, and common system tools. On Linux the controller injects the
+`rc-kube` and `tini` that runtime Pods run from the rc-kube image, so Workspace
+Environment images can select a different system foundation without them.
 _Avoid_: Repository worker image, Workspace base image
 
 **Environment Draft**:

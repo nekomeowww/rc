@@ -91,8 +91,15 @@ const (
 )
 
 type resolvedWorkspace struct {
-	runtime              rcplatform.Runtime
-	image                string
+	runtime rcplatform.Runtime
+	// image is the image of the current or next runtime Pod. It is
+	// status.runtimeImage once that is recorded, so an image change does not
+	// change the topology hash of a running Pod.
+	image string
+	// desiredImage is the image that a blank Workspace asks for now: its
+	// spec.image or the controller's base image. A Workspace moves to it only
+	// when it has no runtime Pod. It is empty for an Environment clone.
+	desiredImage         string
 	revision             int64
 	storage              workspacesv1alpha1.PersistentStorageSpec
 	sourceClaimName      string
@@ -227,6 +234,9 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			result.RequeueAfter = workspaceDependencyRequeue
 		}
 		return result, r.setWorkspaceStatus(ctx, req.NamespacedName, nil, metav1.ConditionFalse, reason, message)
+	}
+	if err := r.moveToDesiredImage(ctx, workspace, resolved); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	if resolved.runtime.OS() != rcplatform.Darwin {
@@ -727,12 +737,12 @@ func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspac
 			return resolved, "DarwinWorkspaceRootRequired", "The controller must configure --darwin-workspace-root", nil
 		}
 		resolved.homeHostPath = path.Join(r.DarwinWorkspaceRoot, workspace.Namespace, workspace.Name)
-		resolved.image = workspace.Status.RuntimeImage
+		resolved.desiredImage = workspace.Spec.Image
+		if resolved.desiredImage == "" {
+			resolved.desiredImage = r.DarwinRunnerImage
+		}
 		if resolved.image == "" {
-			resolved.image = workspace.Spec.Image
-			if resolved.image == "" {
-				resolved.image = r.DarwinRunnerImage
-			}
+			resolved.image = resolved.desiredImage
 		}
 		if resolved.image == "" {
 			return resolved, "ImageRequired", "Darwin Workspace runtime image is empty", nil
@@ -773,14 +783,15 @@ func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspac
 			return resolved, "StorageRequired", "A blank Workspace requires spec.storage", nil
 		}
 		resolved.storage = *workspace.Spec.Storage
-		if resolved.image == "" {
-			resolved.image = workspace.Spec.Image
-			if resolved.image == "" {
-				resolved.image = r.RunnerImage
-				if platform.OS() == corev1.Windows {
-					resolved.image = r.WindowsRunnerImage
-				}
+		resolved.desiredImage = workspace.Spec.Image
+		if resolved.desiredImage == "" {
+			resolved.desiredImage = r.RunnerImage
+			if platform.OS() == corev1.Windows {
+				resolved.desiredImage = r.WindowsRunnerImage
 			}
+		}
+		if resolved.image == "" {
+			resolved.image = resolved.desiredImage
 		}
 	}
 	if resolved.image == "" {
@@ -1398,10 +1409,18 @@ func (r *WorkspaceReconciler) setWorkspaceStatus(ctx context.Context, key types.
 		outdatedStatus := metav1.ConditionFalse
 		outdatedReason := "Current"
 		outdatedMessage := "Workspace matches its source Environment revision"
-		if resolved.outdated {
+		if current.Spec.EnvironmentRef == nil {
+			outdatedMessage = "Workspace uses its desired image"
+		}
+		switch {
+		case resolved.outdated:
 			outdatedStatus = metav1.ConditionTrue
 			outdatedReason = "EnvironmentAdvanced"
 			outdatedMessage = "Workspace uses an older Environment revision or image"
+		case resolved.imageChangePending():
+			outdatedStatus = metav1.ConditionTrue
+			outdatedReason = workspacesv1alpha1.WorkspaceReasonImageChangePending
+			outdatedMessage = fmt.Sprintf("Workspace moves to image %s at its next start", resolved.desiredImage)
 		}
 		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 			Type: workspacesv1alpha1.WorkspaceConditionOutdated, Status: outdatedStatus,

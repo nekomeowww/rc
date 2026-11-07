@@ -109,6 +109,22 @@ The install manifest configures the controller, the rc-kube image, and the
 Linux runner. Select the experimental Windows runner explicitly on a Windows
 Workspace or through the manager's `--windows-runner-image` flag.
 
+### Image upgrades
+
+A blank Workspace uses `spec.image`, or the controller's runner image when
+`spec.image` is empty. When this image changes, the Workspace moves to it at
+its next start. A running Workspace keeps its image and reports
+`Outdated=True` with reason `ImageChangePending`. `status.runtimeImage` shows
+the image of the current or last runtime Pod. A Workspace cloned from a
+WorkspaceEnvironment keeps the image of its Environment revision. See
+[ADR 0011](docs/adr/0011-workspace-image-upgrades.md).
+
+```sh
+kubectl patch workspace dev --type merge -p '{"spec":{"image":"ghcr.io/nekomeowww/rc/runner:<version>"}}'
+rcctl workspace stop dev
+rcctl workspace start dev
+```
+
 ### Custom Linux images
 
 The controller adds `rc-kube` and `tini` of its own version to every Linux

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use cloudflared for remote access"
+  short_description: "Connect or publish with explicit protocol and access scope"
+  default_prompt: "Use $use-cloudflared-for-remote-access to establish the authorized connection for this task."

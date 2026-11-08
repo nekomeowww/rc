@@ -210,18 +210,29 @@ rcctl --context kind-rc-dev -n development repo list
 
 ### Install agent skills
 
+`use-rc` composes access only when needed. Install `use-op-for-secret-access` for
+1Password-backed credential access and `use-cloudflared-for-remote-access` for
+Cloudflare routes; direct Kubernetes access needs neither companion. Keep account
+mappings, private endpoints, and credential caches on the access device, outside
+shared skills. For migration from a private `use-rcctl`, see
+[local access and migration](skills/use-rc/references/local-access.md).
+
 Install rc's agent skills with the [Skills CLI](https://www.skills.sh/docs).
 The command prompts for the target agent and scope; select only the skills that
 fit the intended workflow:
 
 ```sh
-pnpm dlx skills add nekomeowww/rc --skill use-rc --skill setup-rc --skill setup-rc-locally --skill setup-lobehub-cli
+pnpm dlx skills add nekomeowww/rc \
+  --skill use-rc --skill setup-rc --skill setup-rc-locally --skill setup-lobehub-cli \
+  --skill use-op-for-secret-access --skill use-cloudflared-for-remote-access
 ```
 
 `npx` is equivalent when pnpm is unavailable:
 
 ```sh
-npx skills add nekomeowww/rc --skill use-rc --skill setup-rc --skill setup-rc-locally --skill setup-lobehub-cli
+npx skills add nekomeowww/rc \
+  --skill use-rc --skill setup-rc --skill setup-rc-locally --skill setup-lobehub-cli \
+  --skill use-op-for-secret-access --skill use-cloudflared-for-remote-access
 ```
 
 ## Quick start with rcctl

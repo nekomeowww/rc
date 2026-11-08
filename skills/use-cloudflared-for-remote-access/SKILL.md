@@ -22,6 +22,8 @@ Cloudflare Access authentication is separate from the origin application's auth.
    | Need | Read |
    | --- | --- |
    | Connect to an existing Access app with browser login or Service Token | [Access authentication](references/access-authentication.md) |
+   | Reference injection, cached `.env`, provided `.env`, or a reusable launcher | [Credential input modes](references/credential-inputs.md) |
+   | Create or update a Kubernetes context for the selected route | [Kubeconfig adaptation](references/kubeconfig.md) |
    | Raw TCP, SOCKS, Kubernetes TLS, or connection/handshake failure | [Protocols and diagnostics](references/protocols-and-diagnostics.md) |
    | Create/change a Tunnel route or publish a local service | [Publishing and Tunnel management](references/publishing.md) |
 
@@ -55,7 +57,9 @@ and Windows services are alternatives, not prerequisites. Auto-start installatio
 requires scope to persist access; keep secrets out of unit/launch command arguments.
 Record process/session/service ownership, logs, expiry, and stop method. Stop
 agent-owned temporary listeners by their exact PID/session when finished, including
-error paths; leave explicitly retained or pre-existing services intact.
+error paths; supervise the whole owned process tree when using wrappers such as
+`op run`, and confirm that the listener closes. Leave explicitly retained or
+pre-existing services intact.
 
 ## Handoff
 

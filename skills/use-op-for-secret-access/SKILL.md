@@ -70,6 +70,33 @@ with mode `0600` on POSIX, or an equivalent owner-only Windows ACL. Avoid shared
 only the path. Remove temporary material through the owning workflow when it ends.
 Do not persist kubeconfigs or cloud credentials merely to probe readability.
 
+## Reusable launch procedures without plaintext caching
+
+When the user wants a reusable script, save only the selected account, exact
+references, target, and procedure in a private local script. Prefer one `op run`
+around the long-lived consumer, resolving references once per process lifetime.
+If `op read` is required, capture its output privately and inject only the selected
+values into the child environment; do not use `eval`, secret-valued argv, or dump
+captured output. Avoid an extra readability probe immediately before a read/run
+that already proves access. Reuse a verified running listener instead of repeatedly
+resolving credentials for each kubectl/rcctl request.
+
+Distinguish agent authorization from 1Password unlock/approval. A saved procedure
+can avoid asking the user the same scope question, but cannot promise that desktop
+integration or an expired session will not request approval. Do not persist raw
+`OP_SESSION_*` or a human master password to avoid prompts. For truly unattended
+use, use a separately authorized provider-supported machine identity or credential
+cache; storing a script does not grant that authorization. Do not silently change
+accounts or downgrade auth when a future invocation needs an unlock.
+
+The caller owns the consumer process tree. When wrapping a listener with `op run`
+or a script, stopping only the wrapper PID may not stop every child: use an owned
+session/process group or a supervisor with verified signal forwarding, and confirm
+that the listener port closes on success, error, and interruption. Before deleting
+private diagnostics on failure, classify the provider/consumer error and return a
+sanitized actionable reason; do not replace an approval-required error with a
+wrapper-process exception or discard the only evidence before classifying it.
+
 ## Offer persistence once, without blocking one-time use
 
 At first authorized setup of a secret-backed CLI, ask whether the user wants to
@@ -91,7 +118,10 @@ If caching is authorized:
 
 1. Prefer the consumer's supported secure credential store. Otherwise use a
    dedicated directory under `${XDG_CONFIG_HOME:-$HOME/.config}/<consumer>/secrets/`
-   on Linux and macOS, not project `.env` or `.env.*` files. Use Linux-like XDG
+   on Linux and macOS. A private `.env` in that directory is acceptable when the
+   user requests it. Avoid project `.env` or `.env.*` by default; an explicitly
+   requested project location requires checking tracking/sync risks and the same
+   owner-only controls. Use Linux-like XDG
    paths on macOS for this convention. Use a user-private native path on Windows.
 2. Create POSIX directories `0700`, files `0600`, with restrictive umask before
    writing; verify ownership, reject symlinks, avoid overwriting unrelated files,
@@ -107,6 +137,10 @@ If caching is authorized:
    cache path, expiry if available, refresh/rotation, and removal/revocation steps.
    Caching does not extend expiry. Refresh an expired cache only within the recorded
    authorization; changed account, target, or scope needs renewed authorization.
+
+For an existing or requested dotenv file consumed by cloudflared, follow
+[credential input modes](../use-cloudflared-for-remote-access/references/credential-inputs.md).
+A supplied credential file does not require opening 1Password again.
 
 Return success/failure, selected identity privately, reference/file handles,
 consumer, lifetime, and cleanup/refresh instructions. Never return the secret value.

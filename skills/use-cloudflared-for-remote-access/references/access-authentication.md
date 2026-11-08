@@ -13,6 +13,12 @@ client listener and issue one bounded consumer request to trigger login:
 cloudflared access tcp --hostname <access-hostname> --url 127.0.0.1:<port>
 ```
 
+Keep the listener observable. Once it reports a pending login, stop consumer
+probes that could initiate competing authorization flows. Wait for the user to
+complete the emitted flow, then retry the consumer request once. A blocked request
+may already have timed out while the user approved; that is not evidence that a
+new login or listener is necessary.
+
 Keep the listener observable. Give the exact emitted authentication URL to the
 user promptly, without fabricating a callback or logging cookies/JWTs. Monitor the
 same pending flow and validate it with sequential bounded requests. Do not spawn

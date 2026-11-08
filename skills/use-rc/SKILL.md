@@ -35,7 +35,9 @@ writable Worktrees, persistent Workspaces, and supervised WorkspaceExecs distinc
    local service. Skip this skill for direct or other working access.
 7. If a named companion is not installed, read the linked repository copy if
    available, or explain which companion to install; do not silently invent its
-   authentication procedure. Helpers return configuration/file handles and
+   authentication procedure. When adapting Kubernetes access, read
+   [kubeconfig adaptation](../use-cloudflared-for-remote-access/references/kubeconfig.md)
+   for safe context creation/update. Helpers return configuration/file handles and
    verification evidence, never secret values in conversation.
 8. Confirm transport, Kubernetes identity, and permission separately with bounded
    read-only requests, then list rc resources in the intended namespace. A version

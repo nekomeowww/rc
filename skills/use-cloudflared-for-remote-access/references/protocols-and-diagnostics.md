@@ -4,6 +4,9 @@ Identify every hop and where TLS terminates. An HTTP/HTTPS origin route is a
 reverse proxy; an opaque TCP route forwards bytes; a SOCKS proxy negotiates a
 separate protocol. `cloudflared access tcp` does not itself implement SOCKS.
 
+For creating or updating a selected Kubernetes context, read
+[kubeconfig adaptation](kubeconfig.md) before writing configuration.
+
 ## Raw Kubernetes API TCP
 
 For Kubernetes client-certificate authentication, preserve the TLS connection

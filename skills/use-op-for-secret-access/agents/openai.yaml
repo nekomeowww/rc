@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use 1Password for secret access"
+  short_description: "Read and inject authorized secrets with account selection"
+  default_prompt: "Use $use-op-for-secret-access to provide the authorized credentials for this task."

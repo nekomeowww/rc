@@ -1,58 +1,19 @@
-# Storage and dependency caches
+# Storage and caches
 
-Inspect the selected deployment's StorageClasses, binding mode, cloning support,
-access modes, node constraints, and a compatible Ready Workspace before creating
-storage. Do not guess a class or node selector from another deployment. Ready
-alone does not prove a Workspace has suitable tools, free resources, or ownership.
-
-rc rejects WaitForFirstConsumer storage with
-`WaitForFirstConsumerUnsupported`. Repositories, Worktrees, and Environments
-also require PVC cloning. Check the binding mode:
+Inspect a compatible Ready Workspace and the deployment's StorageClass, cloning support, access modes, resources, and node constraints. Do not guess names or assume Ready means suitable. rc rejects WaitForFirstConsumer classes; Repository/Worktree/Environment flows require PVC cloning.
 
 ```sh
 kubectl get storageclass -o custom-columns=NAME:.metadata.name,BINDING:.volumeBindingMode
 ```
 
-Network-backed volumes can make file-heavy operations slow; measure the selected
-runtime rather than carrying timings from another installation. Batch small
-checks, bound broad searches, and use `git grep` or `rg`. Use a foreground exec
-when it fits the caller's timeout, or a detached execution with logs and attach
-for longer work. Avoid tight polling loops.
+Network storage can make file-heavy work slow. Measure locally, batch checks, use `rg`/`git grep`, and avoid tight polling; detach long commands when caller timeouts require it.
 
-## pnpm caches in Linux Workspaces
-
-Keep source on PVC and rebuildable dependencies in local storage. Updated Linux
-images use `XDG_CACHE_HOME=/tmp/cache`; check this and directory permissions for
-older/custom images.
+For Linux pnpm Workspaces, rebuildable caches may use local storage after checking image configuration and permissions:
 
 ```sh
-rcctl -n <namespace> exec --no-env-passthrough --cwd /workspace/<mount> <workspace> -- pnpm install --store-dir=/tmp/cache/pnpm/store --virtual-store-dir=/tmp/cache/pnpm/virtual/<worktree-id>
+rcctl -n <namespace> exec --no-env-passthrough --cwd /workspace/<mount> <workspace> -- pnpm install --store-dir=/tmp/cache/pnpm/store --virtual-store-dir=/tmp/cache/pnpm/virtual/<worktree>
 ```
 
-- Use the Worktree resource name for `<worktree-id>`. Share the content store
-  within a Workspace, but give each Worktree its own virtual store.
-- Install from the repository's required root and follow its pnpm, lockfile, and
-  build-script policies. Keep both path flags for `install/add/remove/update`;
-  pnpm 11+ does not read store settings from `.npmrc`.
-- Serialize dependency changes per Worktree. All consuming processes must see
-  the same virtual-store path.
-- Next.js Turbopack does not resolve packages from a virtual store outside the
-  project root. For a Turbopack app, set `turbopack.root` to a directory that
-  contains both, or keep that Worktree's virtual store inside the Worktree.
-- Local caches can disappear when the runtime is replaced. Keep credentials out
-  of them and never clear dependencies while processes are using them.
+Share the content store, not virtual stores between Worktrees. Follow repository version/lockfile/build policies; keep both flags on dependency-changing commands (pnpm 11+ does not read these from `.npmrc`). Turbopack requires a root containing the source and virtual store, or an in-project virtual store.
 
-### Cache recovery
-
-After runtime replacement, check dependency links: `Already up to date` does not
-guarantee a missing virtual store was rebuilt. For stale links or path migration,
-stop affected processes, move only that Worktree's generated root/package
-`node_modules` directories to a unique PVC backup outside workspace package globs,
-then reinstall with the same flags and verify runtime resolution. Preserve source
-and lockfiles; remove the identified backups only when authorized.
-
-rc does not automate recovery. Avoid defaulting to `--force`, which can fetch
-other-platform optional dependencies. For durability instead, select persistent
-content and virtual stores, accepting PVC I/O costs.
-
-See [pnpm virtualStoreDir](https://pnpm.io/settings/node-modules#virtualstoredir).
+Runtime replacement can erase local caches. If links are stale, stop consumers, move only generated `node_modules` to an identified backup outside package globs, reinstall, and verify resolution. Preserve source/lockfiles; avoid defaulting to `--force`. Choose persistent stores when durability outweighs PVC I/O cost.

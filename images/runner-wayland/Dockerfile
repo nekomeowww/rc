@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM --platform=$BUILDPLATFORM golang:1.27.3 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.4 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -14,10 +14,10 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o /o
 
 FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS tool-downloader
 ARG TARGETARCH
-ARG MISE_VERSION=2026.10.15
-ARG MISE_SHA256_AMD64=4cf6fcd45b730e0c48c59b9a056ed6701be14abf44f999d69aa70afd1004fc32
-ARG PROTO_VERSION=0.63.1
-ARG PROTO_SHA256_AMD64=f4712f107ab31403ca3454e3cefcc96433f8970dbedc3cb310624ca537a64ea0
+ARG MISE_VERSION=2026.11.8
+ARG MISE_SHA256_AMD64=dfe43dca5b1ae781c39d50458094a5e28b3d4d8a74c52ae5a543f359d9ec2563
+ARG PROTO_VERSION=0.64.0
+ARG PROTO_SHA256_AMD64=44c80d7c3492a3c8c34af359470faf4e35a69fc8c8ba49190fd1c5f9e60c876c
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
@@ -38,7 +38,7 @@ RUN set -eux; \
     install -Dm755 /tmp/proto/proto /out/proto; \
     install -Dm755 /tmp/proto/proto-shim /out/proto-shim
 
-FROM node:26.12.0-bookworm-slim AS node-runtime
+FROM node:26.13.1-bookworm-slim AS node-runtime
 
 FROM ubuntu:24.04 AS xdpw-builder
 ARG XDPW_VERSION=0.8.4
@@ -89,7 +89,7 @@ FROM ubuntu:24.04
 
 ARG TARGETARCH
 ARG COREPACK_VERSION=0.36.0
-ARG LOBEHUB_CLI_VERSION=0.0.76
+ARG LOBEHUB_CLI_VERSION=0.0.92
 ARG AUV_VERSION=0.0.35
 ARG AUV_SHA256_AMD64=db1ba7abdb24dc744911b6c79f53e96d99c2df5643af48c4eef805209364e6e6
 ARG S6_OVERLAY_VERSION=3.2.3.2

@@ -2,7 +2,7 @@
 
 ARG RUNNER_IMAGE=ghcr.io/nekomeowww/rc/runner:latest
 
-FROM node:26.12.0-bookworm-slim AS codex
+FROM node:26.13.1-bookworm-slim AS codex
 
 ARG BUN_VERSION=1.4.3
 ARG CODEX_VERSION=0.163.0

@@ -1,8 +1,8 @@
 param(
     [Parameter(Mandatory=$true)][string]$RCBinaryDirectory,
     [switch]$IncludeCodex,
-    [string]$NodeVersion = '26.12.0',
-    [string]$NodeSHA256 = '50efaf01a08c520b4bbe499c09a8c5a5c370002c419c0d9da2c6815d3066a453',
+    [string]$NodeVersion = '26.13.1',
+    [string]$NodeSHA256 = 'e2edda75bfb089654705cf65a13b58933bfd5f57148e8ebda916f58a2474f1f7',
     [string]$PythonVersion = '3.14.8',
     [string]$PythonSHA256 = '759be887b96e736a3ca886daf8d575f18fcae1a09efab6902f42d59e8999f8ef',
     [string]$CMakeVersion = '4.4.4',

@@ -9,7 +9,7 @@
 # The runtime container then runs that rc-kube, so it always has the version of
 # the controller, whatever the Workspace image holds. Both binaries are static,
 # and the image needs no shell.
-FROM --platform=$BUILDPLATFORM golang:1.27.3 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.4 AS builder
 
 ARG TARGETOS
 ARG TARGETARCH

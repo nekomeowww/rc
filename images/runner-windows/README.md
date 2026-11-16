@@ -36,7 +36,7 @@ binaries and run Go tests without building container images.
 
 The release inputs are:
 
-- Node 26 Windows x64. CI uses `26.12.0` from the [official distribution](https://nodejs.org/dist/v26.12.0/).
+- Node 26 Windows x64. CI uses `26.13.1` from the [official distribution](https://nodejs.org/dist/v26.13.1/).
 - Portable Git for Windows; the experiment used the node's `2.51.0.windows.2` installation.
 - Python `3.14.8` x64 from the [official Python distribution](https://www.python.org/ftp/python/3.14.8/).
 - CMake `4.4.4` x64 from the [official Kitware release](https://github.com/Kitware/CMake/releases/tag/v4.4.4).
@@ -53,7 +53,7 @@ patch release. The versions and hashes below match the CI staging defaults.
 The fixed build assets have these SHA-256 hashes:
 
 ```text
-50efaf01a08c520b4bbe499c09a8c5a5c370002c419c0d9da2c6815d3066a453  node-v26.12.0-win-x64.zip
+e2edda75bfb089654705cf65a13b58933bfd5f57148e8ebda916f58a2474f1f7  node-v26.13.1-win-x64.zip
 759be887b96e736a3ca886daf8d575f18fcae1a09efab6902f42d59e8999f8ef  python-3.14.8-amd64.exe
 f7aac962e8eea82c0a1c603bb11ee3514806a43a35147d5b1e9d69926ffd7d7e  cmake-4.4.4-windows-x86_64.msi
 ```
@@ -78,7 +78,7 @@ Then stage the inputs (replace paths with the extracted installation paths):
 ```powershell
 .\prepare-assets.ps1 `
   -RCBinaryDirectory C:\src\rc\bin\windows-amd64 `
-  -NodeDirectory C:\downloads\node-v26.12.0-win-x64 `
+  -NodeDirectory C:\downloads\node-v26.13.1-win-x64 `
   -GitDirectory C:\tools\git `
   -OpenaiDirectory C:\rc-image-tools `
   -PythonInstaller C:\downloads\python-3.14.8-amd64.exe `

@@ -4,7 +4,7 @@ param(
     [string]$NodeVersion = '26.13.1',
     [string]$NodeSHA256 = 'e2edda75bfb089654705cf65a13b58933bfd5f57148e8ebda916f58a2474f1f7',
     [string]$PythonVersion = '3.14.10',
-    [string]$PythonSHA256 = '5dcf58ec6c0d846cdc40de1d9996086696225c8534e3e6cd41f049bfc708dad5',
+    [string]$PythonSHA256 = '92480239264744fe0386a1bd8275786fefa126e3129e56a68e22b52c73329965',
     [string]$CMakeVersion = '4.5.1',
     [string]$CMakeSHA256 = '0041a25845bc8c399b42d20f836616cb0b7020a8605348c089563bbc0c023356'
 )

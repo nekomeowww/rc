@@ -161,6 +161,7 @@ RUN apt-get update \
         sudo \
         sway \
         tar \
+        tmux \
         unzip \
         wget \
         wireplumber \

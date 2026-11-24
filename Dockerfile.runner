@@ -125,6 +125,7 @@ RUN apt-get update \
         sudo \
         tar \
         tini \
+        tmux \
         unzip \
         wget \
         xfonts-scalable \

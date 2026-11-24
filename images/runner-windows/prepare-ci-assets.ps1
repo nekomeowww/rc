@@ -3,10 +3,10 @@ param(
     [switch]$IncludeCodex,
     [string]$NodeVersion = '26.13.1',
     [string]$NodeSHA256 = 'e2edda75bfb089654705cf65a13b58933bfd5f57148e8ebda916f58a2474f1f7',
-    [string]$PythonVersion = '3.14.8',
-    [string]$PythonSHA256 = '759be887b96e736a3ca886daf8d575f18fcae1a09efab6902f42d59e8999f8ef',
-    [string]$CMakeVersion = '4.4.4',
-    [string]$CMakeSHA256 = 'f7aac962e8eea82c0a1c603bb11ee3514806a43a35147d5b1e9d69926ffd7d7e'
+    [string]$PythonVersion = '3.14.10',
+    [string]$PythonSHA256 = '5dcf58ec6c0d846cdc40de1d9996086696225c8534e3e6cd41f049bfc708dad5',
+    [string]$CMakeVersion = '4.5.1',
+    [string]$CMakeSHA256 = '0041a25845bc8c399b42d20f836616cb0b7020a8605348c089563bbc0c023356'
 )
 
 $ErrorActionPreference = 'Stop'

@@ -4,9 +4,9 @@ ARG RUNNER_IMAGE=ghcr.io/nekomeowww/rc/runner:latest
 
 FROM node:26.13.1-bookworm-slim AS codex
 
-ARG BUN_VERSION=1.4.3
-ARG CODEX_VERSION=0.163.0
-ARG PNPM_VERSION=12.14.0
+ARG BUN_VERSION=1.4.5
+ARG CODEX_VERSION=0.172.0
+ARG PNPM_VERSION=12.23.0
 
 RUN npm install --global --prefix /opt/openai \
         "@openai/codex@${CODEX_VERSION}" \
@@ -19,7 +19,7 @@ RUN npm install --global --prefix /opt/openai \
 
 FROM ${RUNNER_IMAGE}
 
-ARG CODEX_VERSION=0.163.0
+ARG CODEX_VERSION=0.172.0
 
 LABEL org.opencontainers.image.source="https://github.com/nekomeowww/rc" \
       org.opencontainers.image.title="OpenAI Codex CLI environment" \

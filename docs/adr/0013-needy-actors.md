@@ -78,6 +78,33 @@ file. An init container copies needy from the needy image, as for rc-kube in
 reports exec traffic with `rc-kube process touch`, so a Workspace that runs
 an Actor's commands is not suspended as idle.
 
+### Network
+
+The actor's gateway runs in its actor runner, so the actor's traffic
+leaves from the actor Pod and the daemon carries only control traffic.
+
+With `--needy-network-policies` the manager keeps two NetworkPolicies in
+each namespace. They are optional because they need a CNI that enforces
+them, and because a cluster may have its own:
+
+- Actor Pods reach the internet except `--needy-gateway-block-cidrs` and the
+  metadata address, the daemon's control port, and cluster DNS. Nothing
+  reaches them. The runner refuses the same ranges for the addresses an
+  actor names; the policy also covers the Pod itself.
+- The daemon admits the namespace's actor runners and Workspaces, and the
+  manager's Pods, to its control port.
+
+`spec.proxy` sends an Actor's traffic through a SOCKS5 proxy of any
+implementation. The runner refuses a connection when the proxy fails
+instead of dialing directly. The credentials come from a Secret that is
+mounted readable only by the Pod's group. With `socks5h` the proxy resolves
+names, so it must refuse private, cluster, and metadata addresses itself.
+With the manager's policies, `podSelector` admits the actor Pod to a proxy
+inside the cluster through a policy for that Actor alone; without them, rc
+adds no policy, because one for the proxy alone would cut the Pod off from
+the daemon. The actor Pod keeps its internet egress: the runner downloads
+the base VM image when it starts.
+
 ### Configuration
 
 needy is off until the manager has `--needy-image`. A KVM pool is described by

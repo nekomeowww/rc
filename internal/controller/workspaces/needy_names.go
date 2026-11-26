@@ -53,6 +53,9 @@ const (
 	// needyStateClaimName is the daemon's state volume when a storage class
 	// is configured.
 	needyStateClaimName = "needy-daemon-state"
+	// needyMetadataCIDR is the cloud metadata address, which no needy Pod may
+	// reach.
+	needyMetadataCIDR = "169.254.169.254/32"
 )
 
 // Values of workspacesv1alpha1.NeedyComponentLabel.

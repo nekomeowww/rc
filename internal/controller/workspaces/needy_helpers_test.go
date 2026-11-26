@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -56,6 +57,7 @@ func needyTestScheme(t *testing.T) *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, networkingv1.AddToScheme(scheme))
 	require.NoError(t, workspacesv1alpha1.AddToScheme(scheme))
 
 	return scheme

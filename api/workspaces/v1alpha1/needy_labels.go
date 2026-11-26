@@ -24,4 +24,6 @@ const (
 	// NeedyWorkspaceLabel names the Workspace that a needy executor runner
 	// serves.
 	NeedyWorkspaceLabel = "rc.ayaka.io/workspace"
+	// NeedyActorLabel names the Actor of an actor runner Pod.
+	NeedyActorLabel = "rc.ayaka.io/actor"
 )

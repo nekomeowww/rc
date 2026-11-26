@@ -174,10 +174,17 @@ func (r *ActorReconciler) start(ctx context.Context, actor *workspacesv1alpha1.A
 	}
 	// Known from here on, so that a failure below still revokes it.
 	actor.Status.RunnerName = runner
-	if err := r.ensureUpstreamPolicy(ctx, actor); err != nil {
+	upstream, reason, message, err := r.resolveUpstream(ctx, actor)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if reason != "" {
+		return r.wait(ctx, actor, reason, message, needyDaemonPoll)
+	}
+	if err := r.ensureUpstreamPolicy(ctx, actor, upstream); err != nil {
 		return r.fail(ctx, actor, workspacesv1alpha1.ActorReasonInvalidProfile, err.Error())
 	}
-	pod, err := r.ensureRunnerPod(ctx, actor, runner)
+	pod, err := r.ensureRunnerPod(ctx, actor, runner, upstream)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -555,7 +562,7 @@ func (r *ActorReconciler) ensureRunnerCredential(ctx context.Context, actor *wor
 	return true, nil
 }
 
-func (r *ActorReconciler) ensureRunnerPod(ctx context.Context, actor *workspacesv1alpha1.Actor, runner string) (*corev1.Pod, error) {
+func (r *ActorReconciler) ensureRunnerPod(ctx context.Context, actor *workspacesv1alpha1.Actor, runner string, upstream *workspacesv1alpha1.ActorUpstream) (*corev1.Pod, error) {
 	var pod corev1.Pod
 	err := r.Get(ctx, types.NamespacedName{Namespace: actor.Namespace, Name: actorPodName(actor)}, &pod)
 	if err == nil {
@@ -564,7 +571,7 @@ func (r *ActorReconciler) ensureRunnerPod(ctx context.Context, actor *workspaces
 	if !apierrors.IsNotFound(err) {
 		return nil, err
 	}
-	desired := actorRunnerPod(actor, r.Config)
+	desired := actorRunnerPod(actor, r.Config, upstream)
 	if err := controllerutil.SetControllerReference(actor, desired, r.Scheme); err != nil {
 		return nil, err
 	}
@@ -579,16 +586,16 @@ func (r *ActorReconciler) ensureRunnerPod(ctx context.Context, actor *workspaces
 // actorRunnerPod runs the ephemeral actor runner. The runner never listens:
 // it dials the daemon's control port and gateway, and the VM has no network
 // interface. The credential stays in the runner and never enters the VM.
-func actorRunnerPod(actor *workspacesv1alpha1.Actor, config needy.Config) *corev1.Pod {
-	upstream, upstreamCredentials := "", ""
-	if actor.Spec.Upstream != nil {
-		upstream = actor.Spec.Upstream.URL
-		if actor.Spec.Upstream.CredentialsSecretRef != nil {
+func actorRunnerPod(actor *workspacesv1alpha1.Actor, config needy.Config, upstream *workspacesv1alpha1.ActorUpstream) *corev1.Pod {
+	upstreamURL, upstreamCredentials := "", ""
+	if upstream != nil {
+		upstreamURL = upstream.URL
+		if upstream.CredentialsSecretRef != nil {
 			upstreamCredentials = actorUpstreamDirectory + "/" + actorUpstreamCredentialsFile
 		}
 	}
 	serve := needy.ActorRunnerCommand(actor.Namespace, actorCredentialDirectory+"/"+needy.CredentialKey,
-		needyDataDirectory+"/vm", upstream, upstreamCredentials)
+		needyDataDirectory+"/vm", upstreamURL, upstreamCredentials)
 	resources := *actor.Spec.Resources.DeepCopy()
 	if resources.Requests == nil {
 		resources.Requests = corev1.ResourceList{
@@ -656,7 +663,7 @@ func actorRunnerPod(actor *workspacesv1alpha1.Actor, config needy.Config) *corev
 			},
 		},
 	}
-	if reference := upstreamCredentialsReference(actor); reference != nil {
+	if reference := upstreamCredentialsReference(upstream); reference != nil {
 		// needy refuses a credentials file that other users can read; 0440
 		// with the Pod's fsGroup is the narrowest a Secret volume gives.
 		spec.Volumes = append(spec.Volumes, corev1.Volume{
@@ -685,9 +692,9 @@ func actorRunnerPod(actor *workspacesv1alpha1.Actor, config needy.Config) *corev
 			Namespace: actor.Namespace,
 			Name:      actorPodName(actor),
 			Labels: map[string]string{
-				needy.ComponentLabel:     needy.ComponentActor,
-				needy.ActorLabel:         actor.Name,
-				"app.kubernetes.io/name": needyAppName,
+				needy.ComponentLabel: needy.ComponentActor,
+				needy.ActorLabel:     actor.Name,
+				appNameLabel:         needyAppName,
 			},
 			// A node consolidation would end the run.
 			Annotations: map[string]string{"karpenter.sh/do-not-disrupt": annotationTrue},
@@ -696,21 +703,62 @@ func actorRunnerPod(actor *workspacesv1alpha1.Actor, config needy.Config) *corev
 	}
 }
 
-func upstreamCredentialsReference(actor *workspacesv1alpha1.Actor) *corev1.SecretKeySelector {
-	if actor.Spec.Upstream == nil {
+func upstreamCredentialsReference(upstream *workspacesv1alpha1.ActorUpstream) *corev1.SecretKeySelector {
+	if upstream == nil {
 		return nil
 	}
 
-	return actor.Spec.Upstream.CredentialsSecretRef
+	return upstream.CredentialsSecretRef
+}
+
+// resolveUpstream returns the proxy that the actor runner uses: the spec's,
+// or for a managed upstream the namespace's Mihomo, by its ClusterIP so the
+// runner needs no DNS. It waits until the managed upstream serves.
+func (r *ActorReconciler) resolveUpstream(ctx context.Context, actor *workspacesv1alpha1.Actor) (*workspacesv1alpha1.ActorUpstream, string, string, error) {
+	upstream := actor.Spec.Upstream
+	if upstream == nil || !upstream.Managed {
+		return upstream, "", "", nil
+	}
+	if r.Config.UpstreamImage == "" {
+		return nil, workspacesv1alpha1.ActorReasonNeedyNotConfigured, "The manager has no upstream image (--needy-upstream-image)", nil
+	}
+	key := types.NamespacedName{Namespace: actor.Namespace, Name: needy.UpstreamName}
+	var deployment appsv1.Deployment
+	err := r.Get(ctx, key, &deployment)
+	if apierrors.IsNotFound(err) || (err == nil && deployment.Status.AvailableReplicas == 0) {
+		return nil, workspacesv1alpha1.ActorReasonWaitingForUpstream, "Waiting for the namespace's upstream proxy", nil
+	}
+	if err != nil {
+		return nil, "", "", err
+	}
+	var service corev1.Service
+	if err := r.Get(ctx, key, &service); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, workspacesv1alpha1.ActorReasonWaitingForUpstream, "Waiting for the namespace's upstream proxy", nil
+		}
+		return nil, "", "", err
+	}
+	if service.Spec.ClusterIP == "" || service.Spec.ClusterIP == corev1.ClusterIPNone {
+		return nil, workspacesv1alpha1.ActorReasonWaitingForUpstream, "The upstream proxy Service has no ClusterIP", nil
+	}
+
+	return &workspacesv1alpha1.ActorUpstream{
+		URL: fmt.Sprintf("socks5h://%s:%d", service.Spec.ClusterIP, needy.UpstreamPort),
+		CredentialsSecretRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: needy.UpstreamCredentialsSecretName},
+			Key:                  actorUpstreamCredentialsFile,
+		},
+		PodSelector: &metav1.LabelSelector{MatchLabels: needyUpstreamSelector()},
+	}, "", "", nil
 }
 
 // ensureUpstreamPolicy admits the actor runner Pod to its proxy before the
 // Pod starts. The Actor owns the policy.
-func (r *ActorReconciler) ensureUpstreamPolicy(ctx context.Context, actor *workspacesv1alpha1.Actor) error {
-	if actor.Spec.Upstream == nil {
+func (r *ActorReconciler) ensureUpstreamPolicy(ctx context.Context, actor *workspacesv1alpha1.Actor, upstream *workspacesv1alpha1.ActorUpstream) error {
+	if upstream == nil {
 		return nil
 	}
-	desired, err := actorUpstreamPolicy(actor)
+	desired, err := actorUpstreamPolicy(actor, upstream)
 	if err != nil || desired == nil {
 		return err
 	}
@@ -823,7 +871,7 @@ func (r *ActorReconciler) now() time.Time {
 }
 
 // waitingActors requeues the namespace's Actors that have not started, when a
-// Workspace or the daemon's Deployment changes.
+// Workspace, the daemon's Deployment, or the upstream's Deployment changes.
 func (r *ActorReconciler) waitingActors(ctx context.Context, object client.Object) []reconcile.Request {
 	var actors workspacesv1alpha1.ActorList
 	if err := r.List(ctx, &actors, client.InNamespace(object.GetNamespace())); err != nil {
@@ -842,7 +890,7 @@ func (r *ActorReconciler) waitingActors(ctx context.Context, object client.Objec
 // SetupWithManager sets up the controller with the Manager.
 func (r *ActorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	daemonDeployment := builder.WithPredicates(predicate.NewPredicateFuncs(func(object client.Object) bool {
-		return object.GetName() == needy.DaemonName
+		return object.GetName() == needy.DaemonName || object.GetName() == needy.UpstreamName
 	}))
 
 	return ctrl.NewControllerManagedBy(mgr).

@@ -23,6 +23,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -69,29 +70,22 @@ func TestNeedyPoliciesKeepActorsOutOfTheCluster(t *testing.T) {
 	assert.Equal(t, int32(needy.ControlPort), daemonPolicy.Spec.Ingress[0].Ports[0].Port.IntVal)
 }
 
-func upstreamActor(upstream *workspacesv1alpha1.ActorUpstream) *workspacesv1alpha1.Actor {
-	actor := testActor()
-	actor.Spec.Upstream = upstream
-
-	return actor
-}
-
 func TestActorUpstreamPolicy(t *testing.T) {
-	selected, err := actorUpstreamPolicy(upstreamActor(&workspacesv1alpha1.ActorUpstream{
+	selected, err := actorUpstreamPolicy(testActor(), &workspacesv1alpha1.ActorUpstream{
 		URL:         "socks5h://proxy:1080",
 		PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "proxy"}},
-	}))
+	})
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{needy.ActorLabel: testActorName}, selected.Spec.PodSelector.MatchLabels)
 	assert.Equal(t, []networkingv1.PolicyType{networkingv1.PolicyTypeEgress}, selected.Spec.PolicyTypes)
 	assert.Equal(t, map[string]string{"app": "proxy"}, selected.Spec.Egress[0].To[0].PodSelector.MatchLabels)
 	assert.Equal(t, int32(1080), selected.Spec.Egress[0].Ports[0].Port.IntVal)
 
-	address, err := actorUpstreamPolicy(upstreamActor(&workspacesv1alpha1.ActorUpstream{URL: "socks5h://203.0.113.7:1081"}))
+	address, err := actorUpstreamPolicy(testActor(), &workspacesv1alpha1.ActorUpstream{URL: "socks5h://203.0.113.7:1081"})
 	require.NoError(t, err)
 	assert.Equal(t, "203.0.113.7/32", address.Spec.Egress[0].To[0].IPBlock.CIDR)
 
-	external, err := actorUpstreamPolicy(upstreamActor(&workspacesv1alpha1.ActorUpstream{URL: "socks5h://proxy.example.com:1080"}))
+	external, err := actorUpstreamPolicy(testActor(), &workspacesv1alpha1.ActorUpstream{URL: "socks5h://proxy.example.com:1080"})
 	require.NoError(t, err)
 	assert.Nil(t, external, "a proxy on the internet is reachable under the actor policy")
 }
@@ -133,4 +127,93 @@ func TestActorRunsThroughItsUpstream(t *testing.T) {
 	require.NoError(t, harness.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: testActorName + "-needy-upstream"}, &policy))
 	assert.Equal(t, "10.1.2.3/32", policy.Spec.Egress[0].To[0].IPBlock.CIDR)
 	assert.Equal(t, testActorName, policy.OwnerReferences[0].Name)
+}
+
+const testUpstreamImage = "example.com/mihomo:1"
+
+func managedUpstreamActor() *workspacesv1alpha1.Actor {
+	actor := testActor()
+	actor.Spec.Upstream = &workspacesv1alpha1.ActorUpstream{Managed: true}
+
+	return actor
+}
+
+func TestNeedyRunsTheManagedUpstreamOnlyWhileUsed(t *testing.T) {
+	config := needyTestConfig()
+	config.UpstreamImage = testUpstreamImage
+	config.GatewayBlockCIDRs = []string{testClusterRange}
+	harness := newNeedyHarness(t, config, executorWorkspace())
+	harness.reconcile()
+	assert.Error(t, harness.get(needy.UpstreamName, &appsv1.Deployment{}), "nothing is created before an Actor uses it")
+
+	require.NoError(t, harness.client.Create(context.Background(), managedUpstreamActor()))
+	harness.reconcile()
+	var deployment appsv1.Deployment
+	require.NoError(t, harness.get(needy.UpstreamName, &deployment))
+	assert.Equal(t, int32(1), *deployment.Spec.Replicas)
+	spec := deployment.Spec.Template.Spec
+	container := spec.Containers[0]
+	assert.Equal(t, testUpstreamImage, container.Image)
+	assert.True(t, *container.SecurityContext.ReadOnlyRootFilesystem)
+	assert.False(t, *spec.AutomountServiceAccountToken)
+	require.NotNil(t, container.ReadinessProbe.Exec, "a TCP probe from the node may be refused by the upstream's policy")
+
+	var credentials corev1.Secret
+	require.NoError(t, harness.get(needy.UpstreamCredentialsSecretName, &credentials))
+	line := string(credentials.Data["credentials"])
+	assert.True(t, strings.HasPrefix(line, needy.UpstreamActorUser+":"))
+	var config2 corev1.Secret
+	require.NoError(t, harness.get(needy.UpstreamConfigSecretName, &config2))
+	assert.Contains(t, string(config2.Data[needy.UpstreamConfigKey]), strings.TrimPrefix(line, needy.UpstreamActorUser+":"))
+
+	var policy networkingv1.NetworkPolicy
+	require.NoError(t, harness.get(needy.UpstreamName, &policy))
+	assert.Equal(t, needy.ComponentActor, policy.Spec.Ingress[0].From[0].PodSelector.MatchLabels[needy.ComponentLabel])
+	except := policy.Spec.Egress[0].To[0].IPBlock.Except
+	assert.Contains(t, except, testClusterRange)
+	assert.Contains(t, except, "169.254.0.0/16")
+
+	// The password is stable.
+	harness.reconcile()
+	require.NoError(t, harness.get(needy.UpstreamCredentialsSecretName, &credentials))
+	assert.Equal(t, line, string(credentials.Data["credentials"]))
+
+	var actor workspacesv1alpha1.Actor
+	require.NoError(t, harness.get(testActorName, &actor))
+	actor.Status.Phase = workspacesv1alpha1.ActorPhaseSucceeded
+	require.NoError(t, harness.client.Update(context.Background(), &actor))
+	harness.reconcile()
+	require.NoError(t, harness.get(needy.UpstreamName, &deployment))
+	assert.Equal(t, int32(0), *deployment.Spec.Replicas)
+}
+
+func TestActorUsesTheManagedUpstreamByClusterIP(t *testing.T) {
+	upstreamDeployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: needy.UpstreamName, Namespace: testNamespace},
+	}
+	upstreamService := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: needy.UpstreamName, Namespace: testNamespace},
+		Spec:       corev1.ServiceSpec{ClusterIP: "10.96.7.7"},
+	}
+	harness := newActorHarness(t, executorWorkspace(), daemonClientSecret(), availableDaemon(), upstreamDeployment, upstreamService)
+	harness.reconciler.Config.UpstreamImage = testUpstreamImage
+	actor := harness.actor()
+	actor.Spec.Upstream = &workspacesv1alpha1.ActorUpstream{Managed: true}
+	require.NoError(t, harness.client.Update(context.Background(), actor))
+
+	harness.reconcile()
+	actor = harness.actor()
+	assert.Equal(t, workspacesv1alpha1.ActorReasonWaitingForUpstream, actor.Status.Conditions[0].Reason)
+	assert.Empty(t, harness.daemon.created)
+
+	upstreamDeployment.Status.AvailableReplicas = 1
+	require.NoError(t, harness.client.Status().Update(context.Background(), upstreamDeployment))
+	harness.reconcile()
+	command := strings.Join(harness.pod().Spec.Containers[0].Command, " ")
+	assert.Contains(t, command, "'--gateway-upstream' 'socks5h://10.96.7.7:1080'")
+	assert.Contains(t, command, "'--gateway-upstream-credentials-file' '/etc/needy/upstream/credentials'")
+	var policy networkingv1.NetworkPolicy
+	require.NoError(t, harness.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: testActorName + "-needy-upstream"}, &policy))
+	assert.Equal(t, needyUpstreamSelector(), policy.Spec.Egress[0].To[0].PodSelector.MatchLabels)
+	assert.Len(t, harness.daemon.created, 1)
 }

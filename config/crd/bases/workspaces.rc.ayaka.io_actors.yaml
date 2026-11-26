@@ -266,6 +266,11 @@ spec:
                     - key
                     type: object
                     x-kubernetes-map-type: atomic
+                  managed:
+                    description: |-
+                      managed uses the namespace's proxy that the manager runs. It resolves
+                      names itself and refuses private, cluster, and metadata addresses.
+                    type: boolean
                   podSelector:
                     description: |-
                       podSelector selects the proxy Pods in the Actor's namespace, which the
@@ -316,13 +321,18 @@ spec:
                     type: object
                     x-kubernetes-map-type: atomic
                   url:
-                    description: url is socks5h://HOST:PORT or socks5://HOST:PORT.
+                    description: |-
+                      url is socks5h://HOST:PORT or socks5://HOST:PORT of a proxy that you
+                      run. With socks5h the proxy resolves names, so it must itself refuse
+                      private, cluster, and metadata addresses.
                     maxLength: 255
                     pattern: ^socks5h?://[^/@\s]+:[0-9]{1,5}$
                     type: string
-                required:
-                - url
                 type: object
+                x-kubernetes-validations:
+                - message: set either managed or url
+                  rule: 'has(self.managed) && self.managed ? !has(self.url) && !has(self.credentialsSecretRef)
+                    && !has(self.podSelector) : has(self.url)'
             required:
             - profile
             type: object

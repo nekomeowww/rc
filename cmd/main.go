@@ -88,6 +88,7 @@ func main() {
 	var needyDaemonStorageClass string
 	var needyGatewayBlockCIDRs string
 	var needyControllerNamespace string
+	var needyUpstreamImage string
 
 	var secureMetrics bool
 	var enableHTTP2 bool
@@ -129,6 +130,9 @@ func main() {
 			"which loses run history and paired clients when the daemon restarts.")
 	flag.StringVar(&needyGatewayBlockCIDRs, "needy-gateway-block-cidrs", "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
 		"Address ranges the needy actor gateway refuses, separated by commas: the cluster's Pod, Service, and node ranges.")
+	flag.StringVar(&needyUpstreamImage, "needy-upstream-image", "",
+		"The Mihomo image of each namespace's managed upstream proxy, for Actors with spec.upstream.managed. "+
+			"Empty disables managed upstreams.")
 	flag.StringVar(&needyControllerNamespace, "needy-controller-namespace", os.Getenv("POD_NAMESPACE"),
 		"The manager's namespace, whose manager Pods each needy daemon's NetworkPolicy admits. "+
 			"Defaults to POD_NAMESPACE.")
@@ -257,6 +261,7 @@ func main() {
 		os.Exit(1)
 	}
 	needyConfig.ControllerNamespace = needyControllerNamespace
+	needyConfig.UpstreamImage = needyUpstreamImage
 
 	if err := (&controller.AgentCredentialReconciler{
 		Client: mgr.GetClient(),

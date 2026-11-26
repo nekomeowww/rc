@@ -91,13 +91,25 @@ policy to host traffic refuses it under the daemon's policy.
 `spec.upstream` sends an Actor's traffic through a SOCKS5 proxy. The runner
 refuses a connection when the proxy fails instead of dialing directly. The
 credentials come from a Secret that is mounted readable only by the Pod's
-group. A proxy inside the cluster is reached through `podSelector`, which
-adds a policy for that Actor alone. With `socks5h` the proxy resolves names,
-so it must refuse private, cluster, and metadata addresses itself. The actor
-Pod keeps its internet egress: the runner downloads the base VM image when
-it starts.
+group. The actor Pod keeps its internet egress: the runner downloads the
+base VM image when it starts.
 
+With `managed: true` the Actor uses the namespace's managed upstream, a
+Mihomo SOCKS5 proxy that the manager runs while an Actor uses it. The runner
+reaches it by its ClusterIP with `socks5h`, so the proxy resolves names. Its
+rules check the address that a name resolves to against the cluster's
+ranges, the special-purpose ranges, and the metadata range, and refuse a
+name that does not resolve. Mihomo matches one resolved address but dials
+every address of a name, so its own NetworkPolicy refuses the same ranges.
+With `url`, the proxy is the user's and must refuse those addresses itself;
+a proxy inside the cluster is reached through `podSelector`, which adds a
+policy for that Actor alone.
 
+A refused HTTPS connection through Mihomo is not a `net.error` in the trace:
+Mihomo accepts the SOCKS request before it applies its rules, so the actor
+sees its tunnel close. The connection still reaches nothing.
+
+### Configuration
 
 needy is off until the manager has `--needy-image`. A KVM pool is described by
 its extended resource, node selector, tolerations, and the group that owns

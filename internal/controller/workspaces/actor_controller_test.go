@@ -211,7 +211,7 @@ func newActorHarness(t *testing.T, objects ...client.Object) *actorHarness {
 	scheme := needyTestScheme(t)
 	objects = append(objects, testActor())
 	kube := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&workspacesv1alpha1.Actor{}, &corev1.Pod{}).
+		WithStatusSubresource(&workspacesv1alpha1.Actor{}, &corev1.Pod{}, &appsv1.Deployment{}).
 		WithObjects(objects...).Build()
 	harness := &actorHarness{
 		t:      t,

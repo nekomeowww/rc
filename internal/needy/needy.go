@@ -96,6 +96,9 @@ type Config struct {
 	// Service, and node ranges. The NetworkPolicies exclude them from the
 	// internet too.
 	GatewayBlockCIDRs []string
+	// UpstreamImage is the Mihomo image of the managed upstream. Empty
+	// disables managed upstreams.
+	UpstreamImage string
 	// ControllerNamespace is the manager's namespace, whose manager Pods may
 	// reach each daemon. Empty admits no manager Pod, which suits a manager
 	// outside the cluster that reaches the daemon through a port-forward.

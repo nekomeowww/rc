@@ -95,10 +95,11 @@ func (r *NeedyReconciler) Reconcile(ctx context.Context, request ctrl.Request) (
 		return ctrl.Result{}, nil
 	}
 	namespace := request.Namespace
-	workspaces, live, err := r.needyUsers(ctx, namespace)
+	use, err := r.needyUsers(ctx, namespace)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	workspaces, live := use.workspaces, use.live
 	var deployment appsv1.Deployment
 	err = r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: needy.DaemonName}, &deployment)
 	if apierrors.IsNotFound(err) && len(workspaces) == 0 && !live {
@@ -141,13 +142,48 @@ func (r *NeedyReconciler) Reconcile(ctx context.Context, request ctrl.Request) (
 	if err := r.ensureNetworkPolicies(ctx, namespace); err != nil {
 		return ctrl.Result{}, err
 	}
+	if err := r.ensureUpstream(ctx, namespace, use.upstream); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	return ctrl.Result{}, nil
 }
 
 // needyUsers returns the namespace's executor Workspaces and whether any
 // Actor still needs the daemon.
-func (r *NeedyReconciler) needyUsers(ctx context.Context, namespace string) ([]workspacesv1alpha1.Workspace, bool, error) {
+// needyUse is what a namespace needs from needy.
+type needyUse struct {
+	// workspaces serve as executors.
+	workspaces []workspacesv1alpha1.Workspace
+	// live is true while an Actor needs the daemon.
+	live bool
+	// upstream is true while an Actor needs the managed upstream.
+	upstream bool
+}
+
+func (r *NeedyReconciler) needyUsers(ctx context.Context, namespace string) (needyUse, error) {
+	workspaces, live, err := r.needyExecutorsAndActors(ctx, namespace)
+	if err != nil {
+		return needyUse{}, err
+	}
+	use := needyUse{
+		workspaces: workspaces,
+		live:       live,
+	}
+	var actors workspacesv1alpha1.ActorList
+	if err := r.List(ctx, &actors, client.InNamespace(namespace)); err != nil {
+		return needyUse{}, fmt.Errorf("list Actors: %w", err)
+	}
+	for _, actor := range actors.Items {
+		if actor.Spec.Upstream != nil && actor.Spec.Upstream.Managed && !actor.Status.Phase.IsTerminal() {
+			use.upstream = true
+		}
+	}
+
+	return use, nil
+}
+
+func (r *NeedyReconciler) needyExecutorsAndActors(ctx context.Context, namespace string) ([]workspacesv1alpha1.Workspace, bool, error) {
 	var workspaceList workspacesv1alpha1.WorkspaceList
 	if err := r.List(ctx, &workspaceList, client.InNamespace(namespace)); err != nil {
 		return nil, false, fmt.Errorf("list Workspaces: %w", err)
@@ -311,7 +347,7 @@ func (r *NeedyReconciler) ensureDaemon(ctx context.Context, namespace string, re
 func needyDaemonSelector() map[string]string {
 	return map[string]string{
 		needy.ComponentLabel:         needy.ComponentDaemon,
-		"app.kubernetes.io/name":     needyAppName,
+		appNameLabel:                 needyAppName,
 		"app.kubernetes.io/instance": needy.DaemonName,
 	}
 }

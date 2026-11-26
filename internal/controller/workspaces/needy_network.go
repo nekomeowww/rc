@@ -165,8 +165,7 @@ func actorUpstreamPolicyName(actor *workspacesv1alpha1.Actor) string {
 // actorUpstreamPolicy admits one actor runner Pod to its proxy: the selected
 // Pods, or the URL's address when it is an IP address. A proxy named by a
 // host outside the cluster is reachable through needyActorPolicy already.
-func actorUpstreamPolicy(actor *workspacesv1alpha1.Actor) (*networkingv1.NetworkPolicy, error) {
-	upstream := actor.Spec.Upstream
+func actorUpstreamPolicy(actor *workspacesv1alpha1.Actor, upstream *workspacesv1alpha1.ActorUpstream) (*networkingv1.NetworkPolicy, error) {
 	parsed, err := url.Parse(upstream.URL)
 	if err != nil {
 		return nil, fmt.Errorf("parse upstream URL: %w", err)

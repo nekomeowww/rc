@@ -19,6 +19,7 @@ package needy
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"slices"
 	"strings"
 	"testing"
 
@@ -211,4 +212,51 @@ func TestParseKVMPlacement(t *testing.T) {
 	}, tolerations)
 	_, err = ParseTolerations("no-effect")
 	require.Error(t, err)
+}
+
+func TestUpstreamConfigRefusesTheClusterAfterResolving(t *testing.T) {
+	data, err := UpstreamConfig("secret", []string{"10.96.0.0/12", "10.0.0.0/8"})
+	require.NoError(t, err)
+	var config struct {
+		Listeners []struct {
+			Port  int `json:"port"`
+			Users []struct {
+				Username string `json:"username"`
+				Password string `json:"password"`
+			} `json:"users"`
+		} `json:"listeners"`
+		DNS struct {
+			Nameserver []string `json:"nameserver"`
+		} `json:"dns"`
+		Rules []string `json:"rules"`
+	}
+	require.NoError(t, yaml.Unmarshal(data, &config))
+	require.Len(t, config.Listeners, 1)
+	assert.Equal(t, UpstreamPort, config.Listeners[0].Port)
+	assert.Equal(t, UpstreamActorUser, config.Listeners[0].Users[0].Username)
+	assert.Equal(t, "secret", config.Listeners[0].Users[0].Password)
+	assert.NotEmpty(t, config.DNS.Nameserver)
+
+	rules := config.Rules
+	assert.Equal(t, "IP-CIDR,10.96.0.0/12,REJECT", rules[0], "the cluster's ranges come first")
+	assert.Equal(t, 1, countOf(rules, "IP-CIDR,10.0.0.0/8,REJECT"), "a cluster range that is also reserved appears once")
+	assert.Contains(t, rules, "IP-CIDR,169.254.0.0/16,REJECT")
+	for _, rule := range rules {
+		assert.NotContains(t, rule, "no-resolve", "the address a name resolves to must be checked")
+	}
+	unresolved := slices.Index(rules, "NOT,((IP-CIDR,0.0.0.0/0)),REJECT")
+	require.Positive(t, unresolved, "a name that does not resolve must not reach DIRECT")
+	assert.Equal(t, "MATCH,DIRECT", rules[len(rules)-1])
+	assert.Less(t, unresolved, len(rules)-1)
+}
+
+func countOf(values []string, value string) int {
+	count := 0
+	for _, candidate := range values {
+		if candidate == value {
+			count++
+		}
+	}
+
+	return count
 }

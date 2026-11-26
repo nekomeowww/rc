@@ -20,6 +20,10 @@ import (
 // into every container that runs rc-kube.
 const RCKubeDirectory = "/opt/rc/bin"
 
+// NeedyDirectory holds the needy that the manager installs into a Linux
+// runtime for a needy executor service.
+const NeedyDirectory = "/opt/needy/bin"
+
 // RCKubeExecutable is the injected rc-kube in a Linux runtime Pod.
 const RCKubeExecutable = RCKubeDirectory + "/" + runtimeContainerName
 

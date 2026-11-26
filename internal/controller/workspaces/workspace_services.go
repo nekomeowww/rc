@@ -29,9 +29,46 @@ import (
 
 	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
 	processruntime "github.com/nekomeowww/rc/internal/execution"
+	"github.com/nekomeowww/rc/internal/rcplatform"
+	"github.com/nekomeowww/rc/pkg/needy"
 )
 
-const reasonInvalidServiceEnvironment = "InvalidServiceEnvironment"
+const (
+	reasonInvalidServiceEnvironment = "InvalidServiceEnvironment"
+	reasonNeedyNotConfigured        = "NeedyNotConfigured"
+	// needyExecutorServiceName is the service that runs the needy executor
+	// runner of spec.needy.executor.
+	needyExecutorServiceName = "needy-executor"
+	// needyCredentialVariable carries the executor runner's credential.
+	needyCredentialVariable = "NEEDY_RUNNER_CREDENTIAL"
+)
+
+// needyExecutorService runs the Workspace's needy executor runner. It dials
+// the namespace's daemon and reports exec traffic as runtime activity, so a
+// Workspace that executes an Actor's commands is not suspended as idle.
+func needyExecutorService(workspace *workspacesv1alpha1.Workspace) workspacesv1alpha1.WorkspaceService {
+	return workspacesv1alpha1.WorkspaceService{
+		Name: needyExecutorServiceName,
+		Command: needy.ExecutorRunnerCommand(needy.ExecutorRunnerOptions{
+			Executable:         rcplatform.NeedyDirectory + "/needy",
+			Name:               needyWorkspaceRunnerName(workspace.Name),
+			Address:            "tcp://" + needyDaemonAddress(workspace.Namespace),
+			CredentialVariable: needyCredentialVariable,
+			ActivityHook:       rcplatform.RCKubeDirectory + "/rc-kube process touch",
+		}),
+		Env: []corev1.EnvVar{
+			{
+				Name: needyCredentialVariable,
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: needyExecutorSecretName(workspace.Name)},
+						Key:                  needyCredentialKey,
+					},
+				},
+			},
+		},
+	}
+}
 
 // compileWorkspaceServices turns spec.services into the rc-kube wire form.
 // Each service receives the Workspace env, which a WorkspaceExec also receives
@@ -41,12 +78,21 @@ const reasonInvalidServiceEnvironment = "InvalidServiceEnvironment"
 // spec. The result is deterministic, because it is part of the runtime
 // topology hash.
 func compileWorkspaceServices(workspace *workspacesv1alpha1.Workspace) ([]processruntime.Service, []corev1.EnvVar, string, string) {
-	if len(workspace.Spec.Services) == 0 {
+	specified := workspace.Spec.Services
+	if workspace.Spec.Needy != nil && workspace.Spec.Needy.Executor != nil {
+		for _, service := range specified {
+			if service.Name == needyExecutorServiceName {
+				return nil, nil, reasonInvalidServiceEnvironment, fmt.Sprintf("Service name %s is reserved for spec.needy.executor", needyExecutorServiceName)
+			}
+		}
+		specified = append(slices.Clone(specified), needyExecutorService(workspace))
+	}
+	if len(specified) == 0 {
 		return nil, nil, "", ""
 	}
-	services := make([]processruntime.Service, 0, len(workspace.Spec.Services))
+	services := make([]processruntime.Service, 0, len(specified))
 	var containerEnvironment []corev1.EnvVar
-	for _, service := range workspace.Spec.Services {
+	for _, service := range specified {
 		variables := make(map[string]corev1.EnvVar, len(workspace.Spec.Env)+len(service.Env))
 		for _, variable := range workspace.Spec.Env {
 			variables[variable.Name] = variable
@@ -99,6 +145,12 @@ func compileWorkspaceServices(workspace *workspacesv1alpha1.Workspace) ([]proces
 // Secret and ConfigMap exists, so a missing one is reported on the Workspace
 // rather than as a runtime container that cannot start.
 func (r *WorkspaceReconciler) resolveWorkspaceServices(ctx context.Context, workspace *workspacesv1alpha1.Workspace, resolved *resolvedWorkspace) (string, string, error) {
+	if workspace.Spec.Needy != nil && workspace.Spec.Needy.Executor != nil {
+		if r.NeedyImage == "" {
+			return reasonNeedyNotConfigured, "The manager has no needy image (--needy-image)", nil
+		}
+		resolved.needyImage = r.NeedyImage
+	}
 	services, environment, reason, message := compileWorkspaceServices(workspace)
 	if reason != "" {
 		return reason, message, nil

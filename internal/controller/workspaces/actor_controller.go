@@ -26,6 +26,7 @@ import (
 	"al.essio.dev/pkg/shellescape"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -57,6 +58,10 @@ const (
 	// actorCredentialDirectory holds the runner credential. It is not under
 	// /var/run, which is /run in many images, where needy keeps its sockets.
 	actorCredentialDirectory = "/etc/needy/credential"
+	// actorProxyDirectory holds the proxy's USERNAME:PASSWORD.
+	actorProxyDirectory       = "/etc/needy/proxy"
+	actorProxyCredentialsFile = "credentials"
+	actorProxyVolume          = "proxy"
 	// actorStartGrace covers the runner Pod's start, the base image download,
 	// and image preparation before the run can start.
 	actorStartGrace = 15 * time.Minute
@@ -99,6 +104,7 @@ type ActorReconciler struct {
 // +kubebuilder:rbac:groups=workspaces.rc.ayaka.io,resources=workspaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods;secrets;configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile moves an Actor through Pending, Starting, Running, and one of the
 // terminal phases.
@@ -172,7 +178,11 @@ func (r *ActorReconciler) start(ctx context.Context, actor *workspacesv1alpha1.A
 	}
 	// Known from here on, so that a failure below still revokes it.
 	actor.Status.RunnerName = runner
-	pod, err := r.ensureRunnerPod(ctx, actor, runner)
+	proxy := actor.Spec.Proxy
+	if err := r.ensureProxyPolicy(ctx, actor, proxy); err != nil {
+		return r.fail(ctx, actor, workspacesv1alpha1.ActorReasonInvalidProfile, err.Error())
+	}
+	pod, err := r.ensureRunnerPod(ctx, actor, runner, proxy)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -550,7 +560,7 @@ func (r *ActorReconciler) ensureRunnerCredential(ctx context.Context, actor *wor
 	return true, nil
 }
 
-func (r *ActorReconciler) ensureRunnerPod(ctx context.Context, actor *workspacesv1alpha1.Actor, runner string) (*corev1.Pod, error) {
+func (r *ActorReconciler) ensureRunnerPod(ctx context.Context, actor *workspacesv1alpha1.Actor, runner string, proxy *workspacesv1alpha1.ActorProxy) (*corev1.Pod, error) {
 	var pod corev1.Pod
 	err := r.Get(ctx, types.NamespacedName{Namespace: actor.Namespace, Name: actorPodName(actor)}, &pod)
 	if err == nil {
@@ -559,7 +569,7 @@ func (r *ActorReconciler) ensureRunnerPod(ctx context.Context, actor *workspaces
 	if !apierrors.IsNotFound(err) {
 		return nil, err
 	}
-	desired := actorRunnerPod(actor, r.Config)
+	desired := actorRunnerPod(actor, r.Config, proxy)
 	if err := controllerutil.SetControllerReference(actor, desired, r.Scheme); err != nil {
 		return nil, err
 	}
@@ -574,13 +584,20 @@ func (r *ActorReconciler) ensureRunnerPod(ctx context.Context, actor *workspaces
 // actorRunnerPod runs the ephemeral actor runner. The runner never listens:
 // it dials the daemon's control port and gateway, and the VM has no network
 // interface. The credential stays in the runner and never enters the VM.
-func actorRunnerPod(actor *workspacesv1alpha1.Actor, config NeedyConfig) *corev1.Pod {
-	serve := needy.ActorRunnerCommand(needy.ActorRunnerOptions{
+func actorRunnerPod(actor *workspacesv1alpha1.Actor, config NeedyConfig, proxy *workspacesv1alpha1.ActorProxy) *corev1.Pod {
+	options := needy.ActorRunnerOptions{
 		Address:        "tcp://" + needyDaemonAddress(actor.Namespace),
 		Gateway:        "tcp://" + needyGatewayAddress(actor.Namespace),
 		CredentialFile: actorCredentialDirectory + "/" + needyCredentialKey,
 		WorkDirectory:  needyDataDirectory + "/vm",
-	})
+	}
+	if proxy != nil {
+		options.Upstream = proxy.URL
+		if proxy.CredentialsSecretRef != nil {
+			options.UpstreamCredentialsFile = actorProxyDirectory + "/" + actorProxyCredentialsFile
+		}
+	}
+	serve := needy.ActorRunnerCommand(options)
 	resources := *actor.Spec.Resources.DeepCopy()
 	if resources.Requests == nil {
 		resources.Requests = corev1.ResourceList{
@@ -648,6 +665,28 @@ func actorRunnerPod(actor *workspacesv1alpha1.Actor, config NeedyConfig) *corev1
 			},
 		},
 	}
+	if reference := proxyCredentialsReference(proxy); reference != nil {
+		// needy refuses a credentials file that other users can read; 0440
+		// with the Pod's fsGroup is the narrowest a Secret volume gives.
+		spec.Volumes = append(spec.Volumes, corev1.Volume{
+			Name: actorProxyVolume,
+			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: reference.Name,
+				Items: []corev1.KeyToPath{
+					{
+						Key:  reference.Key,
+						Path: actorProxyCredentialsFile,
+					},
+				},
+				DefaultMode: new(int32(0o440)),
+			}},
+		})
+		spec.Containers[0].VolumeMounts = append(spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      actorProxyVolume,
+			MountPath: actorProxyDirectory,
+			ReadOnly:  true,
+		})
+	}
 	applyNeedyKVM(&spec, config)
 
 	return &corev1.Pod{
@@ -656,6 +695,7 @@ func actorRunnerPod(actor *workspacesv1alpha1.Actor, config NeedyConfig) *corev1
 			Name:      actorPodName(actor),
 			Labels: map[string]string{
 				workspacesv1alpha1.NeedyComponentLabel: needyComponentActor,
+				workspacesv1alpha1.NeedyActorLabel:     actor.Name,
 				appNameLabel:                           needyAppName,
 			},
 			// A node consolidation would end the run.
@@ -663,6 +703,37 @@ func actorRunnerPod(actor *workspacesv1alpha1.Actor, config NeedyConfig) *corev1
 		},
 		Spec: spec,
 	}
+}
+
+func proxyCredentialsReference(proxy *workspacesv1alpha1.ActorProxy) *corev1.SecretKeySelector {
+	if proxy == nil {
+		return nil
+	}
+
+	return proxy.CredentialsSecretRef
+}
+
+// ensureProxyPolicy admits the actor runner Pod to its proxy before the
+// Pod starts. The Actor owns the policy. Without the manager's
+// NetworkPolicies nothing restricts the Pod, and a policy for the proxy
+// alone would restrict it to the proxy.
+func (r *ActorReconciler) ensureProxyPolicy(ctx context.Context, actor *workspacesv1alpha1.Actor, proxy *workspacesv1alpha1.ActorProxy) error {
+	if proxy == nil || !r.Config.NetworkPolicies {
+		return nil
+	}
+	desired, err := actorProxyPolicy(actor, proxy)
+	if err != nil || desired == nil {
+		return err
+	}
+	policy := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: actor.Namespace, Name: desired.Name}}
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, policy, func() error {
+		policy.Labels = desired.Labels
+		policy.Spec = desired.Spec
+
+		return controllerutil.SetControllerReference(actor, policy, r.Scheme)
+	})
+
+	return err
 }
 
 func (r *ActorReconciler) dial(ctx context.Context, namespace string) (needy.Daemon, error) {

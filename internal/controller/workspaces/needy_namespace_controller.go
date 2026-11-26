@@ -96,6 +96,7 @@ const needyDaemonGrace = 10 * time.Minute
 
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;persistentvolumeclaims;secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile handles one namespace; the request name is always needyDaemonName.
 func (r *NeedyReconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.Result, error) {
@@ -146,6 +147,11 @@ func (r *NeedyReconciler) Reconcile(ctx context.Context, request ctrl.Request) (
 	}
 	if err := r.ensureService(ctx, namespace); err != nil {
 		return ctrl.Result{}, err
+	}
+	if r.Config.NetworkPolicies {
+		if err := r.ensureNetworkPolicies(ctx, namespace); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	if !use.liveUntil.IsZero() {
 		// Scale to zero once the last grace ends.

@@ -44,8 +44,16 @@ type NeedyConfig struct {
 	// records on every restart.
 	DaemonStorageClass string
 	// GatewayBlockCIDRs are ranges that the actor gateway refuses: the
-	// cluster's Pod, Service, and node ranges.
+	// cluster's Pod, Service, and node ranges. With NetworkPolicies, the
+	// policies exclude them from the internet too.
 	GatewayBlockCIDRs []string
+	// NetworkPolicies makes the manager keep NetworkPolicies for the daemon
+	// and the actor runners. It needs a CNI that enforces them.
+	NetworkPolicies bool
+	// ControllerNamespace is the manager's namespace, whose manager Pods may
+	// reach each daemon under NetworkPolicies. Empty admits no manager Pod,
+	// which suits a manager outside the cluster that uses a port-forward.
+	ControllerNamespace string
 }
 
 // IsEnabled reports whether the manager runs needy.

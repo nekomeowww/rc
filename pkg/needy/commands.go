@@ -80,12 +80,18 @@ type ActorRunnerOptions struct {
 	CredentialFile string
 	// WorkDirectory holds the VM's files.
 	WorkDirectory string
+	// Upstream sends the gateway's connections through a SOCKS5 proxy:
+	// socks5h://HOST:PORT or socks5://HOST:PORT. Empty dials directly.
+	Upstream string
+	// UpstreamCredentialsFile holds USERNAME:PASSWORD for Upstream. needy
+	// refuses a file that other users can read.
+	UpstreamCredentialsFile string
 }
 
 // ActorRunnerCommand is the argv of an ephemeral actor runner: it serves one
 // actor in a Firecracker VM and exits when that actor ends.
 func ActorRunnerCommand(options ActorRunnerOptions) []string {
-	return []string{
+	command := []string{
 		cliNeedy, cliRunner, cliServe,
 		cliAddress, options.Address,
 		"--credential-file", options.CredentialFile,
@@ -94,6 +100,14 @@ func ActorRunnerCommand(options ActorRunnerOptions) []string {
 		"--gateway", options.Gateway,
 		"--work-dir", options.WorkDirectory,
 	}
+	if options.Upstream != "" {
+		command = append(command, "--gateway-upstream", options.Upstream)
+		if options.UpstreamCredentialsFile != "" {
+			command = append(command, "--gateway-upstream-credentials-file", options.UpstreamCredentialsFile)
+		}
+	}
+
+	return command
 }
 
 // ExecutorRunnerOptions configures an executor runner.

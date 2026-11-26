@@ -32,8 +32,34 @@ const (
 	needyDaemonName = "needy-daemon"
 	// needyControlPort serves the daemon's gRPC API.
 	needyControlPort = 7400
+	// needyGatewayPort is the daemon's shared actor gateway.
+	needyGatewayPort = 7401
 	// needyCredentialKey is the credential in a runner Secret.
 	needyCredentialKey = "credential"
+	// needyFilesSecretName holds the daemon's static runners and clients
+	// files, which hold only hashes.
+	needyFilesSecretName = "needy-daemon-files"
+	// needyRunnersFileKey and needyClientsFileKey are the files in it.
+	needyRunnersFileKey = "runners.yaml"
+	needyClientsFileKey = "clients.yaml"
+	// needyClientSecretName holds the manager's admin client token; only the
+	// manager reads it.
+	needyClientSecretName = "needy-daemon-client"
+	// needyClientTokenKey is the token in it.
+	needyClientTokenKey = "token"
+	// needyControllerClientName is the manager's static client on every
+	// daemon; traces name it client:rc-controller.
+	needyControllerClientName = "rc-controller"
+	// needyStateClaimName is the daemon's state volume when a storage class
+	// is configured.
+	needyStateClaimName = "needy-daemon-state"
+)
+
+// Values of workspacesv1alpha1.NeedyComponentLabel.
+const (
+	needyComponentDaemon   = "daemon"
+	needyComponentClient   = "client"
+	needyComponentExecutor = "executor"
 )
 
 // needyDaemonAddress is the daemon's control address in a namespace.

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Generates the Go SDK in apis/sdk/go from apis/proto with the plugins that
+# `make proto` installs into bin/.
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+rm -rf apis/sdk/go/needy
+PATH="$root/bin:$PATH" "$root/bin/buf" generate --template buf.gen.yaml

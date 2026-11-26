@@ -1,0 +1,408 @@
+// EXPERIMENTAL / UNSTABLE
+syntax = "proto3";
+
+package needy.v1;
+
+import "needy/v1/process.proto";
+import "needy/v1/runner.proto";
+
+// GuestService is served to the supervisor inside an actor microVM over vsock.
+service GuestService {
+  rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
+  // Events observed inside the actor, such as identity probes.
+  rpc PushEvents(stream PushEventsRequest) returns (PushEventsResponse);
+  rpc ReportExit(ReportExitRequest) returns (ReportExitResponse);
+  // A tar archive of a copy-in mapping's host files.
+  rpc FetchFiles(FetchFilesRequest) returns (stream FetchFilesResponse);
+  // A tar archive for a mirror-out mapping; the first message names it.
+  rpc PushFiles(stream PushFilesRequest) returns (PushFilesResponse);
+  // A tar archive of the session's upper layer, streamed when a session
+  // that keeps it (`GuestSession.upper`) ends. Unlike `PushFiles` it is
+  // never held whole: a layer can be hundreds of megabytes.
+  rpc PushLayer(stream PushLayerRequest) returns (PushLayerResponse);
+  // What the daemon tells a running actor's init as it happens, on the one
+  // stream init holds for the actor's life; it ends with the run. Every
+  // daemon-to-init message is a case of `GuestServiceControlResponse`
+  // rather than another long-lived call.
+  rpc Control(GuestServiceControlRequest) returns (stream GuestServiceControlResponse);
+  // Outbound lifecycle, console, and reverse terminal control stream from a
+  // remote actor host bridge. At most one bridge may attach per run.
+  rpc Bridge(stream BridgeRequest) returns (stream BridgeResponse);
+  // Outbound stream opened by a remote actor host bridge for a single
+  // reverse terminal exec task announced on `Bridge`.
+  rpc TerminalTask(stream TerminalTaskRequest) returns (stream TerminalTaskResponse);
+  // One layer of the caller's run's snapshot (`BridgeAttached.layers`), as
+  // its canonical uncompressed OCI layer archive (a tar), for a remote actor
+  // runner to stack. Any digest the run's snapshot does not name is
+  // refused with `PERMISSION_DENIED`.
+  rpc FetchLayer(FetchLayerRequest) returns (stream FetchLayerResponse);
+}
+
+message GuestServiceControlRequest {}
+
+message GuestServiceControlResponse {
+  oneof message {
+    // The executable names the actor hands to the proxy from now on, as
+    // `GetConfigResponse.route_names`; `*` routes every exec. Sent first
+    // with the list as it is, then each time `needy chaos add` or `rm`
+    // changes it.
+    RouteList routes = 1;
+    // `run stop` asks the actor to end gracefully: init sends SIGTERM to
+    // the driving program's process group, SIGKILL after `grace_ms`, and
+    // once the program exited mirrors out and reports its exit as usual.
+    GracefulStop stop = 2;
+  }
+}
+
+message RouteList {
+  repeated string names = 1;
+}
+
+message GracefulStop {
+  // How long the driving program has after SIGTERM before SIGKILL.
+  int64 grace_ms = 1;
+}
+
+message GuestCopy {
+  // Mapping name in the profile.
+  string name = 1;
+  // Path inside the actor.
+  string path = 2;
+}
+
+// A sensor fault the guest applies itself.
+message GuestFault {
+  // Milliseconds after the driving program starts.
+  int64 at_ms = 1;
+  // Sensor reading to force, in millidegrees Celsius.
+  int32 temp_mc = 2;
+  // The fault's name in the profile, for its `fault.injected` event.
+  string name = 3;
+}
+
+message FetchFilesRequest {
+  string name = 1;
+}
+
+message FetchFilesResponse {
+  bytes data = 1;
+}
+
+message PushFilesRequest {
+  string name = 1;
+  bytes data = 2;
+}
+
+message PushFilesResponse {}
+
+message PushLayerRequest {
+  // The next part of the archive.
+  bytes data = 1;
+  // Set on the last message only. An upload whose stream ends without it
+  // is broken, whatever ended it, and the daemon keeps nothing of it: a
+  // guest whose read fails cannot end a stream as anything but whole.
+  bool last = 2;
+}
+
+message PushLayerResponse {}
+
+message FetchLayerRequest {
+  // `sha256:<64 hex digits>`, the layer's OCI DiffID.
+  string digest = 1;
+}
+
+message FetchLayerResponse {
+  // The next part of the archive. The digest of the whole is the
+  // requested one; the runner checks it.
+  bytes data = 1;
+}
+
+// One layer init stacks over the base. Its disk is found by the marker it
+// carries (`needy-layer` at the disk's root), not by attach order.
+message GuestLayer {
+  // `sha256:<64 hex digits>`, as the disk's marker names it.
+  string digest = 1;
+}
+
+// What happens to a session's upper layer, the writable tmpfs over its
+// layers.
+enum UpperLayer {
+  UPPER_LAYER_UNSPECIFIED = 0;
+  // Gone with the actor: a run's.
+  UPPER_LAYER_DISPOSABLE = 1;
+  // Archived and streamed with `PushLayer` when the session ends, after
+  // the driving program exits and before its exit is reported: a build
+  // step's or an edit session's.
+  UPPER_LAYER_KEPT = 2;
+}
+
+// The settings of the session an actor is: a run, a build step or an edit
+// session (provisional names). An unset session is a run's.
+//
+// NOTICE: the session's ending (commit or discard) is not a setting here.
+// The guest does the same for both: it streams a kept upper layer, and the
+// daemon commits it or discards it (a failed build step, an edit the user
+// throws away). A kept layer the daemon will discard is still streamed;
+// TODO(images): tell the guest the ending, on `Control`, if that transfer
+// shows up in an edit session's time.
+message GuestSession {
+  UpperLayer upper = 1;
+  // Off: init hands no exec to the proxy, whatever the route list says (a
+  // build step).
+  bool routing = 2;
+}
+
+message GuestUser {
+  string name = 1;
+  uint32 uid = 2;
+  uint32 gid = 3;
+}
+
+message GuestMount {
+  // Path inside the actor.
+  string target = 1;
+  string executor = 2;
+  // Path on the executor.
+  string source = 3;
+  bool writable = 4;
+  // Command that serves SFTP on stdin and stdout on the executor.
+  repeated string sftp_command = 5;
+}
+
+message GuestSensor {
+  string chip = 1;
+  int32 idle_mc = 2;
+}
+
+message GetConfigRequest {}
+
+message GetConfigResponse {
+  string run_id = 1;
+  GuestUser user = 2;
+  // Executable names or paths the kernel hands to the proxy.
+  repeated string route_names = 3;
+  string hostname = 4;
+  int64 uptime_offset_secs = 5;
+  repeated GuestMount mounts = 6;
+  repeated string command = 7;
+  map<string, string> env = 8;
+  string cwd = 9;
+  // Port on the host (CID 2) that serves the actor gateway.
+  uint32 gateway_port = 10;
+  repeated GuestSensor sensors = 11;
+  repeated GuestCopy copy_in = 12;
+  repeated GuestCopy mirror_out = 13;
+  repeated GuestFault sensor_faults = 14;
+  // Run the driving program on a terminal of this size and serve
+  // `ProcessService` for it on vsock port `process_port`; unset for none.
+  WindowSize tty = 15;
+  uint32 process_port = 16;
+  // Subscribe the first terminal client before starting the program.
+  bool wait_for_attach = 17;
+  // The user and group the daemon runs as. Where init binds its process
+  // service on a Unix socket the daemon connects to (a container actor's
+  // channels), it gives the socket to them, mode 0600.
+  uint32 daemon_uid = 18;
+  uint32 daemon_gid = 19;
+  // The layers init stacks over the base, lowest first: the root's
+  // layers, the needy layer, the built layers and the commit layer. Empty
+  // boots the base alone.
+  repeated GuestLayer layers = 20;
+  // The image's `PATH`: init writes it under `/run/needy`, and it goes
+  // after the trampolines and before the route stubs. Empty for none. It
+  // is kept out of `env`, whose `PATH` would replace the driving program's
+  // whole; a profile's `actor.env.PATH` replaces this one.
+  string image_path = 21;
+  GuestSession session = 22;
+  // Shell commands run in order as the run's user in `cwd` after setup and
+  // routing are enabled, before the driving program starts.
+  repeated string start_hooks = 23;
+  // Shell commands run in order as the run's user in `cwd` after the driving
+  // program exits (or on graceful stop), before mirror-out and sync merges.
+  repeated string stop_hooks = 24;
+  // Linux `/etc/machine-id` (32 lowercase hex digits) to write in the guest
+  // when the driver sets identity in the guest. Empty leaves `/etc/machine-id`
+  // untouched.
+  string machine_id = 25;
+}
+
+// An event observed inside the actor. The listener the guest calls is bound to
+// its run, so the event names none.
+message TraceEvent {
+  int64 time_ms = 2;
+  // The event kind, for example "fault.injected".
+  string kind = 3;
+  // The kind's payload: a JSON object whose schema is `needy_core::event`.
+  string payload = 5;
+  // The payload's schema version, `needy_core::event::SCHEMA_VERSION` of the
+  // guest's build. The daemon refuses a version it does not read.
+  uint32 version = 6;
+
+  reserved 1, 4;
+  reserved "session_id", "attrs";
+}
+
+message PushEventsRequest {
+  TraceEvent event = 1;
+}
+
+message PushEventsResponse {}
+
+message ReportExitRequest {
+  optional int32 code = 1;
+  string signal = 2;
+}
+
+message ReportExitResponse {}
+
+message BridgeRequest {
+  oneof payload {
+    // Must be the first message on the stream.
+    BridgeAttach attach = 1;
+    // Reported once the remote actor VM/process has booted (if not already
+    // populated in `attach`).
+    BridgeStarted started = 2;
+    // Console bytes read from the actor's serial console (`console.log`).
+    bytes console = 3;
+    // The actor VM/process exited.
+    BridgeExit exit = 4;
+    // Answer to a non-streaming terminal task (`ListProcesses`, `KillProcess`).
+    BridgeTaskResult task_result = 5;
+    // The actor's terminal process service answered and is ready for attach.
+    BridgeTerminalReady terminal_ready = 6;
+    // The layer disks the runner made of the run's snapshot, sent before
+    // the VM starts.
+    BridgePrepared prepared = 7;
+    // Trace events the runner's local actor gateway recorded, in the order
+    // it recorded them. Sent only when `BridgeAttached.local_gateway` is
+    // set. The daemon records them in the run's trace at their `time_ms`;
+    // their sequence numbers there are the order they arrive in.
+    BridgeEvents events = 8;
+    // The actor used its network since the last report: the runner's local
+    // gateway saw a request or tunnel. Coalesced by the runner, at most one
+    // per interval; the daemon advances the run's last activity.
+    BridgeActivity activity = 9;
+  }
+}
+
+message BridgeAttach {
+  uint32 pid = 1;
+  uint32 vcpus = 2;
+  uint32 mem_mib = 3;
+  string driver = 4;
+  string capture = 5;
+  // The runner can run the actor's gateway itself, next to the actor. A
+  // daemon that agrees sets `BridgeAttached.local_gateway`; an older runner
+  // leaves this unset, and its actor's network goes through the daemon's
+  // gateway.
+  bool local_gateway = 6;
+}
+
+message BridgeStarted {
+  uint32 pid = 1;
+  uint32 vcpus = 2;
+  uint32 mem_mib = 3;
+  string driver = 4;
+  string capture = 5;
+}
+
+message BridgeExit {
+  optional int32 code = 1;
+  string signal = 2;
+  string error = 3;
+}
+
+message BridgeTerminalReady {}
+
+message BridgeEvents {
+  // Each event's `version` is the runner build's schema version; the daemon
+  // refuses one it does not read.
+  repeated TraceEvent events = 1;
+}
+
+message BridgeActivity {}
+
+message BridgePrepared {
+  // The digests of the disks the runner attaches, lowest first, as their
+  // `needy-layer` markers name them: the snapshot's layers, or a flattened
+  // lower prefix's stack digest and the layers above it. The daemon serves
+  // them as `GetConfigResponse.layers`.
+  repeated string layer_disks = 1;
+}
+
+message BridgeTaskResult {
+  uint64 task_id = 1;
+  oneof result {
+    ListProcessesResponse list_processes = 2;
+    KillProcessResponse kill_process = 3;
+    TaskError error = 4;
+  }
+}
+
+message BridgeResponse {
+  oneof payload {
+    // Sent once after `BridgeAttach` is accepted: the run's profile and
+    // compiled recipe so a stateless bridge can boot the actor.
+    BridgeAttached attached = 1;
+    // Stop the actor VM/process (graceful SIGTERM then SIGKILL after grace_ms).
+    BridgeStop stop = 2;
+    // A terminal process-service task for the actor's driving program.
+    BridgeTerminalTask terminal_task = 3;
+  }
+}
+
+message BridgeAttached {
+  string run_id = 1;
+  string profile_yaml = 2;
+  string recipe_json = 3;
+  bool tty = 4;
+  // The run's snapshot: its layers' digests (`sha256:<hex>`, the OCI
+  // DiffID of the uncompressed canonical layer), lowest first, which the
+  // runner fetches with `FetchLayer`. Empty boots the base.
+  repeated string layers = 5;
+  // The digest of the base the snapshot was built on (`sha256:<hex>`);
+  // the runner refuses to stack the layers on another base. Empty when
+  // `layers` is.
+  string root = 6;
+  // The runner runs the actor's gateway (the runner asked with
+  // `BridgeAttach.local_gateway`): it enforces the profile's allowlist,
+  // services and network faults with the fields below, and sends what the
+  // gateway records as `BridgeEvents`. The daemon then serves no gateway
+  // for the run. Unset, the runner proxies the actor's gateway channel to
+  // the daemon's shared gateway listener, as before.
+  bool local_gateway = 7;
+  // CIDRs the gateway refuses to connect to, as the daemon's
+  // `--gateway-block-cidr` names them (`198.51.100.0/24`, `fd00::/8`).
+  repeated string gateway_blocked_cidrs = 8;
+  // When the run was created, in Unix milliseconds on the daemon's clock:
+  // the origin of the faults' `after` and `until` windows.
+  int64 created_ms = 9;
+}
+
+message BridgeStop {
+  int64 grace_ms = 1;
+}
+
+message BridgeTerminalTask {
+  uint64 id = 1;
+  oneof kind {
+    ListProcessesRequest list_processes = 2;
+    KillProcessRequest kill_process = 3;
+    BridgeExecTask exec = 4;
+  }
+}
+
+message BridgeExecTask {}
+
+message TerminalTaskRequest {
+  oneof payload {
+    // First message: identifies the announced `BridgeTerminalTask.id`.
+    uint64 task_id = 1;
+    ExecResponse exec = 2;
+    TaskError error = 3;
+  }
+}
+
+message TerminalTaskResponse {
+  ExecRequest exec = 1;
+}

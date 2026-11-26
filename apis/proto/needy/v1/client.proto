@@ -1,0 +1,108 @@
+// EXPERIMENTAL / UNSTABLE
+syntax = "proto3";
+
+package needy.v1;
+
+// ClientService pairs clients (the CLI on another machine, tools) with the
+// control plane and manages their tokens.
+//
+// A local operator or administrator client creates a pairing code with
+// server-granted runs or administrator access. `Pair` needs no bearer
+// token: the pairing code in the request authenticates it, and the response
+// carries the client's own token, which it then presents as its bearer
+// token. Every trace event a client causes names it as `client:NAME`.
+service ClientService {
+  // Inspect the authenticated caller without returning credentials.
+  rpc GetCaller(GetCallerRequest) returns (GetCallerResponse);
+  // Create a pairing code. Its secret is in the response only.
+  rpc CreatePairingCode(CreatePairingCodeRequest) returns (CreatePairingCodeResponse);
+  // Exchange a pairing code for a client token, once.
+  rpc Pair(PairRequest) returns (PairResponse);
+  // Every client, including revoked ones.
+  rpc ListClients(ListClientsRequest) returns (ListClientsResponse);
+  // Revoke a client's token. It stays listed as revoked.
+  rpc RevokeClient(RevokeClientRequest) returns (RevokeClientResponse);
+}
+
+message CreatePairingCodeRequest {
+  // Required, positive.
+  int64 ttl_ms = 1;
+  // The name of the client that pairs with it: a DNS label. Empty for a
+  // fresh `client-<code ID>` that no client, active or revoked, holds. The
+  // name of an active client re-pairs it: see
+  // `CreatePairingCodeResponse.replaces`.
+  string name = 2;
+  ClientAccess access = 3;
+}
+
+message CreatePairingCodeResponse {
+  // Public; names the code in logs.
+  string id = 1;
+  // The client's name once it pairs.
+  string name = 2;
+  int64 expires_at_ms = 3;
+  // The secret to hand to the client; not stored, not shown again.
+  string code = 4;
+  // The active client that holds `name` now. Pairing with this code
+  // replaces it and revokes its token. Unset for a name no active client
+  // holds.
+  Client replaces = 5;
+  ClientAccess access = 6;
+}
+
+message PairRequest {
+  string code = 1;
+}
+
+message PairResponse {
+  Client client = 1;
+  // The client's token, bound to the granted access. Not
+  // stored, not shown again.
+  string token = 2;
+}
+
+message Client {
+  // Public; names the client in `RevokeClient`.
+  string id = 1;
+  string name = 2;
+  int64 created_at_ms = 3;
+  // The last request with its token, to about a minute; 0 before any.
+  int64 last_used_at_ms = 4;
+  // 0 unless revoked.
+  int64 revoked_at_ms = 5;
+  ClientAccess access = 6;
+}
+
+message ListClientsRequest {}
+
+message ListClientsResponse {
+  repeated Client clients = 1;
+}
+
+message RevokeClientRequest {
+  string id = 1;
+}
+
+message RevokeClientResponse {}
+
+// Server-granted client authority. Legacy unspecified values mean runs.
+enum ClientAccess {
+  CLIENT_ACCESS_UNSPECIFIED = 0;
+  CLIENT_ACCESS_RUNS = 1;
+  CLIENT_ACCESS_ADMIN = 2;
+}
+
+message GetCallerRequest {}
+
+message GetCallerResponse {
+  CallerKind kind = 1;
+  string client_id = 2;
+  string name = 3;
+  ClientAccess access = 4;
+}
+
+enum CallerKind {
+  CALLER_KIND_UNSPECIFIED = 0;
+  CALLER_KIND_LOCAL_OPERATOR = 1;
+  CALLER_KIND_CLIENT = 2;
+}

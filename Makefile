@@ -63,6 +63,14 @@ manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and Cust
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt",year=$(YEAR) paths="./..."
 
+.PHONY: proto
+proto: buf protoc-gen-go protoc-gen-go-grpc ## Generate the Go SDK in apis/sdk/go from the protos in apis/proto.
+	./hack/proto-gen
+
+.PHONY: proto-sync
+proto-sync: ## Copy needy's protos into apis/proto; set NEEDY_PROTO_VERSION=vX.Y.Z to change the pinned release.
+	./hack/proto-sync $(NEEDY_PROTO_VERSION)
+
 .PHONY: fmt
 fmt: ## Run go fmt against code.
 	go fmt ./...
@@ -339,6 +347,9 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+BUF ?= $(LOCALBIN)/buf
+PROTOC_GEN_GO ?= $(LOCALBIN)/protoc-gen-go
+PROTOC_GEN_GO_GRPC ?= $(LOCALBIN)/protoc-gen-go-grpc
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.8.1
@@ -355,6 +366,9 @@ ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
   printf '%s\n' "$$v" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')
 
 GOLANGCI_LINT_VERSION ?= v2.12.2
+BUF_VERSION ?= v1.61.0
+PROTOC_GEN_GO_VERSION ?= v1.36.12
+PROTOC_GEN_GO_GRPC_VERSION ?= v1.6.2
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
 $(KUSTOMIZE): $(LOCALBIN)
@@ -377,6 +391,21 @@ setup-envtest: envtest ## Download the binaries required for ENVTEST in the loca
 envtest: $(ENVTEST) ## Download setup-envtest locally if necessary.
 $(ENVTEST): $(LOCALBIN)
 	$(call go-install-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest,$(ENVTEST_VERSION))
+
+.PHONY: buf
+buf: $(BUF) ## Download buf locally if necessary.
+$(BUF): $(LOCALBIN)
+	$(call go-install-tool,$(BUF),github.com/bufbuild/buf/cmd/buf,$(BUF_VERSION))
+
+.PHONY: protoc-gen-go
+protoc-gen-go: $(PROTOC_GEN_GO) ## Download protoc-gen-go locally if necessary.
+$(PROTOC_GEN_GO): $(LOCALBIN)
+	$(call go-install-tool,$(PROTOC_GEN_GO),google.golang.org/protobuf/cmd/protoc-gen-go,$(PROTOC_GEN_GO_VERSION))
+
+.PHONY: protoc-gen-go-grpc
+protoc-gen-go-grpc: $(PROTOC_GEN_GO_GRPC) ## Download protoc-gen-go-grpc locally if necessary.
+$(PROTOC_GEN_GO_GRPC): $(LOCALBIN)
+	$(call go-install-tool,$(PROTOC_GEN_GO_GRPC),google.golang.org/grpc/cmd/protoc-gen-go-grpc,$(PROTOC_GEN_GO_GRPC_VERSION))
 
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.

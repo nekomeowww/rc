@@ -1,0 +1,17 @@
+default_executor: build
+actor:
+  driver: linux-firecracker
+  command: [sh, -c, "echo base"]
+  network: { allow: [a.example.com], services: { model: { url: "http://127.0.0.1:1" } } }
+executors:
+  build: { driver: linux-container, max_procs: 4, key: "{profile}" }
+  mac: { runner: mac }
+presets:
+  quiet: { env: { set: { QUIET: "1" } } }
+commands:
+  - { match: "**", env: { set: { BASE: "1" } } }
+resolvers:
+  - { match: "make **", sticky: true }
+run_files: [workspace]
+files:
+  workspace: { mode: mount, from: "executor:build:~/workspace/", to: "actor:~/workspace/", writable: true }

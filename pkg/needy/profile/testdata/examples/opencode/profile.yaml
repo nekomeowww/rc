@@ -1,0 +1,44 @@
+# opencode runs in the actor; every shell it starts runs in a linux-container executor.
+user: { name: agent, uid: 1000, gid: 1000 }
+
+actor:
+  driver: linux-firecracker
+  recipe: gce.recipe.yaml
+  workspace: { path: ~/workspace, from: "executor:build:~/workspace", writable: true }
+  command:
+    - opencode
+    - run
+    - >-
+      Create the file /home/agent/workspace/hello.py that prints platform.system(),
+      platform.node() and the Python version, one per line. Then run
+      `python3 /home/agent/workspace/hello.py` with the bash tool and report its exact output.
+  env:
+    OPENCODE_DISABLE_AUTOUPDATE: "1"
+    OPENCODE_CONFIG_CONTENT: >-
+      {"$schema":"https://opencode.ai/config.json","autoupdate":false,"share":"disabled",
+       "permission":{"edit":"allow","bash":"allow","webfetch":"deny"},
+       "tools":{"task":false,"webfetch":false,"todowrite":false,"todoread":false},
+       "model":"needy/qwen3:14b",
+       "provider":{"needy":{"npm":"@ai-sdk/openai-compatible","name":"needy",
+         "options":{"baseURL":"http://model.needy/v1"},
+         "models":{"qwen3:14b":{"name":"Qwen3 14B","tool_call":true}}}}}
+  network:
+    allow: [models.dev, "*.models.dev", registry.npmjs.org, "*.npmjs.org", opencode.ai, "*.opencode.ai"]
+    # HTTPS to the allowed hosts is tunnelled as is. In the actor,
+    # http://model.needy goes to this URL, resolved on the control host.
+    services:
+      model: { url: "http://127.0.0.1:11434" }
+
+executors:
+  build:
+    driver: linux-container
+    key: "{run}"
+    max_procs: 8
+
+commands:
+  - match: "{bash,sh,dash,zsh} **"
+    to: build
+  - match: "{python3,python,pip,pip3,node,npm,npx,make,gcc,cc,cargo} **"
+    to: build
+  - match: "{uname,lscpu,hostname,nproc,free,uptime} **"
+    to: actor

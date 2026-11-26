@@ -1,0 +1,12 @@
+extends: base.yaml
+actor:
+  network: { allow: [b.example.com] }
+executors:
+  build: { max_procs: 8 }
+commands:
+  - { match: "git **", to: actor }
+resolvers:
+  - { match: "mytool **", sticky: true }
+run_files: []
+files:
+  workspace: { writable: false }

@@ -1,0 +1,29 @@
+# The smoke test with a container actor, for a host without KVM: the driving
+# program is `sh` in a container that the engine (Docker) runs with `runc` (or `runsc`,
+# gVisor); only python3 is routed. The driver pulls the base image of this
+# needy's release; a needy without a release builds it with `needy image
+# build --linux-container` and adds `image: needy-actor:latest` to `actor`.
+user: { name: agent, uid: 1000, gid: 1000 }
+actor:
+  driver: linux-container
+  container: { oci_runtime: runc }
+  recipe: ../opencode/gce.recipe.yaml
+  workspace: { path: ~/workspace, from: "executor:build:~/workspace", writable: true }
+  command:
+    - /bin/sh
+    - -c
+    - |
+      echo "== actor"; uname -a; hostname; id
+      grep -m1 "model name" /proc/cpuinfo; grep -c ^processor /proc/cpuinfo; nproc
+      cat /sys/class/dmi/id/product_name; free -m | head -2
+      echo "== routed python3"
+      python3 -c "import os,platform; print(platform.node(), os.getcwd(), os.getuid())"
+      echo hello-from-actor > ~/workspace/from-actor.txt
+      python3 -c "print(open('from-actor.txt').read().strip())"
+      python3 -c "open('from-executor.txt','w').write('hi-from-executor')"
+      cat ~/workspace/from-executor.txt; echo; ls -la ~/workspace
+      python3 -c "import sys; sys.exit(7)"; echo "routed exit=$?"
+executors:
+  build: { driver: linux-container, key: "{run}", max_procs: 4 }
+commands:
+  - { match: "python3 **", to: build }

@@ -1,0 +1,59 @@
+# Codex in an actor, built from `ghcr.io/needy-dev/features/codex:1`.
+# Every shell it starts, and so every command it runs, goes to the `build`
+# executor, which holds the workspace.
+#
+# Start Codex directly (needy builds and caches the feature layer on first run):
+#   needy run create -it --profile examples/agents/codex.yaml
+#
+# On the first start choose "Sign in with Device Code" (or run
+# `codex login --device-auth`): open the link on any machine and enter the
+# code. The default browser sign-in waits for a callback on the actor's
+# localhost:1455, which a browser elsewhere cannot reach. Device code sign-in
+# must be enabled in the ChatGPT account's security settings. The feature
+# automatically syncs `~/.codex` with needy's `<data_dir>/files/codex` store
+# across runs.
+user: { name: agent, uid: 1000, gid: 1000 }
+
+actor:
+  driver: linux-firecracker
+  image:
+    layers:
+      - feature: ghcr.io/needy-dev/features/codex:1
+  workspace: { path: ~/workspace, from: "executor:build:~/workspace", writable: true }
+  # NOTICE: Codex's own sandbox is off: the commands it runs leave the actor
+  # for the executor anyway (the executor and the actor are the boundary),
+  # and its Linux sandbox would wrap only the actor's side of each exec.
+  # Approvals stay as Codex defaults them.
+  # The feature pins the binary, and no metrics go out, so only the hosts
+  # below are needed. Reference: https://developers.openai.com/codex/config-reference
+  command:
+    - codex
+    - --sandbox
+    - danger-full-access
+    - -c
+    - check_for_update_on_startup=false
+    - -c
+    - analytics.enabled=false
+  # Without a ChatGPT login: an API key. Codex's sign-in screen then says
+  # "Detected OPENAI_API_KEY environment variable" and stores the key in
+  # ~/.codex/auth.json, which the feature's sync mapping keeps. The key lives in
+  # the actor (needy has no header injection yet, `TODO(mitm)`) and in the run's
+  # stored profile, so set it in a private profile that `extends:` this
+  # one, never in a shared file:
+  # env: { OPENAI_API_KEY: sk-... }
+  network:
+    # Reference: https://developers.openai.com/codex/auth
+    # auth.openai.com: sign-in and token refresh; chatgpt.com: a ChatGPT
+    # plan's model API; api.openai.com: an API key's.
+    allow: [auth.openai.com, chatgpt.com, api.openai.com]
+
+executors:
+  build: { driver: linux-container, key: "{run}", max_procs: 8 }
+
+commands:
+  # Codex runs each command in `bash -lc ...`.
+  - match: "{bash,sh,dash,zsh} **"
+    to: build
+  # Identity probes stay on the actor's recipe.
+  - match: "{uname,lscpu,hostname,nproc,free,uptime} **"
+    to: actor

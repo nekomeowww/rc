@@ -1,0 +1,52 @@
+# herdr in an actor, built from the OCI features in `ghcr.io/needy-dev/features`:
+# a terminal workspace whose panes run the other agents. The panes' own shells
+# stay in the actor, where the agents are; the shells an agent starts, and so
+# every command it runs, go to the `build` executor, which holds the workspace.
+#
+# Start herdr directly (needy builds and caches each feature layer once):
+#   needy run create -it --profile examples/agents/herdr.yaml
+#
+# Log in to each agent in a pane as its own profile says. Each agent feature
+# sets its own environment variables and automatically syncs its state
+# directory (`~/.codex`, `~/.pi/agent`, `~/.local/share/opencode`) with needy's
+# `<data_dir>/files/<agent>` store. Detaching herdr (ctrl+b q) ends its client,
+# the driving program, and so the run; use needy's own detach (ctrl-]) to leave
+# the run going.
+user: { name: agent, uid: 1000, gid: 1000 }
+
+actor:
+  driver: linux-firecracker
+  image:
+    layers:
+      - feature: ghcr.io/needy-dev/features/codex:1
+      - feature: ghcr.io/needy-dev/features/pi:1
+      - feature: ghcr.io/needy-dev/features/opencode:1
+      - feature: ghcr.io/needy-dev/features/herdr:1
+  workspace: { path: ~/workspace, from: "executor:build:~/workspace", writable: true }
+  command: [herdr]
+  network:
+    # The union of the three agent profiles' hosts. herdr's own version and
+    # agent-manifest checks go to herdr.dev, which is left out: they are
+    # refused, and herdr goes on with the manifests it bundles.
+    allow: [pi.dev,
+            api.openai.com, auth.openai.com, chatgpt.com,
+            github.com, api.github.com, api.individual.githubcopilot.com,
+            openrouter.ai, opencode.ai, "*.opencode.ai", models.dev, "*.models.dev",
+            registry.npmjs.org]
+
+executors:
+  build: { driver: linux-container, key: "{run}", max_procs: 8 }
+
+commands:
+  # A shell an agent starts (its tool calls) goes to the executor. pi sets
+  # its process title to `pi`, so it is matched by that name too.
+  - match: "{bash,sh,dash,zsh} **"
+    when: { under: "{codex,pi,opencode} **" }
+    to: build
+  # herdr's panes, and any other shell, stay in the actor, where the agents
+  # are installed.
+  - match: "{bash,sh,dash,zsh} **"
+    to: actor
+  # Identity probes stay on the actor's recipe.
+  - match: "{uname,lscpu,hostname,nproc,free,uptime} **"
+    to: actor

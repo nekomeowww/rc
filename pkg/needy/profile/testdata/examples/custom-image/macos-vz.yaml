@@ -1,0 +1,29 @@
+# The custom image on a Mac with Apple silicon, in a macos-vz VM: build it
+# FROM actor-base for linux/arm64 (Docker on the Mac builds arm64 natively)
+# and push it; the actor boots the base VM image (`needy image pull`) with
+# the image's layers above actor-base imported:
+#
+#   docker build --build-arg BASE=<actor-base> --build-arg SHIM=0 \
+#     -t registry.example.com/needy-custom-jq:1 examples/custom-image
+#   docker push registry.example.com/needy-custom-jq:1
+#
+# The executor is the Mac itself, as in examples/macos-vz. Create its
+# directory first: `mkdir -p /tmp/needy-custom-image-ws`.
+user: { name: agent, uid: 1000, gid: 1000 }
+actor:
+  driver: macos-vz
+  image: registry.example.com/needy-custom-jq:1
+  workspace: { path: ~/workspace, from: "executor:mac:/tmp/needy-custom-image-ws", writable: true }
+  command:
+    - /bin/sh
+    - -c
+    - |
+      echo "== jq in the actor"; command -v jq; echo '{"tool":"jq"}' | jq -r .tool
+      echo "== routed python3"
+      python3 -c "import platform; print(platform.system())"
+      python3 -c "import sys; sys.exit(7)"; echo "routed exit=$?"
+executors:
+  mac:
+    driver: native
+commands:
+  - { match: "python3 **", to: mac }

@@ -1,0 +1,26 @@
+actor: { driver: linux-firecracker }
+executors:
+  build:
+    driver: linux-container
+    container:
+      cpus: 1.5
+      cpu_shares: 512
+      cpuset_cpus: "0-3"
+      memory: 512MiB
+      memory_swap: unlimited
+      shm_size: 64MiB
+      pids_limit: 512
+      ulimits: { nofile: 1024, nproc: { soft: 64, hard: 128 } }
+      env: { RUST_LOG: debug }
+      workdir: /src
+      read_only: true
+      init: true
+      mounts:
+        - { type: bind, source: cache, target: /cache, read_only: true }
+        - { type: volume, source: cargo, target: /cargo }
+        - { type: tmpfs, target: /tmp, size: 64MiB }
+      add_host: { db.example.com: 192.0.2.10 }
+      dns: [192.0.2.53]
+      sysctls: { net.ipv4.ip_forward: "1" }
+      gpus: all
+      cap_drop: [NET_RAW]

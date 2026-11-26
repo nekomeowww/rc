@@ -1,0 +1,31 @@
+# This machine as a native executor for `needy run exec RUN`: copy-in,
+# mirror-out, chaos on commands and the run's trace. Every run has an actor,
+# so the control host needs KVM; the actor only waits. Without KVM,
+# `needy proc exec --runner NAME` runs commands on a runner's machine, without
+# rules, chaos or a trace.
+user: { name: agent, uid: 1000, gid: 1000 }
+actor:
+  driver: linux-firecracker
+  command: [sleep, infinity]
+executors:
+  here:
+    driver: native
+    workspace: /tmp/needy-native-ws
+commands:
+  - { match: "**", to: here }
+files:
+  seed:
+    mode: copy-in
+    from: "host:./seed/"
+    to: "executor:here:/tmp/needy-native-ws"
+    filter: ["- /secret.txt", "+ **"]
+  results:
+    mode: mirror-out
+    from: "executor:here:/tmp/needy-native-ws"
+    to: "host:./out/{run}/"
+run_files: [seed, results]
+chaos:
+  seed: 7
+  faults:
+    curl-down: { exec: "curl **", exit: 7, stderr: "curl: (7) Failed to connect: Connection refused\n" }
+    slow-sleep: { exec: "sleep *", delay: 500ms }

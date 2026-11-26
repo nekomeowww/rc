@@ -1,0 +1,2 @@
+actor: { driver: linux-firecracker }
+default_executor: build

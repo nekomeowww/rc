@@ -1,0 +1,8 @@
+# The custom image as a container, for a Linux host without KVM: the
+# engine runs `needy-custom-jq` itself (`docker build -t needy-custom-jq
+# examples/custom-image`); no `needy image build --from` is needed. Its last step
+# made jq a shim, so a rule may route it too.
+extends: profile.yaml
+actor:
+  driver: linux-container
+  container: { oci_runtime: runc }

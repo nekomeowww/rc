@@ -1,0 +1,40 @@
+# The actor runs on a Linux KVM host; Apple toolchain commands run on runner
+# `mac`, a Mac that joined the control plane (`needy runner invite`,
+# then `needy runner join mac` and `needy runner serve` on the Mac). The Mac workspace is mounted
+# in the actor.
+user: { name: agent, uid: 1000, gid: 1000 }
+
+actor:
+  driver: linux-firecracker
+  # `~` on the executor's side is the home of the user runner `mac` runs as.
+  workspace: { path: ~/workspace, from: "executor:mac:~/needy-ws/demo", writable: true }
+  command:
+    - /bin/sh
+    - -c
+    - |
+      set -x
+      uname -sm
+      cd ~/workspace
+      sw_vers
+      xcrun --show-sdk-version
+      xcodebuild -version
+      xcrun simctl list runtimes | head -4
+      xcrun simctl list devices available | grep -m3 iPhone
+      printf 'import Foundation\nprint("hello from swift on", ProcessInfo.processInfo.operatingSystemVersionString)\n' > hello.swift
+      xcrun swiftc hello.swift -o hello
+      zsh -c './hello'
+      mkdir -p pkg/Sources/Demo && cd pkg
+      printf '// swift-tools-version:5.9\nimport PackageDescription\nlet package = Package(name: "Demo", targets: [.executableTarget(name: "Demo")])\n' > Package.swift
+      printf 'import Foundation\nprint("built by swift build in", FileManager.default.currentDirectoryPath)\n' > Sources/Demo/main.swift
+      xcrun swift build -c release 2>&1 | tail -2
+      zsh -c '.build/release/Demo'
+      ls -la ~/workspace
+
+executors:
+  mac:
+    runner: mac
+    max_procs: 4
+
+commands:
+  - match: "{xcrun,xcodebuild,swift,swiftc,sw_vers,zsh} **"
+    to: mac

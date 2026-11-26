@@ -1,0 +1,36 @@
+# A Google Compute Engine N1 VM (Broadwell Xeon), as far as the driving program
+# can tell. The features hidden below are ones a Broadwell CPU does not have,
+# so a newer host, such as a Cascade Lake one, does not show through.
+# Source: https://web.archive.org/web/20240216002137/https://cloud.google.com/compute/docs/cpu-platforms
+# (N1 and E2 Broadwell E5-2696V4, 2.2 GHz base); family 6, model 79 is
+# BROADWELL_X, https://github.com/torvalds/linux/blob/v6.18/arch/x86/include/asm/intel-family.h#L89
+# The hide list was checked on 2026-11-10 against QEMU's Broadwell model and
+# LLVM's Broadwell features (cited at MODELS in crates/core/src/recipe/cpu.rs):
+# none of them is a Broadwell feature.
+# AVX-512 first came with Skylake-SP (QEMU's Skylake-Server model and LLVM's
+# `skx`, cited at MODELS for Skylake-SP/Cascade Lake); the second hide line is
+# every AVX-512 feature in leaf 7, subleaf 0 of FEATURES in that file (Intel
+# SDM Vol. 2A, order 253666-088US, Table 3-8, CPUID.07H.0:EBX, ECX and EDX).
+# NOTICE: avx512_bf16 (leaf 7, subleaf 1) is not hidden: hosts without that
+# subleaf, such as Cascade Lake, warn that hiding it has no effect, and it only
+# shows on Cooper Lake and later.
+# Stepping 0: `lscpu -J` on an e2-medium (2 vCPUs, the E2 series shares N1's
+# Broadwell E5-2696V4 on the page above), captured 2024-06-20 by Spare Cores
+# Inspector: `Intel(R) Xeon(R) CPU @ 2.20GHz`, model 79, stepping 0,
+# https://github.com/SpareCores/sc-inspector-data/blob/80b48a950aa66a70b8710797dc5763dc28f255d4/data/gcp/e2-medium/0/lscpu/stdout
+# (capture date in `meta.json` next to it).
+extends: builtin:gce-ubuntu-22.04
+cpu:
+  brand: "Intel(R) Xeon(R) CPU @ 2.20GHz"
+  signature: { family: 6, model: 79, stepping: 0 }
+  features:
+    hide: [avx_vnni, serialize, gfni, vaes, vpclmulqdq, movdiri, movdir64b, waitpkg,
+           sha_ni, clflushopt, clwb, umip, pku, ospke, la57,
+           avx512f, avx512dq, avx512ifma, avx512pf, avx512er, avx512cd, avx512bw, avx512vl,
+           avx512vbmi, avx512_vbmi2, avx512_vnni, avx512_bitalg, avx512_vpopcntdq,
+           avx512_vp2intersect, avx512_fp16]
+    # The built-in requires avx512_vnni (its N2 Cascade Lake has it); Broadwell
+    # does not.
+    require: []
+  topology: { cores: 2, threads_per_core: 1 }
+memory: 4GiB

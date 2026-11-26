@@ -1,0 +1,34 @@
+# The smoke test with a macos-vz actor, on an Apple silicon Mac: the driving
+# program is `sh` in a Virtualization.framework VM that vfkit runs from
+# needy's arm64 kernel and rootfs (`brew install vfkit`, then `needy image
+# pull`).
+# The executor is the Mac itself (a daemon that is not root cannot hand a
+# Docker executor's socket directory to the container's user). python3 and
+# arch are routed; `/usr/bin/arch` by its absolute path is routed by the
+# guest kernel's binfmt_needy, as in a Firecracker actor, and prints the
+# Mac's `arm64` instead of the guest's `aarch64`. The recipe is an x86
+# machine, so `profile check` lists what an arm64 VM cannot present.
+user: { name: agent, uid: 1000, gid: 1000 }
+actor:
+  driver: macos-vz
+  recipe: ../opencode/gce.recipe.yaml
+  workspace: { path: ~/workspace, from: "executor:mac:/tmp/needy-macos-vz-ws", writable: true }
+  command:
+    - /bin/sh
+    - -c
+    - |
+      echo "== actor"; uname -a; hostname; id; nproc; free -m | head -2
+      sensors | grep -m1 Package; systemd-detect-virt; cat /proc/cpuinfo | grep -m1 implementer
+      echo "== routed python3"
+      python3 -c "import os,platform; print(platform.system(), os.getcwd() == os.path.realpath('/tmp/needy-macos-vz-ws'))"
+      echo hello-from-actor > ~/workspace/from-actor.txt
+      python3 -c "print(open('from-actor.txt').read().strip())"
+      python3 -c "open('from-executor.txt','w').write('hi-from-executor')"
+      cat ~/workspace/from-executor.txt; echo; ls ~/workspace
+      python3 -c "import sys; sys.exit(7)"; echo "routed exit=$?"
+      echo "== routed by absolute path"; /usr/bin/arch; echo " arch exit=$?"
+executors:
+  mac:
+    driver: native
+commands:
+  - { match: "{python3,arch} **", to: mac }

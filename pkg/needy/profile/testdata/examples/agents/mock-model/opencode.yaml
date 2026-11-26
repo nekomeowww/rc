@@ -1,0 +1,48 @@
+# opencode against the mock model: one full agent loop with no account.
+# The mock asks for one bash tool call, opencode runs it in the `build`
+# executor, and the mock answers `mock done: ` and the command's output.
+# README.md here has the steps:
+#   cargo xtask mock-model --listen 127.0.0.1:8787     # on the control host
+#   needy run create --profile examples/agents/mock-model/opencode.yaml
+extends: ../opencode.yaml
+
+actor:
+  # `opencode run` sends one message and exits when the agent is done.
+  # `-m` takes provider/model.
+  # Reference: https://github.com/anomalyco/opencode/blob/v1.19.5/packages/web/src/content/docs/cli.mdx#L339-L350
+  # Source: https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/cli/cmd/run.ts#L166-L170
+  command: [opencode, run, -m, mock/mock, "List the files in the workspace with the bash tool."]
+  env:
+    # The config as inline JSON, with no file to copy in. It adds the
+    # provider `mock` on the bundled `@ai-sdk/openai-compatible` package,
+    # with its base URL on the actor network service below. `apiKey` is
+    # any value; the mock does not check it. `small_model` sends the
+    # session title request to the mock too. `permission.bash: allow` is
+    # needed: `opencode run` rejects every permission it would ask for.
+    # Reference: https://github.com/anomalyco/opencode/blob/v1.19.5/packages/web/src/content/docs/providers.mdx#L376-L403
+    # Reference: https://github.com/anomalyco/opencode/blob/v1.19.5/packages/web/src/content/docs/cli.mdx#L694
+    # Source: https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/cli/cmd/run.ts#L791-L807
+    OPENCODE_CONFIG_CONTENT: >-
+      {"$schema":"https://opencode.ai/config.json","autoupdate":false,"share":"disabled",
+       "permission":{"bash":"allow","edit":"allow","webfetch":"deny"},
+       "model":"mock/mock","small_model":"mock/mock",
+       "provider":{"mock":{"npm":"@ai-sdk/openai-compatible","name":"needy mock",
+         "options":{"baseURL":"http://mock.needy/v1","apiKey":"mock"},
+         "models":{"mock":{"name":"mock","tool_call":true}}}}}
+    # Use the models.dev snapshot built into opencode; do not fetch it.
+    # Reference: https://github.com/anomalyco/opencode/blob/v1.19.5/packages/web/src/content/docs/cli.mdx#L706
+    OPENCODE_DISABLE_MODELS_FETCH: "1"
+  network:
+    # In the actor, http://mock.needy goes to this URL, resolved on the
+    # control host. Use the port that `cargo xtask mock-model` listens on.
+    # The parent's `allow` list stays: opencode starts a background
+    # `npm install` of `@opencode-ai/plugin` from registry.npmjs.org. The
+    # loop does not need it (see README.md).
+    services:
+      mock: { url: "http://127.0.0.1:8787" }
+
+# No login to keep: do not copy ~/needy-state/opencode in or out.
+files:
+  opencode-in: null
+  opencode-out: null
+run_files: []

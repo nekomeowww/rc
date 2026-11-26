@@ -18,7 +18,10 @@ profile schema.
 The manager runs one needy daemon in each namespace that has an Actor or an
 executor Workspace. Its Deployment uses the `Recreate` strategy, because the
 state is SQLite on a ReadWriteOnce volume. It scales to zero when neither
-remains, and the volume stays. A daemon is never shared between namespaces:
+remains, and the volume stays. An ended Actor keeps the daemon until its
+runner's credential is revoked and for ten minutes more, so that its run's
+logs and report can be read; without a state volume they are lost when the
+daemon stops. A daemon is never shared between namespaces:
 needy has no tenant model, so the namespace is the tenant boundary.
 
 The daemon runs with `--disable-host-files`, because a `host:` file mapping

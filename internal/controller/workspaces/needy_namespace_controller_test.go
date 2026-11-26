@@ -21,12 +21,14 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -209,6 +211,34 @@ func TestNeedyScalesTheDaemonToZeroWhenUnused(t *testing.T) {
 	harness.reconcile()
 	require.NoError(t, harness.get(needy.DaemonName, &deployment))
 	assert.Equal(t, int32(1), *deployment.Spec.Replicas)
+
+	// An ended Actor keeps it until its credential is revoked, then for a
+	// grace in which its run can still be read.
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	harness.reconciler.Now = func() time.Time { return now }
+	var actor workspacesv1alpha1.Actor
+	require.NoError(t, harness.get(testActorName, &actor))
+	completed := metav1.NewTime(now)
+	actor.Status.Phase = workspacesv1alpha1.ActorPhaseSucceeded
+	actor.Status.RunnerName = testActorRunner
+	actor.Status.CompletedAt = &completed
+	require.NoError(t, harness.client.Update(context.Background(), &actor))
+	harness.reconcile()
+	require.NoError(t, harness.get(needy.DaemonName, &deployment))
+	assert.Equal(t, int32(1), *deployment.Spec.Replicas, "the credential is not revoked yet")
+
+	require.NoError(t, harness.get(testActorName, &actor))
+	actor.Annotations = map[string]string{actorCredentialRevokedAnnotation: testTrueValue}
+	require.NoError(t, harness.client.Update(context.Background(), &actor))
+	result := harness.reconcile()
+	require.NoError(t, harness.get(needy.DaemonName, &deployment))
+	assert.Equal(t, int32(1), *deployment.Spec.Replicas, "the run can still be read")
+	assert.Equal(t, needyDaemonGrace+time.Second, result.RequeueAfter)
+
+	now = now.Add(needyDaemonGrace)
+	harness.reconcile()
+	require.NoError(t, harness.get(needy.DaemonName, &deployment))
+	assert.Equal(t, int32(0), *deployment.Spec.Replicas)
 }
 
 func TestWorkspaceNeedyExecutorService(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 
 	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/lifecycle"
+	"github.com/nekomeowww/rc/internal/needy"
 	"github.com/nekomeowww/rc/internal/runtimepolicy"
 )
 
@@ -77,6 +78,45 @@ func rcKubeInjection(image string) (corev1.Container, corev1.Volume, corev1.Volu
 	return install, volume, mount, nil
 }
 
+// NeedyInstallContainerName copies needy into needy.BinaryDirectory.
+const NeedyInstallContainerName = "needy-install"
+
+// needyInjection copies needy from the needy image into an emptyDir, as
+// rcKubeInjection does for rc-kube, so the Workspace image needs no needy of
+// its own and runs the version that matches the namespace's daemon.
+func needyInjection(image string) (corev1.Container, corev1.Volume, corev1.VolumeMount) {
+	install := corev1.Container{
+		Name:  NeedyInstallContainerName,
+		Image: image,
+		Command: []string{
+			"cp",
+			needy.ImageExecutable,
+			needy.BinaryDirectory + "/needy",
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      needyVolumeName,
+				MountPath: needy.BinaryDirectory,
+			},
+		},
+		SecurityContext: runtimepolicy.ContainerSecurityContext(corev1.Linux),
+	}
+	volume := corev1.Volume{
+		Name:         needyVolumeName,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	}
+	mount := corev1.VolumeMount{
+		Name:      needyVolumeName,
+		MountPath: needy.BinaryDirectory,
+		ReadOnly:  true,
+	}
+
+	return install, volume, mount
+}
+
+// needyVolumeName is the emptyDir that holds the injected needy.
+const needyVolumeName = "needy-bin"
+
 // Initializer runs one lifecycle action before the runtime becomes ready.
 type Initializer struct {
 	Name, Image string
@@ -111,6 +151,9 @@ type WorkspacePodIntent struct {
 	// RCKubeImage provides the rc-kube and tini that a Linux runtime runs.
 	// It is required on Linux and not used on other operating systems.
 	RCKubeImage string
+	// NeedyImage, when set, installs needy into the runtime for a needy
+	// executor service.
+	NeedyImage string
 }
 
 // LXCFSVolumePrefix starts the name of every LXCFS volume in a Workspace Pod.
@@ -195,6 +238,12 @@ func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, err
 		initContainers = append(initContainers, install)
 		volumes = append(volumes, volume)
 		rcKubeMounts = append(rcKubeMounts, mount)
+		if intent.NeedyImage != "" {
+			install, volume, mount := needyInjection(intent.NeedyImage)
+			initContainers = append(initContainers, install)
+			volumes = append(volumes, volume)
+			rcKubeMounts = append(rcKubeMounts, mount)
+		}
 	}
 	mounts := make([]corev1.VolumeMount, 0, len(intent.AdditionalMounts)+4)
 	mounts = append(mounts, corev1.VolumeMount{Name: homeVolumeName, MountPath: runtime.layout.home})

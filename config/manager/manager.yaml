@@ -70,6 +70,11 @@ spec:
           - --lxcfs-dir=$(RC_LXCFS_DIR)
           - --rc-kube-image=$(RC_KUBE_IMAGE)
         env:
+          # needy daemons admit the manager's Pods from this namespace.
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
           - name: RC_RUNNER_IMAGE
             value: runner:latest
           # The image that provides rc-kube and tini to Linux runtime Pods.

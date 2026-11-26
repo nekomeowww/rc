@@ -1,0 +1,20 @@
+# Generates the needy gRPC client. Pin the tag to the needy release that the
+# manager deploys (--needy-image); needy's protos have no wire-compatibility
+# promise in 0.0.x.
+version: v2
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/nekomeowww/rc/internal/needy/gen
+inputs:
+  - git_repo: https://github.com/needy-dev/needy.git
+    tag: v0.0.19
+    subdir: proto
+plugins:
+  - remote: buf.build/protocolbuffers/go:v1.36.12
+    out: gen
+    opt: paths=source_relative
+  - remote: buf.build/grpc/go:v1.6.2
+    out: gen
+    opt: paths=source_relative

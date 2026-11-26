@@ -124,6 +124,8 @@ type resolvedWorkspace struct {
 	// rcKubeImage provides the rc-kube that a Linux runtime runs, and is
 	// empty for other operating systems.
 	rcKubeImage string
+	// needyImage is set when the runtime runs a needy executor.
+	needyImage string
 	// storageReady is published as StorageReady once home storage has been
 	// evaluated in this pass; nil leaves the previous condition unchanged.
 	storageReady *metav1.Condition
@@ -177,6 +179,9 @@ type WorkspaceReconciler struct {
 	// RCKubeImage provides the rc-kube and tini that Linux runtime Pods run.
 	// Empty selects the official image of the controller version.
 	RCKubeImage string
+	// NeedyImage provides the needy that a needy executor Workspace runs.
+	// Empty refuses spec.needy.
+	NeedyImage string
 
 	// admissionRetries backs off creates the API server rejected; see
 	// admission_rejection.go. The zero value is ready to use.
@@ -801,7 +806,6 @@ func (r *WorkspaceReconciler) resolveWorkspaceBase(ctx context.Context, workspac
 		resolved.lxcfsDir = r.LXCFSDir
 		resolved.rcKubeImage = rcKubeImageOrDefault(r.RCKubeImage)
 	}
-
 	return resolved, "", "", nil
 }
 
@@ -1125,6 +1129,7 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 		Services:          resolved.services, ServiceEnvironment: resolved.serviceEnvironment,
 		LXCFSDir:    resolved.lxcfsDir,
 		RCKubeImage: resolved.rcKubeImage,
+		NeedyImage:  resolved.needyImage,
 	})
 	if err != nil {
 		return nil, err

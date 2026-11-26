@@ -1,0 +1,459 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: actors.workspaces.rc.ayaka.io
+spec:
+  group: workspaces.rc.ayaka.io
+  names:
+    kind: Actor
+    listKind: ActorList
+    plural: actors
+    singular: actor
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.runID
+      name: Run
+      type: string
+    - jsonPath: .status.podName
+      name: Pod
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Actor is one needy run whose actor runs in a Firecracker VM in its own Pod.
+          Its commands go to Workspaces that serve as needy executors.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of Actor
+            properties:
+              args:
+                description: args are appended to the profile's driving program.
+                items:
+                  type: string
+                maxItems: 64
+                type: array
+              deleteAfterCompleted:
+                description: |-
+                  deleteAfterCompleted deletes the Actor this long after its run ended.
+                  Omitted keeps it.
+                type: string
+                x-kubernetes-validations:
+                - message: deleteAfterCompleted must not be negative
+                  rule: duration(self) >= duration('0s')
+              executors:
+                description: |-
+                  executors binds the profile's executors to Workspaces. Every executor of
+                  the resolved profile must be bound; rc never places one on the daemon.
+                items:
+                  description: |-
+                    ActorExecutor binds one executor of the profile to a Workspace that serves
+                    as a needy executor (spec.needy.executor).
+                  properties:
+                    name:
+                      description: name is the executor's name in the profile's executors
+                        map.
+                      maxLength: 63
+                      pattern: ^[A-Za-z0-9_-]+$
+                      type: string
+                    workspaceRef:
+                      description: workspaceRef names a Workspace in the Actor's namespace.
+                      properties:
+                        name:
+                          default: ""
+                          description: |-
+                            Name of the referent.
+                            This field is effectively required, but due to backwards compatibility is
+                            allowed to be empty. Instances of this type with an empty value here are
+                            almost certainly wrong.
+                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                          type: string
+                      type: object
+                      x-kubernetes-map-type: atomic
+                  required:
+                  - name
+                  - workspaceRef
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              idleTimeout:
+                description: |-
+                  idleTimeout stops the run after this long without activity reported by
+                  needy (guest calls, gateway traffic, routing decisions, terminal and exec
+                  I/O). Zero or omitted disables it.
+                type: string
+                x-kubernetes-validations:
+                - message: idleTimeout must not be negative
+                  rule: duration(self) >= duration('0s')
+              maxRunDuration:
+                default: 2h
+                description: |-
+                  maxRunDuration stops the run this long after it started, whatever its
+                  activity. It also bounds the actor runner's credential.
+                type: string
+                x-kubernetes-validations:
+                - message: maxRunDuration must be positive
+                  rule: duration(self) > duration('0s')
+              profile:
+                description: profile is the needy profile of the run.
+                properties:
+                  builtin:
+                    description: builtin names a profile that ships with needy, such
+                      as codex or opencode.
+                    maxLength: 63
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  configMapKeyRef:
+                    description: |-
+                      configMapKeyRef reads the profile YAML from a ConfigMap key in the
+                      Actor's namespace.
+                    properties:
+                      key:
+                        description: The key to select.
+                        type: string
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the ConfigMap or its key must
+                          be defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  inline:
+                    description: inline is the profile YAML.
+                    maxLength: 65536
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: exactly one of builtin, configMapKeyRef, and inline must
+                    be set
+                  rule: '(has(self.builtin) ? 1 : 0) + (has(self.configMapKeyRef)
+                    ? 1 : 0) + (has(self.inline) ? 1 : 0) == 1'
+              resources:
+                description: |-
+                  resources of the actor runner Pod. They must cover the VM, Firecracker,
+                  and the runner. The manager adds the KVM device.
+                properties:
+                  claims:
+                    description: |-
+                      Claims lists the names of resources, defined in spec.resourceClaims,
+                      that are used by this container.
+
+                      This field depends on the
+                      DynamicResourceAllocation feature gate.
+
+                      This field is immutable. It can only be set for containers.
+                    items:
+                      description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                      properties:
+                        name:
+                          description: |-
+                            Name must match the name of one entry in pod.spec.resourceClaims of
+                            the Pod where this field is used. It makes that resource available
+                            inside a container.
+                          type: string
+                        request:
+                          description: |-
+                            Request is the name chosen for a request in the referenced claim.
+                            If empty, everything from the claim is made available, otherwise
+                            only the result of this request.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  limits:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Limits describes the maximum amount of compute resources allowed.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                  requests:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Requests describes the minimum amount of compute resources required.
+                      If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                      otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                type: object
+              terminal:
+                description: |-
+                  terminal runs the driving program on a terminal, so a client can attach
+                  to it with `needy run attach`. Leave it unset for headless agents.
+                type: boolean
+              upstream:
+                description: |-
+                  upstream sends the actor's internet traffic through a proxy, so it
+                  leaves with the proxy's address instead of the node's.
+                properties:
+                  credentialsSecretRef:
+                    description: |-
+                      credentialsSecretRef names a Secret key in the Actor's namespace that
+                      holds one line, USERNAME:PASSWORD. The runner reads it for every
+                      connection, so a rotated Secret applies once the kubelet syncs it.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  podSelector:
+                    description: |-
+                      podSelector selects the proxy Pods in the Actor's namespace, which the
+                      actor Pod may then reach on the URL's port. A proxy inside the cluster
+                      needs it: the actor Pod may not reach cluster addresses otherwise.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  url:
+                    description: url is socks5h://HOST:PORT or socks5://HOST:PORT.
+                    maxLength: 255
+                    pattern: ^socks5h?://[^/@\s]+:[0-9]{1,5}$
+                    type: string
+                required:
+                - url
+                type: object
+            required:
+            - profile
+            type: object
+            x-kubernetes-validations:
+            - message: Actor spec is immutable
+              rule: self == oldSelf
+          status:
+            description: status defines the observed state of Actor
+            properties:
+              actorState:
+                description: actorState is the needy actor state, such as READY or
+                  EXITED.
+                type: string
+              completedAt:
+                description: completedAt is when the run reached a terminal state.
+                format: date-time
+                type: string
+              conditions:
+                description: conditions describe the Actor. Ready is True while the
+                  run is live.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              exitCode:
+                description: exitCode is the driving program's exit code once it exited.
+                format: int32
+                type: integer
+              lastActivityTime:
+                description: lastActivityTime is the run's last activity reported
+                  by needy.
+                format: date-time
+                type: string
+              message:
+                description: message is the needy failure or the reason the Actor
+                  cannot start.
+                type: string
+              observedGeneration:
+                description: observedGeneration is the generation that the status
+                  describes.
+                format: int64
+                type: integer
+              phase:
+                description: phase summarizes the Actor's lifetime.
+                enum:
+                - Pending
+                - Starting
+                - Running
+                - Succeeded
+                - Stopped
+                - Failed
+                type: string
+              podName:
+                description: podName is the actor runner Pod.
+                type: string
+              runID:
+                description: runID is the needy run ID.
+                type: string
+              runState:
+                description: runState is the needy run state, such as RUNNING or FINISHED.
+                type: string
+              runnerName:
+                description: runnerName is the needy runner that hosts the actor.
+                type: string
+              startedAt:
+                description: startedAt is when the run was created.
+                format: date-time
+                type: string
+              stopReason:
+                description: 'stopReason says why rc stopped the run: Idle, MaxRunDuration,
+                  or Deleted.'
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

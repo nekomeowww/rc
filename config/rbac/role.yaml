@@ -15,6 +15,7 @@ rules:
   - pods/portforward
   - secrets
   - serviceaccounts
+  - services
   verbs:
   - create
   - delete
@@ -30,6 +31,18 @@ rules:
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - batch
@@ -75,6 +88,18 @@ rules:
   - coordination.k8s.io
   resources:
   - leases
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
   verbs:
   - create
   - delete
@@ -142,6 +167,7 @@ rules:
 - apiGroups:
   - workspaces.rc.ayaka.io
   resources:
+  - actors
   - workspaceenvironments
   - workspaceexecs
   - workspaceexecs/status
@@ -157,6 +183,7 @@ rules:
 - apiGroups:
   - workspaces.rc.ayaka.io
   resources:
+  - actors/finalizers
   - workspaceenvironments/finalizers
   - workspaceexecs/finalizers
   - workspaces/finalizers
@@ -165,6 +192,7 @@ rules:
 - apiGroups:
   - workspaces.rc.ayaka.io
   resources:
+  - actors/status
   - workspaceenvironments/status
   - workspaces/status
   verbs:

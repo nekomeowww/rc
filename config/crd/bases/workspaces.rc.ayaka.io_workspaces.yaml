@@ -1394,6 +1394,29 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
+              needy:
+                description: needy connects the Workspace to the namespace's needy
+                  daemon.
+                properties:
+                  executor:
+                    description: |-
+                      executor runs a needy executor runner as a resident service, so an Actor
+                      can route commands to this Workspace. rc generates the runner's
+                      credential, registers it with the namespace's needy daemon, and installs
+                      needy into the runtime. The Workspace image needs sftp-server for
+                      workspace mounts.
+                    properties:
+                      labels:
+                        additionalProperties:
+                          type: string
+                        description: labels are added to the runner, next to rc.ayaka.io/workspace.
+                        maxProperties: 16
+                        type: object
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: needy must set executor
+                  rule: has(self.executor)
               nodeSelector:
                 additionalProperties:
                   type: string
@@ -1836,6 +1859,8 @@ spec:
             - message: Darwin Workspaces do not support services
               rule: '!has(self.services) || size(self.services) == 0 || !has(self.os)
                 || self.os != ''darwin'''
+            - message: needy is supported only on Linux Workspaces
+              rule: '!has(self.needy) || !has(self.os) || self.os == ''linux'''
           status:
             description: status defines the observed state of Workspace
             properties:

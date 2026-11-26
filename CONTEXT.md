@@ -158,3 +158,17 @@ a new Workspace first. Both support terminal, attached, and detached execution.
 Persistent configuration, cache, and session state shared by processes
 that use the same Agent Type and Agent Credential in one Workspace. Credential
 material is not part of the Agent Home.
+
+**Actor**:
+One needy run whose driving program runs in a Firecracker VM in its own Pod on
+a KVM node. Its commands go to executor Workspaces.
+_Avoid_: sandbox, agent Pod
+
+**Executor Workspace**:
+A Workspace that serves as a needy executor: it runs commands that an Actor
+routes to it.
+_Avoid_: runner (needy uses it for every machine that serves a daemon)
+
+**needy Daemon**:
+The per-namespace control plane that schedules Actors and executors and
+records their runs.

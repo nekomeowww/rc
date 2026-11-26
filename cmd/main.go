@@ -19,12 +19,16 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
+	"net"
 	"os"
+	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -42,6 +46,7 @@ import (
 	repositoriescontroller "github.com/nekomeowww/rc/internal/controller/repositories"
 	workspacescontroller "github.com/nekomeowww/rc/internal/controller/workspaces"
 	processruntime "github.com/nekomeowww/rc/internal/execution"
+	"github.com/nekomeowww/rc/internal/needy"
 	"github.com/nekomeowww/rc/internal/version"
 	// +kubebuilder:scaffold:imports
 )
@@ -74,6 +79,15 @@ func main() {
 	var darwinWorkspaceRoot string
 	var lxcfsDir string
 	var rcKubeImage string
+	var needyImage string
+	var needyKVMResource string
+	var needyKVMNodeSelector string
+	var needyKVMTolerations string
+	var needyKVMGroup int64
+	var needyDaemonKVM bool
+	var needyDaemonStorageClass string
+	var needyGatewayBlockCIDRs string
+	var needyControllerNamespace string
 
 	var secureMetrics bool
 	var enableHTTP2 bool
@@ -96,6 +110,28 @@ func main() {
 	flag.StringVar(&rcKubeImage, "rc-kube-image", version.DefaultRCKubeImage(),
 		"The image that provides rc-kube and tini to Linux Workspace and WorkspaceEnvironment runtime Pods. "+
 			"Empty selects the default, the official image of this controller version.")
+	flag.StringVar(&needyImage, "needy-image", "",
+		"The image that provides needy at /usr/local/bin/needy, a shell, and CA roots. "+
+			"It runs the per-namespace needy daemon and Actor runners, and Workspaces copy needy from it. "+
+			"Empty disables Actors and spec.needy.")
+	flag.StringVar(&needyKVMResource, "needy-kvm-resource", "",
+		"The extended resource that exposes /dev/kvm to Actor runner Pods, for example devices.kubevirt.io/kvm.")
+	flag.StringVar(&needyKVMNodeSelector, "needy-kvm-node-selector", "",
+		"Node selector of Pods that need KVM, as key=value pairs separated by commas.")
+	flag.StringVar(&needyKVMTolerations, "needy-kvm-tolerations", "",
+		"Tolerations of Pods that need KVM, as key[=value]:Effect entries separated by commas.")
+	flag.Int64Var(&needyKVMGroup, "needy-kvm-group", 0,
+		"The group that owns /dev/kvm on KVM nodes. Zero adds no supplemental group.")
+	flag.BoolVar(&needyDaemonKVM, "needy-daemon-kvm", false,
+		"Run each needy daemon on a KVM node with the KVM device, so it can build image steps itself.")
+	flag.StringVar(&needyDaemonStorageClass, "needy-daemon-storage-class", "",
+		"Storage class of each needy daemon's state volume. Empty keeps the state in an emptyDir, "+
+			"which loses run history and paired clients when the daemon restarts.")
+	flag.StringVar(&needyGatewayBlockCIDRs, "needy-gateway-block-cidrs", "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
+		"Address ranges the needy actor gateway refuses, separated by commas: the cluster's Pod, Service, and node ranges.")
+	flag.StringVar(&needyControllerNamespace, "needy-controller-namespace", os.Getenv("POD_NAMESPACE"),
+		"The manager's namespace, whose manager Pods each needy daemon's NetworkPolicy admits. "+
+			"Defaults to POD_NAMESPACE.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -214,6 +250,13 @@ func main() {
 		os.Exit(1)
 	}
 	processRuntime := processruntime.NewKubeRuntime(podExecutor)
+	needyConfig, err := needyConfiguration(needyImage, needyKVMResource, needyKVMNodeSelector, needyKVMTolerations,
+		needyKVMGroup, needyDaemonKVM, needyDaemonStorageClass, needyGatewayBlockCIDRs)
+	if err != nil {
+		setupLog.Error(err, "Invalid needy configuration")
+		os.Exit(1)
+	}
+	needyConfig.ControllerNamespace = needyControllerNamespace
 
 	if err := (&controller.AgentCredentialReconciler{
 		Client: mgr.GetClient(),
@@ -269,6 +312,7 @@ func main() {
 		DarwinWorkspaceRoot: darwinWorkspaceRoot,
 		LXCFSDir:            lxcfsDir,
 		RCKubeImage:         rcKubeImage,
+		NeedyImage:          needyConfig.Image,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "workspaces-workspace")
 		os.Exit(1)
@@ -314,6 +358,22 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "repositories-repositorysync")
 		os.Exit(1)
 	}
+	if err := (&workspacescontroller.ActorReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Config: needyConfig,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "workspaces-actor")
+		os.Exit(1)
+	}
+	if err := (&workspacescontroller.NeedyReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Config: needyConfig,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "workspaces-needy")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
@@ -330,4 +390,39 @@ func main() {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
+}
+
+// needyConfiguration validates the needy flags.
+func needyConfiguration(image, kvmResource, nodeSelector, tolerations string, kvmGroup int64,
+	daemonKVM bool, storageClass, blockCIDRs string) (needy.Config, error) {
+	selector, err := needy.ParseSelector(nodeSelector)
+	if err != nil {
+		return needy.Config{}, err
+	}
+	parsedTolerations, err := needy.ParseTolerations(tolerations)
+	if err != nil {
+		return needy.Config{}, err
+	}
+	config := needy.Config{
+		Image:              image,
+		KVMResource:        corev1.ResourceName(kvmResource),
+		KVMNodeSelector:    selector,
+		KVMTolerations:     parsedTolerations,
+		KVMGroup:           kvmGroup,
+		DaemonKVM:          daemonKVM,
+		DaemonStorageClass: storageClass,
+	}
+	for cidr := range strings.SplitSeq(blockCIDRs, ",") {
+		if cidr = strings.TrimSpace(cidr); cidr != "" {
+			if _, _, err := net.ParseCIDR(cidr); err != nil {
+				return needy.Config{}, fmt.Errorf("--needy-gateway-block-cidrs: %w", err)
+			}
+			config.GatewayBlockCIDRs = append(config.GatewayBlockCIDRs, cidr)
+		}
+	}
+	if config.DaemonKVM && config.KVMResource == "" {
+		return needy.Config{}, fmt.Errorf("--needy-daemon-kvm requires --needy-kvm-resource")
+	}
+
+	return config, nil
 }

@@ -118,6 +118,7 @@ RUN apt-get update \
         libxkbcommon0 \
         libxrandr2 \
         openssh-client \
+        openssh-sftp-server \
         pkg-config \
         procps \
         python3 \

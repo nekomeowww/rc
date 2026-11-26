@@ -1,0 +1,11 @@
+# The custom image as a container under Apple's `container`, which runs it
+# as it is: load it into Apple's image store from Docker, or build it with
+# `container build` from a base already there (`needy image build
+# --macos-apple-container`, or `needy image pull`):
+#
+#   docker build -t needy-custom-jq examples/custom-image
+#   docker save needy-custom-jq -o needy-custom-jq.tar
+#   container image load --input needy-custom-jq.tar
+extends: macos-vz.yaml
+actor:
+  driver: macos-apple-container

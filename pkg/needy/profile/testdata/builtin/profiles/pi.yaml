@@ -1,0 +1,19 @@
+# pi in an actor, built from `ghcr.io/needy-dev/features/pi:1`.
+#
+# Start pi directly (needy builds and caches the feature layer on first run):
+#   needy run create -it --profile builtin:pi
+#
+# Extend this profile to add an executor, routing rules, or a stricter network
+# allowlist. The feature automatically syncs `~/.pi/agent` with needy's
+# `<data_dir>/files/pi` store across runs and sets `PI_SKIP_VERSION_CHECK=1`
+# and `PI_TELEMETRY=0`.
+user: { name: agent, uid: 1000, gid: 1000 }
+
+actor:
+  driver: linux-firecracker
+  image:
+    layers:
+      - feature: ghcr.io/needy-dev/features/pi:1
+  command: [pi]
+  network:
+    allow: ["*"]

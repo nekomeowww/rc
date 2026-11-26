@@ -1,0 +1,22 @@
+# herdr in an actor, built from the OCI features in `ghcr.io/needy-dev/features`.
+#
+# Start herdr directly (needy builds and caches each feature layer once):
+#   needy run create -it --profile builtin:herdr
+#
+# Extend this profile to add an executor, routing rules, or a stricter network
+# allowlist. Each agent feature sets its own environment variables and
+# automatically syncs its state directory (`~/.codex`, `~/.pi/agent`,
+# `~/.local/share/opencode`) with needy's `<data_dir>/files/<agent>` store.
+user: { name: agent, uid: 1000, gid: 1000 }
+
+actor:
+  driver: linux-firecracker
+  image:
+    layers:
+      - feature: ghcr.io/needy-dev/features/codex:1
+      - feature: ghcr.io/needy-dev/features/pi:1
+      - feature: ghcr.io/needy-dev/features/opencode:1
+      - feature: ghcr.io/needy-dev/features/herdr:1
+  command: [herdr]
+  network:
+    allow: ["*"]

@@ -1,0 +1,49 @@
+# examples/chaos with an Apple `container` actor: copy-in and mirror-out on
+# the actor, a file fault on the shared workspace and an exec fault, with
+# this Mac as a native executor. The sensor fault has no effect here: Apple's
+# default kernel has no sensors (`needy config profile check` says so). Create the
+# executor's directory and the results' first: `mkdir -p
+# /tmp/needy-apple-chaos-ws examples/macos-apple-container/out`.
+user: { name: agent, uid: 1000, gid: 1000 }
+actor:
+  driver: macos-apple-container
+  recipe: ../opencode/gce.recipe.yaml
+  workspace: { path: ~/workspace, from: "executor:build:/tmp/needy-apple-chaos-ws", writable: true }
+  command:
+    - /bin/sh
+    - -c
+    - |
+      echo "== copy-in"; ls ~/seed; cat ~/seed/note.txt
+      echo "== file fault"
+      python3 -c "open('ok.txt','w').write('fine')"
+      python3 -c "open('broken.json','w').write('{}')"; echo "python3 exit=$?"
+      cat ~/workspace/ok.txt; echo
+      cat ~/workspace/broken.json; echo "cat exit=$?"
+      echo "== exec fault"; curl -s http://example.invalid; echo "curl exit=$?"
+      mkdir -p ~/out && echo "written in the actor" > ~/out/result.txt
+executors:
+  build:
+    driver: native
+commands:
+  - { match: "{python3,curl} **", to: build }
+files:
+  seed:
+    mode: copy-in
+    from: "host:../chaos/seed/"
+    to: "actor:~/seed/"
+    filter: ["- /secret.txt", "+ **"]
+  results:
+    mode: mirror-out
+    from: "actor:~/out/"
+    to: "host:./out/{run}/"
+run_files: [seed, results]
+chaos:
+  seed: 1
+  # No trigger: each fault fires on every match.
+  faults:
+    broken-json: { file: { open: "**/*.json" }, errno: EIO }
+    curl-down:
+      exec: "curl **"
+      exit: 7
+      stderr: "curl: (7) Failed to connect to example.invalid port 80: Connection refused\n"
+    overheat: { sensor: { temp_c: 101 }, at: 2s }

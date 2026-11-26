@@ -1,0 +1,34 @@
+# Latency and throughput probes run inside the actor. Run it with
+# `cargo xtask bench run --profile examples/bench/profile.yaml`, which builds
+# the probes into target/bench-probe/ for the copy-in below. The probes run
+# from the home directory, not /.needy, because execs made by programs in
+# /.needy are never routed.
+user: { name: agent, uid: 1000, gid: 1000 }
+actor:
+  driver: linux-firecracker
+  recipe: ../opencode/gce.recipe.yaml
+  workspace: { path: ~/workspace, from: "executor:build:~/workspace", writable: true }
+  command:
+    - /bin/sh
+    - -c
+    - |
+      ~/probe/xtask bench suite \
+        "spawn -n 300 --label actor-local -- /usr/bin/test 1" \
+        "spawn -n 300 --label actor-proxy-decide-local -- /bin/sh -c true" \
+        "spawn -n 300 --label actor-routed-docker -- true" \
+        "pipe --label actor-routed-docker-256MiB -- head -c 268435456 /dev/zero" \
+        "fs --label actor-tmpfs --mib 256 --files 1000 /tmp/fsbench" \
+        "fs --label actor-sshfs-docker --mib 256 --files 1000 /home/agent/workspace/fsbench" \
+        "spawn -n 100 --label actor-gateway-http -- curl -s -o /dev/null http://model.needy/api/version"
+  network:
+    # In the actor, http://model.needy goes to this URL on the control host.
+    services: { model: { url: "http://127.0.0.1:11434" } }
+executors:
+  build: { driver: linux-container, key: "{run}" }
+commands:
+  - { match: "{true,head} **", to: build }
+files:
+  probe: { mode: copy-in, from: "host:../../target/bench-probe/", to: "actor:~/probe/" }
+run_files: [probe]
+# Per-hook latencies; `cargo xtask bench run --state-dir DIR` prints them.
+trace: { timing: true }

@@ -1,0 +1,31 @@
+# A custom actor image (the Dockerfile here: needy's base plus jq) on a
+# Linux host with KVM: a Firecracker actor that boots the base VM image with
+# the image's layers above actor-base imported. Build it FROM actor-base and
+# push it (see the Dockerfile), then, optionally, import it ahead of a run:
+#
+#   docker build --build-arg BASE=<actor-base> --build-arg SHIM=0 \
+#     -t registry.example.com/needy-custom-jq:1 examples/custom-image
+#   docker push registry.example.com/needy-custom-jq:1
+#   needy image build --from registry.example.com/needy-custom-jq:1
+#
+# jq runs in the actor; python3 is routed to an executor, as in
+# examples/smoke. `linux-container.yaml` runs the same image as a container
+# on a host without KVM, and `macos-vz.yaml` and
+# `macos-apple-container.yaml` on a Mac with Apple silicon.
+user: { name: agent, uid: 1000, gid: 1000 }
+actor:
+  driver: linux-firecracker
+  image: registry.example.com/needy-custom-jq:1
+  workspace: { path: ~/workspace, from: "executor:build:~/workspace", writable: true }
+  command:
+    - /bin/sh
+    - -c
+    - |
+      echo "== jq in the actor"; command -v jq; echo '{"tool":"jq"}' | jq -r .tool
+      echo "== routed python3"
+      python3 -c "import os,platform; print(platform.node(), os.getcwd())"
+      python3 -c "import sys; sys.exit(7)"; echo "routed exit=$?"
+executors:
+  build: { driver: linux-container, key: "{run}", max_procs: 4 }
+commands:
+  - { match: "python3 **", to: build }

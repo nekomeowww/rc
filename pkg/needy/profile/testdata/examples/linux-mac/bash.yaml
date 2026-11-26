@@ -1,0 +1,24 @@
+# Linux entrypoint, Mac child processes, one shared project directory.
+# Walkthrough: docs/ai/explanations/linux-actor-mac-executor.md
+# NOTICE: shell builtins stay in bash. Container capture covers image shims,
+# not new unshimmed programs. Mac-only tools can run inside `bash -c`.
+user: { name: agent, uid: 1000, gid: 1000 }
+
+actor:
+  driver: linux-container
+  container: { oci_runtime: runc }
+  command: [bash]
+  workspace:
+    path: ~/workspace
+    from: "executor:mac:~/needy-demo"
+    writable: true
+  network:
+    allow: ["*"]
+
+executors:
+  mac: { runner: mac, driver: native }
+
+commands:
+  - { match: "**", to: mac }
+
+unknown: mac

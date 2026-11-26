@@ -1,0 +1,54 @@
+# OpenCode runs in Linux. Captured child processes run on the Mac.
+# Walkthrough: docs/ai/explanations/linux-actor-mac-executor.md
+# NOTICE: container capture covers image shims, not new unshimmed programs.
+user: { name: agent, uid: 1000, gid: 1000 }
+
+actor:
+  driver: linux-container
+  container: { oci_runtime: runc }
+  # OpenCode is in the released base image selected by needy.
+  command: [opencode]
+  workspace:
+    path: ~/workspace
+    from: "executor:mac:~/needy-demo"
+    writable: true
+  env:
+    OPENCODE_DISABLE_AUTOUPDATE: "1"
+  network:
+    allow: ["*"]
+
+executors:
+  mac: { runner: mac, driver: native }
+
+commands:
+  - { match: "**", to: mac }
+
+unknown: mac
+
+files:
+  data-in:
+    mode: copy-in
+    from: "host:~/needy-state/opencode-mac/data/"
+    to: "actor:~/.local/share/opencode/"
+  data-out:
+    mode: mirror-out
+    from: "actor:~/.local/share/opencode/"
+    to: "host:~/needy-state/opencode-mac/data/"
+    filter: ["- /bin/**", "- /log/**", "+ **"]
+  config-in:
+    mode: copy-in
+    from: "host:~/needy-state/opencode-mac/config/"
+    to: "actor:~/.config/opencode/"
+  config-out:
+    mode: mirror-out
+    from: "actor:~/.config/opencode/"
+    to: "host:~/needy-state/opencode-mac/config/"
+  state-in:
+    mode: copy-in
+    from: "host:~/needy-state/opencode-mac/state/"
+    to: "actor:~/.local/state/opencode/"
+  state-out:
+    mode: mirror-out
+    from: "actor:~/.local/state/opencode/"
+    to: "host:~/needy-state/opencode-mac/state/"
+run_files: [data-in, data-out, config-in, config-out, state-in, state-out]

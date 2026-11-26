@@ -1,0 +1,40 @@
+# pi against the mock model: one full agent loop with no account.
+# The mock asks for one bash tool call, pi runs it in the `build` executor,
+# and the mock answers `mock done: ` and the command's output, which pi
+# prints. README.md here has the steps:
+#   cargo xtask mock-model --listen 127.0.0.1:8787     # on the control host
+#   needy run create --profile examples/agents/mock-model/pi.yaml
+extends: ../pi.yaml
+
+actor:
+  # `-p` runs the prompt, prints the final answer and exits. `--no-session`
+  # keeps the session in memory. `--provider` and `--model` select the
+  # model from pi-agent/models.json.
+  # Reference: https://github.com/earendil-works/pi/blob/v1.5.2/packages/coding-agent/docs/cli.md#L47
+  # Reference: https://github.com/earendil-works/pi/blob/v1.5.2/packages/coding-agent/docs/cli.md#L65-L68
+  # Reference: https://github.com/earendil-works/pi/blob/v1.5.2/packages/coding-agent/docs/cli.md#L100-L101
+  command: [pi, -p, --no-session, --provider, mock, --model, mock, "List the files in the workspace with the bash tool."]
+  env:
+    # No automatic network activity, such as model catalog refreshes.
+    # Reference: https://github.com/earendil-works/pi/blob/v1.5.2/packages/coding-agent/docs/environment-variables.md#L84
+    PI_OFFLINE: "1"
+  network:
+    # In the actor, http://mock.needy goes to this URL, resolved on the
+    # control host. Use the port that `cargo xtask mock-model` listens on.
+    services:
+      mock: { url: "http://127.0.0.1:8787" }
+
+# pi reads custom providers from models.json in its agent directory.
+# pi-agent/models.json (next to this profile) adds the provider `mock`: the
+# openai-completions API at http://mock.needy/v1, with any API key.
+# Reference: https://github.com/earendil-works/pi/blob/v1.5.2/packages/coding-agent/docs/models.md#L45-L63
+# A relative `host:` path is relative to this profile's directory. The
+# parent's login mappings are removed: there is no login to keep.
+files:
+  pi-in: null
+  pi-out: null
+  mock-config:
+    mode: copy-in
+    from: "host:pi-agent/"
+    to: "actor:~/.pi/agent/"
+run_files: [mock-config]

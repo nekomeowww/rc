@@ -1,0 +1,106 @@
+# Every written form the schema takes: string-or-object values, numbers
+# where strings are also allowed, explicit nulls, and scalars that only
+# YAML 1.2 reads as strings.
+user: { name: agent, uid: 1000, gid: 1000 }
+actor:
+  driver: linux-container
+  container: { oci_runtime: runsc }
+  seed: worker-1
+  image:
+    root: ubuntu:24.04
+    pull_policy: never
+    layers:
+      - run: apt-get update && apt-get install -y jq
+      - feature: ghcr.io/devcontainers/features/node:1
+        with: { version: "22", installYarn: false, retries: 3 }
+    env: { LANG: C.UTF-8 }
+    hooks:
+      start: ["echo start", [printf, "%s\n", "two words"]]
+      stop: []
+  command: echo   hello   world
+  env:
+    OCTAL_LOOKING: 007
+    UNDERSCORED: 1_000
+    YES_WORD: yes
+    TILDE_STRING: "~"
+    EMPTY: ""
+    "1": numeric key
+  limits: null
+  workspace: { path: ~/ws, from: "host:./ws", writable: true }
+  network:
+    allow: ["*.example.com"]
+    services: {}
+executors:
+  build:
+    runner: { labels: [kvm, "os=linux"] }
+    driver: linux-container
+    workspace: /srv/build
+    path_map: { "~/ws": /srv/build }
+    key: "{group}"
+    max_procs: 2
+    on_full: reject
+    max_instances: 1
+    idle_timeout: 90
+    unavailable_timeout: "1m 30s"
+    container:
+      image: debian:12
+      cpus: 2
+      memory: 1024
+      memory_swap: 2GiB
+      shm_size: 0.5G
+      ulimits: { nofile: { soft: 1024, hard: 4096 } }
+      mounts:
+        - { type: volume, target: /anon }
+      dns: ["2001:db8::53"]
+      gpus: ["0", GPU-1234]
+      devices:
+        - { host: /dev/fuse }
+        - { host: /dev/kvm, container: /dev/kvm, permissions: rw }
+      privileged: false
+      security_opt: [no-new-privileges]
+  local:
+    runner: { client: true }
+    driver: native
+  other:
+    runner: other
+    max_procs: 0
+executor_network: {}
+presets:
+  traced: { env: { default: { TRACE: "1" }, unset: [DEBUG] }, timeout: 0.5 }
+commands:
+  - match: "make **"
+    when: { tty: false, under: "bash **", cwd: "~/ws/**", env: { CI: "true" } }
+    to: executor
+    executor: build
+    use: [traced]
+    args: { append: [-j, 4, 2.50, true] }
+    exec: make --no-print-directory
+    files: []
+  - match: "rm -rf /"
+    deny: refused
+    when: null
+  - { match: "**", final: false }
+resolvers:
+  - { match: "npx {pkg} **", identity: { package: "{pkg}" }, sticky: false }
+unknown: actor
+default_executor: ~
+files:
+  store:
+    mode: sync
+    from: "host:./store/"
+    to: "actor:~/store/"
+    on-conflict:
+      "b/**": run
+      "a/**": { driver: " merge-tool " }
+      "*.log": lines
+      "**": store
+  out: { mode: mirror-out, from: "actor:~/ws/out/", to: "host:./out/", when: end, delete: true }
+run_files: [store, out]
+chaos:
+  seed: 0
+  faults:
+    segv: { exec: "cc **", signal: SEGV, stderr: "boom\n", probability: 1, after: 0.25, until: 10 }
+    slow-file: { file: { open: "**/*.lock" }, delay: 500ms, nth: 2 }
+    teapot: { net: { request: "model.needy" }, status: 418, times: 1 }
+    refuse: { net: { connect: "*.invalid" }, refuse: true, reset: false }
+trace: { sinks: [jsonl], timing: false }

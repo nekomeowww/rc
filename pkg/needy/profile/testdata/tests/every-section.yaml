@@ -1,0 +1,64 @@
+user: { name: agent, uid: 1000, gid: 1000 }
+actor:
+  driver: linux-firecracker
+  recipe: gce-e2-standard-4
+  limits: { single_process: true, self_replace: true }
+  command: opencode run hello
+  network:
+    allow: [openrouter.ai, "*.models.dev"]
+    services:
+      ollama: { url: "http://127.0.0.1:11434" }
+executors:
+  build:
+    runner: { labels: [kvm, os=linux] }
+    driver: linux-container
+    container:
+      build: { context: ./env, dockerfile: Dockerfile.build, target: toolchain, args: { RUST_VERSION: "1.97" } }
+      cpus: 4
+      memory: 8GiB
+    key: "{run}"
+    max_procs: 4
+    on_full: wait
+    max_instances: 16
+    idle_timeout: 10m
+  mac:
+    runner: mac
+    key: "{rule}"
+    max_procs: 1
+executor_network:
+  allow: [registry.npmjs.org]
+  record: true
+presets:
+  clean-env: { env: { clear: true, pass: [PATH, HOME] } }
+commands:
+  - match: "{node,bun} {script} **"
+    when: { captures: { script: "**/pi/dist/cli.js" }, has: [--x] }
+    to: actor
+    final: true
+  - match: "**"
+    to: build
+    use: [clean-env]
+    args: { prepend: [-c, color.ui=never] }
+    wrap: timeout 600
+    timeout: 1m
+resolvers:
+  - { match: "mytool run {script} **", effective: "{script} **" }
+unknown: build
+files:
+  skills: { mode: copy-in, from: "host:./.agents/", to: "actor:~/.agents/" }
+  codex-home:
+    mode: copy-in
+    from: "host:~/.codex/"
+    to: "actor:~/.codex/"
+    filter: ["- /auth.json", "- /sessions/**", "+ **"]
+  workspace: { mode: mount, from: "executor:build:~/workspace/", to: "actor:~/workspace/", writable: true }
+  sessions: { mode: mirror-out, from: "actor:~/.codex/sessions/", to: "host:./sessions/", when: continuous }
+  ignore_file: .needyignore
+run_files: [skills, workspace]
+chaos:
+  seed: 42
+  faults:
+    flaky-json: { file: { open: "~/workspace/**/*.json" }, errno: EIO, probability: 0.01 }
+    slow-npm: { net: { connect: registry.npmjs.org }, delay: 2s, nth: 3 }
+    overheat: { sensor: { temp_c: 101 }, at: 5m }
+    curl-down: { exec: "curl **", exit: 7, stderr: "curl: (7) refused", times: 3, after: 1m, until: 1h }

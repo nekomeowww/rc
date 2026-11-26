@@ -1,0 +1,20 @@
+# A `linux-container` executor for `needy run exec RUN`. The actor only waits: the
+# commands come from `needy run exec`, which the rules send to `build`.
+# `needy proc exec --runner NAME` reaches a runner's machine without a run.
+user: { name: agent, uid: 1000, gid: 1000 }
+actor:
+  driver: linux-firecracker
+  command: [sleep, infinity]
+executors:
+  build:
+    driver: linux-container
+    key: "{run}"
+    # Run options are typed fields, each a Docker API field (see the
+    # profile design note's "Run options").
+    container:
+      cpus: 2
+      memory: 2GiB
+      pids_limit: 1024
+      env: { NEEDY_EXAMPLE: cli }
+commands:
+  - { match: "**", to: build }

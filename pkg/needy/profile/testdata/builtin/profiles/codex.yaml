@@ -1,0 +1,28 @@
+# Codex in an actor, built from `ghcr.io/needy-dev/features/codex:1`.
+#
+# Start Codex directly (needy builds and caches the feature layer on first run):
+#   needy run create -it --profile builtin:codex
+#
+# Extend this profile to add an executor, routing rules, or a stricter network
+# allowlist. The feature automatically syncs `~/.codex` with needy's
+# `<data_dir>/files/codex` store across runs.
+user: { name: agent, uid: 1000, gid: 1000 }
+
+actor:
+  driver: linux-firecracker
+  image:
+    layers:
+      - feature: ghcr.io/needy-dev/features/codex:1
+  # NOTICE: Codex's own sandbox is off because the actor and executor are the
+  # boundary; its Linux sandbox would wrap only the actor's side of each exec.
+  # Reference: https://developers.openai.com/codex/config-reference
+  command:
+    - codex
+    - --sandbox
+    - danger-full-access
+    - -c
+    - check_for_update_on_startup=false
+    - -c
+    - analytics.enabled=false
+  network:
+    allow: ["*"]

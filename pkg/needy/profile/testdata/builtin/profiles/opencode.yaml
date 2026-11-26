@@ -1,0 +1,19 @@
+# opencode in an actor, built from `ghcr.io/needy-dev/features/opencode:1`.
+#
+# Start opencode directly (needy builds and caches the feature layer on first run):
+#   needy run create -it --profile builtin:opencode
+#
+# Extend this profile to add an executor, routing rules, or a stricter network
+# allowlist. The feature automatically syncs `~/.local/share/opencode` with
+# needy's `<data_dir>/files/opencode` store across runs and sets
+# `OPENCODE_DISABLE_AUTOUPDATE=1`.
+user: { name: agent, uid: 1000, gid: 1000 }
+
+actor:
+  driver: linux-firecracker
+  image:
+    layers:
+      - feature: ghcr.io/needy-dev/features/opencode:1
+  command: [opencode]
+  network:
+    allow: ["*"]

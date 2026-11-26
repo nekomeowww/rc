@@ -1,0 +1,50 @@
+# opencode in an actor, built from `ghcr.io/needy-dev/features/opencode:1`.
+# Every shell it starts, and so every command its bash tool runs, goes to the
+# `build` executor, which holds the workspace.
+# examples/opencode runs it against a local model instead.
+#
+# Start opencode directly (needy builds and caches the feature layer on first run):
+#   needy run create -it --profile examples/agents/opencode.yaml
+#
+# On the first start, run /connect (or `opencode auth login`) and pick a
+# provider: an API key is pasted in; GitHub Copilot signs in with a device
+# code; a browser sign-in that calls back to the actor's localhost cannot
+# finish from a browser elsewhere. The feature automatically syncs
+# `~/.local/share/opencode` with needy's `<data_dir>/files/opencode` store
+# across runs and sets `OPENCODE_DISABLE_AUTOUPDATE=1`.
+user: { name: agent, uid: 1000, gid: 1000 }
+
+actor:
+  driver: linux-firecracker
+  image:
+    layers:
+      - feature: ghcr.io/needy-dev/features/opencode:1
+  workspace: { path: ~/workspace, from: "executor:build:~/workspace", writable: true }
+  command: [opencode]
+  # Without /connect: a provider's API key (opencode reads
+  # OPENAI_API_KEY, OPENROUTER_API_KEY, ...). It then lives in the actor
+  # (needy has no header injection yet, `TODO(mitm)`) and in the run's stored
+  # profile, so set it in a private profile that `extends:` this one, never in
+  # a shared file:
+  # env: { OPENAI_API_KEY: <api-key> }
+  network:
+    # opencode.ai: OpenCode Zen and the config schema; models.dev: the model
+    # catalog; registry.npmjs.org: the provider packages opencode installs
+    # when it first uses a provider; then the providers' APIs: OpenAI,
+    # OpenRouter and GitHub Copilot (github.com and api.github.com
+    # for its device sign-in). Add another provider's host here;
+    # `needy run report` lists denied hosts.
+    allow: [opencode.ai, "*.opencode.ai", models.dev, "*.models.dev", registry.npmjs.org,
+            api.openai.com, openrouter.ai,
+            github.com, api.github.com, api.individual.githubcopilot.com]
+
+executors:
+  build: { driver: linux-container, key: "{run}", max_procs: 8 }
+
+commands:
+  # The bash tool runs `bash -c ...`.
+  - match: "{bash,sh,dash,zsh} **"
+    to: build
+  # Identity probes stay on the actor's recipe.
+  - match: "{uname,lscpu,hostname,nproc,free,uptime} **"
+    to: actor

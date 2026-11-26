@@ -95,6 +95,31 @@ type ActorExecutor struct {
 	WorkspaceRef corev1.LocalObjectReference `json:"workspaceRef"`
 }
 
+// ActorUpstream sends the actor's internet traffic through a SOCKS5 proxy.
+// The actor runner dials it for every connection that the gateway allows;
+// a proxy that fails refuses the connection instead of dialing directly.
+type ActorUpstream struct {
+	// url is socks5h://HOST:PORT or socks5://HOST:PORT. With socks5h the
+	// proxy resolves names, so it must itself refuse private, cluster, and
+	// metadata addresses.
+	// +kubebuilder:validation:Pattern=`^socks5h?://[^/@\s]+:[0-9]{1,5}$`
+	// +kubebuilder:validation:MaxLength=255
+	// +required
+	URL string `json:"url"`
+
+	// credentialsSecretRef names a Secret key in the Actor's namespace that
+	// holds one line, USERNAME:PASSWORD. The runner reads it for every
+	// connection, so a rotated Secret applies once the kubelet syncs it.
+	// +optional
+	CredentialsSecretRef *corev1.SecretKeySelector `json:"credentialsSecretRef,omitempty"`
+
+	// podSelector selects the proxy Pods in the Actor's namespace. With the
+	// manager's NetworkPolicies, the actor Pod may then reach them on the
+	// URL's port; a proxy inside the cluster needs it.
+	// +optional
+	PodSelector *metav1.LabelSelector `json:"podSelector,omitempty"`
+}
+
 // ActorSpec defines one needy run whose actor runs in a Firecracker VM on a
 // KVM node. The spec is immutable.
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Actor spec is immutable"
@@ -120,6 +145,11 @@ type ActorSpec struct {
 	// to it with `needy run attach`. Leave it unset for headless agents.
 	// +optional
 	Terminal bool `json:"terminal,omitempty"`
+
+	// upstream sends the actor's internet traffic through a proxy, so it
+	// leaves with the proxy's address instead of the node's.
+	// +optional
+	Upstream *ActorUpstream `json:"upstream,omitempty"`
 
 	// resources of the actor runner Pod. They must cover the VM, Firecracker,
 	// and the runner. The manager adds the KVM device.

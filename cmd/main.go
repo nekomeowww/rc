@@ -88,6 +88,8 @@ func main() {
 	var needyDaemonKVM bool
 	var needyDaemonStorageClass string
 	var needyGatewayBlockCIDRs string
+	var needyNetworkPolicies bool
+	var needyControllerNamespace string
 
 	var secureMetrics bool
 	var enableHTTP2 bool
@@ -130,6 +132,11 @@ func main() {
 			"which loses run history and paired clients when the daemon restarts.")
 	flag.StringVar(&needyGatewayBlockCIDRs, "needy-gateway-block-cidrs", "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
 		"Address ranges the needy actor gateway refuses, separated by commas: the cluster's Pod, Service, and node ranges.")
+	flag.BoolVar(&needyNetworkPolicies, "needy-network-policies", false,
+		"Keep NetworkPolicies for each needy daemon and its actor runners. Needs a CNI that enforces them.")
+	flag.StringVar(&needyControllerNamespace, "needy-controller-namespace", os.Getenv("POD_NAMESPACE"),
+		"The manager's namespace, whose manager Pods each needy daemon's NetworkPolicy admits. "+
+			"Defaults to POD_NAMESPACE.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -254,6 +261,8 @@ func main() {
 		setupLog.Error(err, "Invalid needy configuration")
 		os.Exit(1)
 	}
+	needyConfig.NetworkPolicies = needyNetworkPolicies
+	needyConfig.ControllerNamespace = needyControllerNamespace
 
 	if err := (&controller.AgentCredentialReconciler{
 		Client: mgr.GetClient(),

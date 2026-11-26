@@ -234,6 +234,98 @@ spec:
                   terminal runs the driving program on a terminal, so a client can attach
                   to it with `needy run attach`. Leave it unset for headless agents.
                 type: boolean
+              upstream:
+                description: |-
+                  upstream sends the actor's internet traffic through a proxy, so it
+                  leaves with the proxy's address instead of the node's.
+                properties:
+                  credentialsSecretRef:
+                    description: |-
+                      credentialsSecretRef names a Secret key in the Actor's namespace that
+                      holds one line, USERNAME:PASSWORD. The runner reads it for every
+                      connection, so a rotated Secret applies once the kubelet syncs it.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  podSelector:
+                    description: |-
+                      podSelector selects the proxy Pods in the Actor's namespace. With the
+                      manager's NetworkPolicies, the actor Pod may then reach them on the
+                      URL's port; a proxy inside the cluster needs it.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  url:
+                    description: |-
+                      url is socks5h://HOST:PORT or socks5://HOST:PORT. With socks5h the
+                      proxy resolves names, so it must itself refuse private, cluster, and
+                      metadata addresses.
+                    maxLength: 255
+                    pattern: ^socks5h?://[^/@\s]+:[0-9]{1,5}$
+                    type: string
+                required:
+                - url
+                type: object
             required:
             - profile
             type: object

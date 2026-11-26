@@ -153,6 +153,7 @@ RUN apt-get update \
         libxrandr2 \
         mesa-utils \
         openssh-client \
+        openssh-sftp-server \
         pipewire \
         pkg-config \
         procps \

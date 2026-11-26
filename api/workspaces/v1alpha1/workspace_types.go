@@ -390,8 +390,9 @@ type WorkspaceNeedy struct {
 	// executor runs a needy executor runner as a resident service, so an Actor
 	// can route commands to this Workspace. rc generates the runner's
 	// credential, registers it with the namespace's needy daemon, and installs
-	// needy into the runtime. The Workspace image needs sftp-server for
-	// workspace mounts.
+	// needy into the runtime. An Actor mounts the Workspace's files through
+	// /usr/lib/openssh/sftp-server, which rc's runner images include; a
+	// custom image needs it too.
 	// +optional
 	Executor *WorkspaceNeedyExecutor `json:"executor,omitempty"`
 }

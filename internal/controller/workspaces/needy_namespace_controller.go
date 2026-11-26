@@ -79,12 +79,20 @@ const (
 // its static runners and clients files. The runners file names every
 // executor Workspace; the clients file names the manager, whose token the
 // manager generates before the daemon starts. The daemon scales to zero
-// while no executor Workspace remains; its state volume stays.
+// while no executor Workspace and no live Actor remain; its state volume
+// stays.
 type NeedyReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	Config NeedyConfig
+	// Now defaults to time.Now.
+	Now func() time.Time
 }
+
+// needyDaemonGrace keeps the daemon running after the last Actor ended, so
+// its run's logs and report can be read. They are lost when the daemon stops
+// unless its state is on a volume.
+const needyDaemonGrace = 10 * time.Minute
 
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;persistentvolumeclaims;secrets,verbs=get;list;watch;create;update;patch;delete
@@ -95,13 +103,14 @@ func (r *NeedyReconciler) Reconcile(ctx context.Context, request ctrl.Request) (
 		return ctrl.Result{}, nil
 	}
 	namespace := request.Namespace
-	workspaces, err := r.executorWorkspaces(ctx, namespace)
+	use, err := r.needyUsers(ctx, namespace)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	workspaces := use.workspaces
 	var deployment appsv1.Deployment
 	err = r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: needyDaemonName}, &deployment)
-	if apierrors.IsNotFound(err) && len(workspaces) == 0 {
+	if apierrors.IsNotFound(err) && len(workspaces) == 0 && !use.live {
 		return ctrl.Result{}, nil
 	}
 	if err != nil && !apierrors.IsNotFound(err) {
@@ -129,7 +138,7 @@ func (r *NeedyReconciler) Reconcile(ctx context.Context, request ctrl.Request) (
 		}
 	}
 	replicas := int32(0)
-	if len(workspaces) > 0 {
+	if len(workspaces) > 0 || use.live {
 		replicas = 1
 	}
 	if err := r.ensureDaemon(ctx, namespace, replicas); err != nil {
@@ -138,8 +147,66 @@ func (r *NeedyReconciler) Reconcile(ctx context.Context, request ctrl.Request) (
 	if err := r.ensureService(ctx, namespace); err != nil {
 		return ctrl.Result{}, err
 	}
+	if !use.liveUntil.IsZero() {
+		// Scale to zero once the last grace ends.
+		return ctrl.Result{RequeueAfter: use.liveUntil.Sub(r.now()) + time.Second}, nil
+	}
 
 	return ctrl.Result{}, nil
+}
+
+// needyUse is what a namespace needs from needy.
+type needyUse struct {
+	// workspaces serve as executors.
+	workspaces []workspacesv1alpha1.Workspace
+	// live is true while an Actor needs the daemon.
+	live bool
+	// liveUntil is when the daemon may scale to zero, if no Actor is live
+	// for another reason.
+	liveUntil time.Time
+}
+
+// needyUsers returns the namespace's executor Workspaces and whether an
+// Actor needs the daemon.
+func (r *NeedyReconciler) needyUsers(ctx context.Context, namespace string) (needyUse, error) {
+	workspaces, err := r.executorWorkspaces(ctx, namespace)
+	if err != nil {
+		return needyUse{}, err
+	}
+	use := needyUse{workspaces: workspaces}
+	var actors workspacesv1alpha1.ActorList
+	if err := r.List(ctx, &actors, client.InNamespace(namespace)); err != nil {
+		return needyUse{}, fmt.Errorf("list Actors: %w", err)
+	}
+	now := r.now()
+	for _, actor := range actors.Items {
+		// A deleting Actor still needs the daemon to stop its run, and an
+		// ended one to revoke its runner's credential.
+		if !actor.Status.Phase.IsTerminal() || actor.DeletionTimestamp != nil ||
+			(actor.Status.RunnerName != "" && actor.Annotations[actorCredentialRevokedAnnotation] == "") {
+			use.live = true
+			continue
+		}
+		if actor.Status.CompletedAt == nil {
+			continue
+		}
+		if until := actor.Status.CompletedAt.Add(needyDaemonGrace); until.After(now) {
+			use.live = true
+			if until.After(use.liveUntil) {
+				use.liveUntil = until
+			}
+		}
+	}
+
+	return use, nil
+}
+
+func (r *NeedyReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+
+	return time.Now()
 }
 
 // executorWorkspaces returns the namespace's executor Workspaces.
@@ -525,6 +592,7 @@ func (r *NeedyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("workspaces-needy").
 		Watches(&workspacesv1alpha1.Workspace{}, handler.EnqueueRequestsFromMapFunc(needyNamespaceRequest)).
+		Watches(&workspacesv1alpha1.Actor{}, handler.EnqueueRequestsFromMapFunc(needyNamespaceRequest)).
 		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(needyNamespaceRequest), needyObjects).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(needyNamespaceRequest), builder.WithPredicates(predicate.NewPredicateFuncs(func(object client.Object) bool {
 			return object.GetLabels()[workspacesv1alpha1.NeedyComponentLabel] == needyComponentDaemon

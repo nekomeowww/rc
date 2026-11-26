@@ -1,0 +1,230 @@
+// EXPERIMENTAL / UNSTABLE
+syntax = "proto3";
+
+package needy.v1;
+
+import "needy/v1/diagnostic.proto";
+
+// ProcessService starts, attaches to and controls processes. The daemon owns a
+// process and its terminal, so a client may disconnect and attach again.
+service ProcessService {
+  // The first request carries `start` or `attach`; later requests carry input.
+  // A start that does not run fails with PERMISSION_DENIED when a rule or an
+  // injected fault refuses the command, and with FAILED_PRECONDITION when the
+  // command cannot start, for example because it does not exist.
+  rpc Exec(stream ExecRequest) returns (stream ExecResponse);
+  rpc ListProcesses(ListProcessesRequest) returns (ListProcessesResponse);
+  rpc KillProcess(KillProcessRequest) returns (KillProcessResponse);
+}
+
+message WindowSize {
+  uint32 rows = 1;
+  uint32 cols = 2;
+}
+
+message ExecStart {
+  repeated string argv = 1;
+  string cwd = 2;
+  map<string, string> env = 3;
+  // Start from an empty environment instead of the executor's own.
+  bool clear_env = 4;
+  // Allocate a terminal of this size. Unset means pipes.
+  WindowSize tty = 5;
+  // Keep running after the client disconnects.
+  bool detach = 6;
+  // Run to route within. Empty means no run: run on `executor` directly.
+  string run_id = 7;
+  // Executor name. Empty lets the run's rules decide.
+  string executor = 8;
+  // Do not forward stdin; the process sees end of file at once.
+  bool no_stdin = 9;
+  // Who starts the process. Required.
+  Origin origin = 11;
+  // When `argv[0]` is an absolute path that does not exist on the executor,
+  // run the program of the same name on the executor's PATH instead. Routing
+  // sets it for a command the actor resolved on its own path; a start that
+  // names a path itself leaves it unset and fails when the path is missing.
+  bool search_path_if_missing = 12;
+  // Runner name: run on that runner's own machine, outside any run. Empty
+  // for a run's or this daemon's executors. Runner is exclusive with
+  // `run_id` and `executor`; run plus executor selects a run executor.
+  string runner = 13;
+
+  reserved 10;
+}
+
+// Control supplies this request after resolving its pooled instance. The
+// public control adapter rejects this lower-level process-owner message.
+message LimitedExecStart {
+  ExecStart start = 1;
+  ExecutorCapacity capacity = 2;
+}
+
+// Admission policy carried to the process owner, whose permits follow actual
+// child lifetime even when its control connection disappears.
+message ExecutorCapacity {
+  string key = 1;
+  uint32 max_procs = 2;
+  CapacityOnFull on_full = 3;
+}
+
+enum CapacityOnFull {
+  CAPACITY_ON_FULL_UNSPECIFIED = 0;
+  CAPACITY_ON_FULL_WAIT = 1;
+  CAPACITY_ON_FULL_REJECT = 2;
+}
+
+// Who started an exec. It decides whether the daemon applies the run's rules
+// and how the trace and the report count the process.
+enum Origin {
+  ORIGIN_UNSPECIFIED = 0;
+  // `needy exec`.
+  ORIGIN_CLI = 1;
+  // `needy fs`.
+  ORIGIN_FS = 2;
+  // The daemon's own copy-in and mirror-out.
+  ORIGIN_FILES = 3;
+  // A command the actor's kernel routed through the proxy, which decided
+  // its placement already.
+  ORIGIN_ACTOR_PROXY = 4;
+  // The SFTP server behind an actor's workspace mount.
+  ORIGIN_ACTOR_MOUNT = 5;
+}
+
+message ExecAttach {
+  string process_id = 1;
+  // Show what came before following: for a process on a terminal, its
+  // current screen drawn from the executor's terminal model; for pipes, the
+  // buffered output.
+  bool replay = 2;
+  // The attaching client's terminal size. A process on a terminal is resized
+  // to it, so a full-screen program redraws for the client. Unset keeps the
+  // size.
+  WindowSize window = 3;
+  // Watch only: the executor ignores this client's input, signals and
+  // window size.
+  bool read_only = 4;
+  // With an empty `process_id`: the driving program of this run's actor,
+  // which must run on a terminal.
+  string run_id = 5;
+}
+
+message ExecRequest {
+  oneof payload {
+    ExecStart start = 1;
+    ExecAttach attach = 2;
+    bytes stdin = 3;
+    bool stdin_eof = 4;
+    // Signal name, for example "SIGINT". Numbers differ between platforms.
+    string signal = 5;
+    WindowSize resize = 6;
+    // The client leaves without ending the process: it may close the
+    // stream, and the process keeps running as if started with `detach`.
+    bool detach = 7;
+    // A limited start is a distinct variant so older services reject it
+    // before spawning, instead of silently ignoring an additive policy field.
+    LimitedExecStart limited_start = 8;
+  }
+}
+
+message ExecStarted {
+  string process_id = 1;
+  string executor = 2;
+  int64 pid = 3;
+  // Arguments, working directory and executor after routing rules applied.
+  repeated string argv = 4;
+  string cwd = 5;
+  // Set when the executor has no terminfo entry for the requested `TERM`
+  // and gave the process another one.
+  TermFallback term_fallback = 6;
+}
+
+// A terminal type an executor replaced.
+message TermFallback {
+  // The `TERM` the client asked for.
+  string requested = 1;
+  // The `TERM` the process got.
+  string used = 2;
+}
+
+message ExecExited {
+  // Present when the process exited normally.
+  optional int32 code = 1;
+  // Signal name, for example "SIGTERM", when a signal ended the process.
+  string signal = 2;
+}
+
+// One trace event of an exec, as the daemon records it for the run.
+message ExecEvent {
+  // The event kind, for example "exec.decide" or "fault.injected".
+  string kind = 1;
+  // The kind's payload: a JSON object whose schema is `needy_core::event`.
+  string payload = 2;
+}
+
+// Why the daemon ended an exec stream before the process exited.
+message ExecEnded {
+  // For example "run stopped" or "daemon shutting down".
+  string reason = 1;
+}
+
+// The details of the status of an exec the daemon refused: the events of
+// the decision that refused it.
+message ExecRefusal {
+  repeated ExecEvent events = 1;
+}
+
+message ExecResponse {
+  ErrorDiagnostic diagnostic = 9;
+  oneof payload {
+    ExecStarted started = 1;
+    bytes stdout = 2;
+    bytes stderr = 3;
+    ExecExited exited = 4;
+    string error = 5;
+    // Sent before `started` for an exec placed within a run: its
+    // faults and placement decision.
+    ExecEvent event = 6;
+    // Sent last when the daemon ends the stream before the process exited;
+    // no `exited` follows. A stream that closes without `exited` or
+    // `ended` also ended before the process exited, for a reason unknown.
+    ExecEnded ended = 7;
+    // The executor took the client's `detach`: the client may close the
+    // stream now and the process keeps running.
+    bool detached = 8;
+  }
+}
+
+message ListProcessesRequest {
+  string run_id = 1;
+  // Only this runner's processes. Not with `run_id`.
+  string runner = 2;
+}
+
+message ProcessInfo {
+  string process_id = 1;
+  repeated string argv = 2;
+  string executor = 3;
+  int64 pid = 4;
+  bool running = 5;
+  ExecExited exited = 6;
+  bool tty = 7;
+  int64 started_at_ms = 8;
+  string run_id = 9;
+  // Who started the process. The control daemon sets it from the start it
+  // relayed; an executor, which does not keep it, and a daemon that did not
+  // start the process leave it unspecified.
+  Origin origin = 10;
+}
+
+message ListProcessesResponse {
+  repeated ProcessInfo processes = 1;
+}
+
+message KillProcessRequest {
+  string process_id = 1;
+  // Signal name, for example "SIGKILL". Empty means SIGTERM.
+  string signal = 2;
+}
+
+message KillProcessResponse {}

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Copies needy's control-plane protos at the pinned release into
+# apis/proto/needy/v1. rc generates its needy client from this copy, so a
+# needy upgrade shows its proto changes in review.
+#
+# Usage: hack/proto-sync [TAG]   (default: the tag in apis/proto/needy/VERSION)
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+version_file="$root/apis/proto/needy/VERSION"
+tag=${1:-$(cat "$version_file")}
+case "$tag" in
+  v[0-9]*.[0-9]*.[0-9]*) ;;
+  *) echo "proto-sync: tag must look like vX.Y.Z, got '$tag'" >&2; exit 2 ;;
+esac
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+curl -fsSL "https://codeload.github.com/needy-dev/needy/tar.gz/refs/tags/$tag" -o "$work/needy.tar.gz"
+# codeload names the top directory needy-<tag without the v>.
+tar -xzf "$work/needy.tar.gz" -C "$work" --strip-components=1 "needy-${tag#v}/proto/needy/v1"
+
+rm -rf "$root/apis/proto/needy/v1"
+mkdir -p "$root/apis/proto/needy/v1"
+cp "$work"/proto/needy/v1/*.proto "$root/apis/proto/needy/v1/"
+printf '%s\n' "$tag" > "$version_file"
+echo "proto-sync: copied needy $tag protos into apis/proto/needy/v1"

@@ -1,0 +1,405 @@
+// EXPERIMENTAL / UNSTABLE
+syntax = "proto3";
+
+package needy.v1;
+
+import "needy/v1/diagnostic.proto";
+import "needy/v1/process.proto";
+
+// RunnerService is the control plane's runner registry: join tokens, the
+// runners that joined with them, their heartbeats, and the streams runners
+// open to take tasks.
+//
+// Operators call it with the control daemon's token. `Join` needs no bearer
+// token: the join token in the request authenticates it. `Heartbeat`,
+// `Control` and `Task` are the only methods a runner's credential reaches.
+//
+// Runners dial the control plane and never listen. A runner keeps one
+// control stream (`Control`); the control plane announces each task on it
+// with an ID. A task with one request and one reply (list or kill
+// processes, end a run) is answered on the control stream; for an exec the
+// runner opens a `Task` stream that carries the exec's own `ExecRequest` and
+// `ExecResponse` messages. A runner's first message on every control stream
+// reports the processes of runs it still runs.
+service RunnerService {
+  // Create a join token. Its secret is in the response only.
+  rpc CreateJoinToken(CreateJoinTokenRequest) returns (CreateJoinTokenResponse);
+  // Every join token, including expired, spent and revoked ones.
+  rpc ListJoinTokens(ListJoinTokensRequest) returns (ListJoinTokensResponse);
+  rpc RevokeJoinToken(RevokeJoinTokenRequest) returns (RevokeJoinTokenResponse);
+  // Register a runner with a join token. Returns its credential, once.
+  rpc Join(JoinRequest) returns (JoinResponse);
+  // A runner reports that it is alive and what it can host. Authenticated
+  // by the runner's credential.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  // Every runner, including removed ones.
+  rpc ListRunners(ListRunnersRequest) returns (ListRunnersResponse);
+  // Ask for a new credential for a runner. The runner receives it in its
+  // next heartbeat response; its old credential stays valid until it uses
+  // the new one.
+  rpc RotateRunner(RotateRunnerRequest) returns (RotateRunnerResponse);
+  // Revoke a runner's credentials. It stays listed as removed.
+  rpc RemoveRunner(RemoveRunnerRequest) returns (RemoveRunnerResponse);
+  // Mint a short-lived, TTL-enforced runner credential directly without a
+  // join token. The credential is returned once.
+  rpc MintRunnerCredential(MintRunnerCredentialRequest) returns (MintRunnerCredentialResponse);
+  // Revoke a runner's credential immediately and close its active control
+  // stream.
+  rpc RevokeRunnerCredential(RevokeRunnerCredentialRequest) returns (RevokeRunnerCredentialResponse);
+  // A runner's control stream, open while the runner is connected: the
+  // control plane sends tasks, the runner the results of the tasks that
+  // take one reply. A runner that connects again replaces its earlier
+  // stream. Authenticated by the runner's credential.
+  rpc Control(stream ControlRequest) returns (stream ControlResponse);
+  // One exec task's stream, opened by the runner: its first request names
+  // the task, its later requests carry the exec's responses, and the
+  // control plane's responses carry the exec's requests, the first being
+  // the start or the attach. Authenticated by the runner's credential.
+  rpc Task(stream TaskRequest) returns (stream TaskResponse);
+}
+
+// What a runner can host. A join token's scope names roles; a runner
+// reports its `RunnerCapabilities`, whose roles are those with at least one
+// driver.
+enum RunnerRole {
+  RUNNER_ROLE_UNSPECIFIED = 0;
+  RUNNER_ROLE_ACTOR = 1;
+  RUNNER_ROLE_EXECUTOR = 2;
+}
+
+// How a runner can run an actor: an actor driver, as a profile's
+// `actor.driver` names it.
+enum ActorDriver {
+  ACTOR_DRIVER_UNSPECIFIED = 0;
+  // `linux-firecracker`: a usable KVM and the actor image (vmlinux,
+  // rootfs.ext4, firecracker).
+  ACTOR_DRIVER_LINUX_FIRECRACKER = 1;
+  // `linux-container`: a Docker-compatible engine that answers. Whether it
+  // has the OCI runtime a profile names (`runc`, gVisor's `runsc`) is
+  // checked when a run is created.
+  ACTOR_DRIVER_LINUX_CONTAINER = 2;
+  // `macos-vz`: Apple silicon macOS with vfkit and the `macos-vz` actor
+  // image (Image, rootfs.ext4): a Virtualization.framework VM.
+  ACTOR_DRIVER_MACOS_VZ = 3;
+  // `macos-apple-container`: Apple's `container` CLI on a Mac, whose
+  // services answer.
+  ACTOR_DRIVER_MACOS_APPLE_CONTAINER = 4;
+}
+
+// How a runner can create an executor: an executor driver, as a profile's
+// `executors.NAME.driver` names it.
+enum ExecutorDriver {
+  EXECUTOR_DRIVER_UNSPECIFIED = 0;
+  // `native`: the runner's own process space; every runner has it.
+  EXECUTOR_DRIVER_NATIVE = 1;
+  // `linux-container`: a Docker-compatible engine the runner reaches.
+  EXECUTOR_DRIVER_LINUX_CONTAINER = 2;
+}
+
+// What a runner can host: each role with its drivers. A role with none is a
+// role it does not hold.
+message RunnerCapabilities {
+  repeated ActorDriver actor = 1;
+  repeated ExecutorDriver executor = 2;
+}
+
+enum JoinTokenState {
+  JOIN_TOKEN_STATE_UNSPECIFIED = 0;
+  JOIN_TOKEN_STATE_VALID = 1;
+  JOIN_TOKEN_STATE_EXPIRED = 2;
+  // No uses are left.
+  JOIN_TOKEN_STATE_USED_UP = 3;
+  JOIN_TOKEN_STATE_REVOKED = 4;
+}
+
+enum RunnerStatus {
+  RUNNER_STATUS_UNSPECIFIED = 0;
+  // A heartbeat arrived within the last three heartbeat intervals.
+  RUNNER_STATUS_ONLINE = 1;
+  RUNNER_STATUS_OFFLINE = 2;
+  RUNNER_STATUS_REMOVED = 3;
+}
+
+message JoinToken {
+  // Public; names the token in listings and in `RevokeJoinToken`.
+  string id = 1;
+  // The roles a runner may declare; empty allows every role.
+  repeated RunnerRole roles = 2;
+  // Labels every runner that joins with it gets.
+  map<string, string> labels = 3;
+  int64 created_at_ms = 4;
+  int64 expires_at_ms = 5;
+  uint32 uses_left = 6;
+  JoinTokenState state = 7;
+}
+
+message CreateJoinTokenRequest {
+  // Required, positive.
+  int64 ttl_ms = 1;
+  // How many runners may join with it. Required, at least 1.
+  uint32 uses = 2;
+  repeated RunnerRole roles = 3;
+  map<string, string> labels = 4;
+}
+
+message CreateJoinTokenResponse {
+  JoinToken join_token = 1;
+  // The secret to hand to the runner; not stored, not shown again.
+  string token = 2;
+}
+
+message ListJoinTokensRequest {}
+
+message ListJoinTokensResponse {
+  repeated JoinToken join_tokens = 1;
+}
+
+message RevokeJoinTokenRequest {
+  string id = 1;
+}
+
+message RevokeJoinTokenResponse {}
+
+message JoinRequest {
+  string join_token = 1;
+  // A DNS label: lowercase letters, digits and '-'.
+  string name = 2;
+  reserved 3;
+  reserved "roles";
+  map<string, string> labels = 4;
+  // What the runner detected, restricted by its `--roles`. At least one
+  // role, each within the join token's roles.
+  RunnerCapabilities capabilities = 5;
+}
+
+message JoinResponse {
+  Runner runner = 1;
+  // The runner's credential, a bearer token for `Heartbeat`. Not stored,
+  // not shown again.
+  string credential = 2;
+  // How often the control plane expects a heartbeat.
+  int64 heartbeat_interval_ms = 3;
+}
+
+message HeartbeatRequest {
+  reserved 1;
+  reserved "roles";
+  map<string, string> labels = 2;
+  // The machine the runner runs on. The control plane checks a recipe
+  // against the host its actor would run on, and picks the SFTP server of a
+  // workspace mount by the platform.
+  RunnerHost host = 3;
+  // What the runner can host now, as at its join; its roles stay within its
+  // join token's scope.
+  RunnerCapabilities capabilities = 4;
+}
+
+// A runner's machine.
+message RunnerHost {
+  // The operating system and CPU architecture as Rust names them
+  // (`std::env::consts`): "linux", "macos"; "x86_64", "aarch64".
+  string os = 1;
+  string arch = 2;
+  // From `/proc/cpuinfo` on Linux; empty elsewhere.
+  string cpu_vendor = 3;
+  string cpu_model = 4;
+  repeated string cpu_flags = 5;
+  // The CPUID entries its KVM supports; unset without a usable KVM.
+  KvmCpuid kvm_cpuid = 6;
+  // The home directory of the user the runner runs as. A `~` in a native
+  // executor's paths on this runner (its `workspace`, `path_map` values and
+  // `executor:NAME:` file sides) is this directory. Empty when unknown.
+  string home = 7;
+}
+
+// What `KVM_GET_SUPPORTED_CPUID` reported.
+message KvmCpuid {
+  repeated CpuidEntry entries = 1;
+}
+
+message CpuidEntry {
+  uint32 leaf = 1;
+  uint32 subleaf = 2;
+}
+
+message HeartbeatResponse {
+  // A new credential after `RotateRunner`, empty otherwise. The runner keeps
+  // it and uses it from its next call on; that use retires the old one.
+  string credential = 1;
+  int64 heartbeat_interval_ms = 2;
+}
+
+message Runner {
+  string name = 1;
+  reserved 2;
+  reserved "roles";
+  // Its own labels and those of its join token.
+  map<string, string> labels = 3;
+  RunnerStatus status = 4;
+  int64 created_at_ms = 5;
+  // Its last heartbeat, or its join.
+  int64 last_seen_at_ms = 6;
+  // A new credential was asked for and the runner has not used it yet.
+  bool rotating = 7;
+  // The ID of the join token it joined with.
+  string join_token_id = 8;
+  // As it last reported them, in its join or a heartbeat.
+  RunnerCapabilities capabilities = 9;
+  // Its machine as its last heartbeat to this control plane process
+  // reported it; unset until one did.
+  RunnerHost host = 10;
+  // When a short-lived credential expires, in Unix milliseconds; unset for
+  // non-expiring runners.
+  optional int64 expires_at_ms = 11;
+  // Loaded from a static runners file rather than enrolled in state.db.
+  bool static_config = 12;
+}
+
+message ListRunnersRequest {}
+
+message ListRunnersResponse {
+  repeated Runner runners = 1;
+}
+
+message RotateRunnerRequest {
+  string name = 1;
+}
+
+message RotateRunnerResponse {}
+
+message RemoveRunnerRequest {
+  string name = 1;
+}
+
+message RemoveRunnerResponse {}
+
+message MintRunnerCredentialRequest {
+  // A DNS label: lowercase letters, digits and '-'.
+  string name = 1;
+  // Required, positive duration until the credential expires.
+  int64 ttl_ms = 2;
+  // Roles the runner is allowed to declare; empty allows every role.
+  repeated RunnerRole roles = 3;
+  // Labels applied to the runner.
+  map<string, string> labels = 4;
+}
+
+message MintRunnerCredentialResponse {
+  Runner runner = 1;
+  // The runner's credential; not stored, not shown again.
+  string credential = 2;
+  int64 expires_at_ms = 3;
+  // How often the control plane expects a heartbeat.
+  int64 heartbeat_interval_ms = 4;
+}
+
+message RevokeRunnerCredentialRequest {
+  string name = 1;
+}
+
+message RevokeRunnerCredentialResponse {}
+
+// From a runner on its control stream.
+message ControlRequest {
+  oneof payload {
+    TaskResult result = 1;
+    // Sent first on every control stream: the processes the runner still
+    // runs for runs. The control plane claims those of runs that are live
+    // and ends the others with `EndRun`.
+    RunnerReport report = 2;
+  }
+}
+
+// What a runner still runs for runs when it connects.
+message RunnerReport {
+  // Its running processes that belong to a run (`run_id` set).
+  repeated ProcessInfo processes = 1;
+}
+
+// From the control plane on a runner's control stream.
+message ControlResponse {
+  oneof payload {
+    RunnerTask task = 1;
+  }
+}
+
+// A task the control plane needs a runner to carry out.
+message RunnerTask {
+  // Unique among the tasks of one control stream.
+  uint64 id = 1;
+  oneof kind {
+    // Open a `Task` stream for this task.
+    ExecTask exec = 2;
+    // Answered on the control stream.
+    ListProcessesRequest list_processes = 3;
+    // Answered on the control stream.
+    KillProcessRequest kill_process = 4;
+    // End everything the runner runs for a run. Answered on the control
+    // stream.
+    EndRun end_run = 5;
+    // Start a remote actor for a run and bridge its channels outbound to the
+    // control plane using this runner's credential and `x-needy-run-id`.
+    StartActor start_actor = 6;
+  }
+}
+
+// Start a remote actor for `run_id` using `driver` (for example
+// `linux-firecracker`). The runner opens `GuestService.Bridge` with its own
+// credential and `x-needy-run-id: <run_id>`.
+message StartActor {
+  string run_id = 1;
+  string driver = 2;
+}
+
+// A run ended, or is not one the control plane knows: the runner kills its
+// processes, including a workspace mount's SFTP server.
+message EndRun {
+  string run_id = 1;
+}
+
+message EndRunResponse {
+  // The run's processes after the end, those that exited before it
+  // included.
+  repeated ProcessInfo processes = 1;
+  // The IDs of the processes this task killed.
+  repeated string ended = 2;
+}
+
+// An exec: its start or attach comes on the task's own stream.
+message ExecTask {}
+
+// The result of a task answered on the control stream.
+message TaskResult {
+  uint64 task_id = 1;
+  oneof result {
+    ListProcessesResponse list_processes = 2;
+    KillProcessResponse kill_process = 3;
+    TaskError error = 4;
+    EndRunResponse end_run = 5;
+  }
+}
+
+// Why a runner refused or failed a task, as the gRPC status its process
+// service returned.
+message TaskError {
+  bytes details = 3;
+  ErrorDiagnostic diagnostic = 4;
+  // A `google.rpc.Code` value.
+  int32 code = 1;
+  string message = 2;
+}
+
+message TaskRequest {
+  oneof payload {
+    // The first request: the task this stream is for.
+    uint64 task_id = 1;
+    ExecResponse exec = 2;
+    // The exec could not start or attach, or its stream failed; nothing
+    // follows.
+    TaskError error = 3;
+  }
+}
+
+message TaskResponse {
+  ExecRequest exec = 1;
+}

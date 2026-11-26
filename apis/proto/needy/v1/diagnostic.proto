@@ -1,0 +1,10 @@
+// EXPERIMENTAL / UNSTABLE
+syntax = "proto3";
+
+package needy.v1;
+
+// Bounded safe facts accompany the original status or stream payload.
+message ErrorDiagnostic {
+  string reason = 1;
+  map<string, string> facts = 2;
+}

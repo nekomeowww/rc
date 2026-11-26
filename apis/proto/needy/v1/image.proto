@@ -1,0 +1,231 @@
+// EXPERIMENTAL / UNSTABLE
+syntax = "proto3";
+
+package needy.v1;
+
+import "needy/v1/process.proto";
+
+// ImageService builds image definitions, runs interactive edit sessions,
+// and rolls back image commits on the control daemon's layer store.
+service ImageService {
+  // Resolve and build an image definition's layers, stacking any commit
+  // layer on top, and return the resulting snapshot digest.
+  rpc BuildImage(BuildImageRequest) returns (BuildImageResponse);
+  // Start an interactive edit session for an image. Only one edit session
+  // may run per image at a time. The caller attaches its terminal with
+  // ProcessService.Exec(ExecAttach { run_id: session_id }), then calls
+  // FinishImageEdit to obtain the committed layer and recorded commands.
+  rpc StartImageEdit(StartImageEditRequest) returns (StartImageEditResponse);
+  // Wait for an edit session to finish (or abort it without committing)
+  // and return the resulting commit and recorded commands.
+  rpc FinishImageEdit(FinishImageEditRequest) returns (FinishImageEditResponse);
+  // Step an image's commit pointer back by `steps` commits in its history.
+  rpc RollbackImage(RollbackImageRequest) returns (RollbackImageResponse);
+  // Return the commit history recorded for an image in the layer store.
+  rpc LogImage(LogImageRequest) returns (LogImageResponse);
+  // Resolve/build an image definition and stream it as a Docker/OCI image
+  // archive (`docker load` / `container image load` compatible).
+  rpc ExportImage(ExportImageRequest) returns (stream ExportImageResponse);
+  // Garbage-collect unreferenced cached layers, disks, OCI archives, stale
+  // cache keys, and `needy-snapshot:*` container images on the control daemon.
+  rpc PruneImages(PruneImagesRequest) returns (PruneImagesResponse);
+}
+
+// An image's commit layer from its lockfile: the layer holding hand edits
+// and the plan top cache key it was made on.
+message ImageCommit {
+  // The commit layer's digest (`sha256:<hex>`).
+  string layer = 1;
+  // The base plan top key (`sha256:<hex>`) the commit was made on.
+  string base = 2;
+}
+
+// The profile user that enters an image build plan's cache keys.
+message ImageUser {
+  string name = 1;
+  uint32 uid = 2;
+  uint32 gid = 3;
+}
+
+// One program an edit session executed, as decided by the daemon.
+message RecordedCommand {
+  repeated string argv = 1;
+  string cwd = 2;
+}
+
+// One step of an image build.
+message BuildStepResult {
+  string key = 1;
+  string layer = 2;
+  bool cached = 3;
+  uint64 ms = 4;
+}
+
+message BuildImageRequest {
+  // Self-contained image definition as YAML (its `extends` chain merged).
+  string image_yaml = 1;
+  // Actor driver name (`linux-firecracker`, `macos-vz`); empty picks this
+  // host's VM driver.
+  string driver = 2;
+  // Profile user for cache keys; unset uses the default user (`agent`, 1000:1000).
+  ImageUser user = 3;
+  // Optional commit layer from the image's lockfile, stacked on top.
+  ImageCommit commit = 4;
+  // Pinned feature digests (`canonical_ref -> sha256:<hex>`) from the
+  // image's lockfile.
+  map<string, string> pinned_features = 5;
+}
+
+message BuildImageResponse {
+  // The resulting snapshot digest (`sha256:<hex>`).
+  string snapshot = 1;
+  // True when `commit` was made on another base and applied on the new one.
+  bool commit_rebased = 2;
+  repeated BuildStepResult steps = 3;
+  // Resolved feature digests (`canonical_ref -> sha256:<hex>`) for the
+  // CLI to record in the image's lockfile.
+  map<string, string> resolved_features = 4;
+}
+
+message StartImageEditRequest {
+  // Stable identifier for the image, used for the per-image edit lock and
+  // commit history key in the layer store.
+  string image_name = 1;
+  // Self-contained image definition as YAML (its `extends` chain merged).
+  string image_yaml = 2;
+  // Actor driver name (`linux-firecracker`, `macos-vz`); empty picks this
+  // host's VM driver.
+  string driver = 3;
+  // Profile user for cache keys; unset uses the default user (`agent`, 1000:1000).
+  ImageUser user = 4;
+  // Current commit from the image's lockfile, if any.
+  ImageCommit commit = 5;
+  // Terminal size for the interactive shell.
+  WindowSize tty = 6;
+  // Wait for the client to attach its terminal before starting the shell.
+  bool wait_for_attach = 7;
+  // Pinned feature digests (`canonical_ref -> sha256:<hex>`) from the
+  // image's lockfile.
+  map<string, string> pinned_features = 8;
+}
+
+message StartImageEditResponse {
+  // The edit session ID; pass to ExecAttach.run_id and FinishImageEditRequest.
+  string session_id = 1;
+  // True when the parent commit was applied on a changed base.
+  bool commit_rebased = 2;
+  // Resolved feature digests (`canonical_ref -> sha256:<hex>`) for the
+  // CLI to record in the image's lockfile.
+  map<string, string> resolved_features = 3;
+}
+
+message FinishImageEditRequest {
+  string session_id = 1;
+  // Stop the edit session without committing its upper layer.
+  bool abort = 2;
+}
+
+message FinishImageEditResponse {
+  // The new commit (`layer` and `base`), unset if the session exited
+  // non-zero, was aborted, or uploaded no upper layer.
+  ImageCommit commit = 1;
+  // Programs the edit session ran, in order.
+  repeated RecordedCommand commands = 2;
+  // The interactive shell's exit status, if reported.
+  ExecExited exit = 3;
+}
+
+message RollbackImageRequest {
+  // Stable identifier for the image, as passed to StartImageEdit.
+  string image_name = 1;
+  // Current commit layer digest (`sha256:<hex>`) from the lockfile.
+  string from_layer = 2;
+  // Number of commits to roll back (must be >= 1).
+  uint32 steps = 3;
+}
+
+message RollbackImageResponse {
+  // Target commit layer digest (`sha256:<hex>`), or empty when rolled back
+  // past the first commit.
+  string layer = 1;
+  // Original base plan top key (`sha256:<hex>`) the target commit was made on,
+  // or empty when rolled back past the first commit or when the commit record
+  // predates base persistence.
+  string base = 2;
+}
+
+message LogImageRequest {
+  // Stable identifier for the image, as passed to StartImageEdit.
+  string image_name = 1;
+  // Current commit layer digest (`sha256:<hex>`) from the lockfile, if any,
+  // used to mark the active commit in the returned history.
+  string current_layer = 2;
+}
+
+// One recorded commit in an image's history.
+message CommitHistoryEntry {
+  // The commit layer's digest (`sha256:<hex>`).
+  string layer = 1;
+  // The parent commit layer's digest (`sha256:<hex>`), or empty for the first
+  // commit.
+  string parent = 2;
+  // The base plan top key (`sha256:<hex>`) the commit was made on, or empty
+  // when the commit record predates base persistence.
+  string base = 3;
+  // Programs executed during the edit session, in order.
+  repeated RecordedCommand commands = 4;
+  // When the commit was made, in milliseconds since the Unix epoch.
+  int64 time_ms = 5;
+  // True when `layer` matches the caller's `current_layer`.
+  bool active = 6;
+}
+
+message LogImageResponse {
+  // Recorded commits for the image, oldest first.
+  repeated CommitHistoryEntry commits = 1;
+}
+
+message ExportImageRequest {
+  // Self-contained image definition as YAML (its `extends` chain merged).
+  string image_yaml = 1;
+  // Actor driver name (`linux-firecracker`, `macos-vz`, `linux-container`,
+  // `macos-apple-container`); empty picks this host's VM driver.
+  string driver = 2;
+  // Profile user for cache keys; unset uses the default user (`agent`, 1000:1000).
+  ImageUser user = 3;
+  // Optional commit layer from the image's lockfile, stacked on top.
+  ImageCommit commit = 4;
+  // Pinned feature digests (`canonical_ref -> sha256:<hex>`) from the
+  // image's lockfile.
+  map<string, string> pinned_features = 5;
+  // Optional `repository:tag` embedded in the exported archive's manifest;
+  // empty defaults to `needy-snapshot:<digest>`.
+  string tag = 6;
+}
+
+message ExportImageResponse {
+  // Raw bytes of the exported Docker/OCI tar archive.
+  bytes data = 1;
+}
+
+message PruneImagesRequest {
+  // Also prune cached base OCI exports (`base-oci/*.tar`).
+  bool all = 1;
+  // Compute what would be pruned without removing any files or images.
+  bool dry_run = 2;
+  // Additional snapshot or layer digests (`sha256:<hex>`) to keep alongside
+  // live runs, active edit sessions, and recorded commit histories.
+  repeated string keep = 3;
+}
+
+message PruneImagesResponse {
+  // Number of cached or orphaned layers removed from the layer store.
+  uint64 layers_removed = 1;
+  // Number of unreferenced `needy-snapshot:*` container images removed.
+  uint64 snapshots_removed = 2;
+  // Bytes reclaimed from the daemon's layer store cache.
+  uint64 bytes_reclaimed = 3;
+  // Container image tags (`needy-snapshot:<hex>`) removed (or that would be
+  // removed when `dry_run` is true).
+  repeated string removed_images = 4;
+}

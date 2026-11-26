@@ -1,0 +1,20 @@
+// EXPERIMENTAL / UNSTABLE
+syntax = "proto3";
+
+package needy.v1;
+
+// HealthService reports whether a daemon can serve calls and what role it has.
+service HealthService {
+  rpc Check(CheckRequest) returns (CheckResponse);
+}
+
+message CheckRequest {}
+
+message CheckResponse {
+  string instance_id = 1;
+  string version = 2;
+  // "control" for a daemon that manages runs, "executor" for one that only runs processes.
+  string role = 3;
+  // Operating system and architecture of the machine, for example "linux/x86_64".
+  string platform = 4;
+}

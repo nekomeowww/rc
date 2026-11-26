@@ -1,0 +1,428 @@
+// EXPERIMENTAL / UNSTABLE
+syntax = "proto3";
+
+package needy.v1;
+
+import "needy/v1/diagnostic.proto";
+import "needy/v1/image.proto";
+import "needy/v1/process.proto";
+import "needy/v1/runner.proto";
+
+// RunService manages runs: one actor and the executors bound to it.
+service RunService {
+  // Reserve a private execution holder for one creation. Not a shared runner.
+  rpc PrepareClientExecution(PrepareClientExecutionRequest) returns (PrepareClientExecutionResponse);
+  rpc CreateRun(CreateRunRequest) returns (CreateRunResponse);
+  rpc GetRun(GetRunRequest) returns (GetRunResponse);
+  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+  // Stop a run. A running actor is stopped gracefully unless `now` is set:
+  // its driving program gets SIGTERM, then SIGKILL after the grace period,
+  // and its mirror-out runs before the actor ends.
+  rpc StopRun(StopRunRequest) returns (StopRunResponse);
+  // Stream the actor's console output: the guest's boot messages and the
+  // driving program's terminal. NOT_FOUND when the run has no actor.
+  rpc GetRunLogs(GetRunLogsRequest) returns (stream GetRunLogsResponse);
+  // Stream a run's trace events in order, as the control plane's trace
+  // database holds them, for `needy report` on any client.
+  rpc GetRunEvents(GetRunEventsRequest) returns (stream GetRunEventsResponse);
+  // Decide where a command runs and how it is rewritten.
+  rpc Decide(DecideRequest) returns (DecideResponse);
+  // Check a profile against the runners it would run on: its runner
+  // selectors resolve, and its recipe fits the CPU of the host its actor
+  // would run on. Creates nothing.
+  rpc CheckProfile(CheckProfileRequest) returns (CheckProfileResponse);
+  // Add a chaos fault to a live run. The run's trace records it
+  // (`chaos.add`), so a replay applies it at the same point.
+  rpc AddFault(AddFaultRequest) returns (AddFaultResponse);
+  // List a run's chaos faults: its profile's and those added since, with
+  // how often each matched and fired.
+  rpc ListFaults(ListFaultsRequest) returns (ListFaultsResponse);
+  // Remove a chaos fault from a live run, whether its profile or AddFault
+  // added it. The run's trace records it (`chaos.remove`).
+  rpc RemoveFault(RemoveFaultRequest) returns (RemoveFaultResponse);
+}
+
+message CreateRunRequest {
+  // Profile as YAML text, self-contained: its `extends` chain merged and its
+  // host paths absolute. The daemon reads no path on the client's machine.
+  string profile_yaml = 1;
+  string group = 3;
+  string name = 4;
+  // Arguments appended to the profile's driving program (`actor.command`),
+  // as `needy run create -- ARGS` gives them.
+  repeated string actor_args = 6;
+  // The profile's name in listings, traces and reports, for example its file
+  // name without `.profile.yaml`. Required.
+  string profile_name = 7;
+  // The actor's recipe as YAML with its `extends` chain merged, when
+  // `actor.recipe` names a file. Empty for a built-in recipe or none.
+  string recipe_yaml = 8;
+  // Run the driving program on a terminal of this size, which `needy run
+  // attach` connects to. Unset: no terminal, stdin `/dev/null`, output to
+  // the actor's console.
+  WindowSize tty = 9;
+  // With tty: start the program after its first terminal client subscribed,
+  // so `run create -it` also receives a program that exits immediately.
+  bool wait_for_attach = 10;
+  // Single-use capability for executors selecting {client: true}.
+  string client_execution = 11;
+  // The directory `needy run create` runs in, on the creating client's
+  // machine. It is the run's workspace when the profile sets no
+  // `actor.workspace` and the executor that runs the commands can reach it;
+  // when that executor cannot, the create fails. Empty: no default
+  // workspace, as before the field existed.
+  string client_dir = 12;
+  // Optional commit layer from the image's lockfile, stacked on top of the
+  // image definition's built layers.
+  ImageCommit image_commit = 13;
+  // Pinned feature digests (`canonical_ref -> sha256:<hex>`) from the
+  // image's lockfile.
+  map<string, string> pinned_features = 14;
+  // Optional maximum time to wait for required actor or executor runners to
+  // connect before failing `CreateRun` (milliseconds; 0 means no wait).
+  uint64 wait_for_runner_ms = 16;
+
+  // The client's profile directory, which the daemon cannot read when it
+  // runs on another machine.
+  reserved 2;
+  reserved "profile_dir";
+  // Whether to start the actor. Every run has an actor; `needy exec
+  // --runner` runs commands without one.
+  reserved 5;
+  reserved "start_actor";
+}
+
+message ExecutorRef {
+  string name = 1;
+  // The executor driver that created the instance (`native`,
+  // `linux-container`), or `runner` for a runner's own process space.
+  string driver = 2;
+  string instance = 3;
+  // The run gave the executor back: it stopped, finished or failed.
+  bool released = 4;
+  // The control plane restarted, and no runner reported the instance
+  // within the time it waits for reports: whether it still runs is unknown.
+  bool lost = 5;
+}
+
+message Run {
+  string run_id = 1;
+  string name = 2;
+  string group = 3;
+  RunState state = 8;
+  repeated ExecutorRef executors = 5;
+  int64 created_at_ms = 6;
+  // The profile's name, as `CreateRunRequest.profile_name` gave it.
+  string profile = 7;
+  // How the actor's driving program ended. Unset while it runs, for a
+  // run without an actor, and for an actor whose VM ended before the
+  // program reported its exit.
+  ExecExited actor_exit = 9;
+  // Why the run failed, with its causes. Empty unless it failed.
+  string failure = 10;
+  // The driving program runs on a terminal (`CreateRunRequest.tty`).
+  bool tty = 11;
+  // Where the run's actor stands. Unspecified before it starts, and for a
+  // run the control plane lists from its database after the run ended.
+  ActorState actor_state = 12;
+  // The actor's workspace. Unset when the actor has none (it starts in its
+  // home directory), and for a run the control plane lists from its
+  // database after the run ended.
+  RunWorkspace workspace = 13;
+  // The digest (`sha256:<hex>`) of the image snapshot the actor booted.
+  // Empty when booting the base image alone or an OCI reference.
+  string snapshot = 14;
+  // True when the lockfile's commit layer was applied on a changed base.
+  bool commit_rebased = 15;
+  // Resolved feature digests (`canonical_ref -> sha256:<hex>`) for the
+  // CLI to record in the image's lockfile.
+  map<string, string> resolved_features = 16;
+  // Last observed activity timestamp in Unix milliseconds (updated on guest
+  // RPCs, gateway traffic, routing decisions, and terminal/exec I/O).
+  int64 last_activity_ms = 17;
+
+  reserved 4;
+}
+
+// Where a run's workspace is: its directory in the actor, and where its
+// files come from.
+message RunWorkspace {
+  // The directory in the actor, the driving program's working directory.
+  string path = 1;
+  // The executor whose directory the actor sees live. Empty when the files
+  // were copied in from the control host, or for a fresh directory.
+  string executor = 2;
+  // The directory the files come from: on the executor's machine (for a
+  // `linux-container` executor, the host directory it binds when it names
+  // one), or on the control host when `executor` is empty. Empty for a
+  // fresh directory in the actor.
+  string source = 3;
+  // The actor may change the files.
+  bool writable = 4;
+}
+
+// A run's life cycle. The first terminal state (stopped, finished or
+// failed) wins.
+enum RunState {
+  RUN_STATE_UNSPECIFIED = 0;
+  RUN_STATE_CREATING = 1;
+  RUN_STATE_RUNNING = 2;
+  RUN_STATE_STOPPING = 3;
+  RUN_STATE_STOPPED = 4;
+  // The actor's driving program exited.
+  RUN_STATE_FINISHED = 5;
+  RUN_STATE_FAILED = 6;
+}
+
+// An actor's life cycle, the same for every actor driver. Exited is
+// terminal.
+enum ActorState {
+  ACTOR_STATE_UNSPECIFIED = 0;
+  // Its driver is starting it, or its guest boots.
+  ACTOR_STATE_STARTING = 1;
+  // Its guest fetched the run's configuration.
+  ACTOR_STATE_CONFIGURED = 2;
+  // Its process service answered a request: a client can attach. Only a
+  // driving program on a terminal has one.
+  ACTOR_STATE_READY = 3;
+  // It exited, or its run stopped it.
+  ACTOR_STATE_EXITED = 4;
+}
+
+message CreateRunResponse {
+  Run run = 1;
+}
+
+message GetRunRequest {
+  string run_id = 1;
+}
+
+message GetRunResponse {
+  Run run = 1;
+}
+
+message ListRunsRequest {}
+
+message ListRunsResponse {
+  repeated Run runs = 1;
+}
+
+message StopRunRequest {
+  string run_id = 1;
+  // End the actor at once: no grace period and no actor mirror-out.
+  bool now = 2;
+  // How long the driving program has after SIGTERM before SIGKILL; unset
+  // for the control plane's default.
+  optional int64 grace_ms = 3;
+}
+
+message StopRunResponse {
+  // How the run's running actor ended: unset when the run had no running
+  // actor, true when it ended after its mirror-out, false when it was
+  // killed.
+  optional bool graceful = 1;
+  // Why a running actor was killed.
+  string reason = 2;
+}
+
+message GetRunLogsRequest {
+  string run_id = 1;
+  // Keep streaming what the actor writes until the run ends or the caller
+  // leaves.
+  bool follow = 2;
+}
+
+message GetRunLogsResponse {
+  bytes data = 1;
+}
+
+message GetRunEventsRequest {
+  // A run ID, an ID prefix (the run that started last among those it
+  // matches), or `latest`.
+  string run_id = 1;
+}
+
+message GetRunEventsResponse {
+  // The full run ID.
+  string run_id = 1;
+  repeated StoredEvent events = 2;
+}
+
+// One trace event as stored. The payload's schema belongs to its kind and
+// version; clients decode it with the same rules as the control plane.
+message StoredEvent {
+  // The event's place in its run, from 0.
+  uint64 seq = 1;
+  int64 time_ms = 2;
+  // For example `exec.decide`.
+  string kind = 3;
+  // The payload schema version.
+  uint32 version = 4;
+  // A JSON object.
+  string payload = 5;
+}
+
+message DecideRequest {
+  string run_id = 1;
+  repeated string argv = 2;
+  string cwd = 3;
+  map<string, string> env = 4;
+  bool tty = 5;
+  // The processes the command runs under, nearest first: its parent, the
+  // parent's parent and so on, up to but not including the actor's init.
+  // Rules match `when.under` against them.
+  repeated Ancestor ancestors = 6;
+}
+
+// A process a command runs under.
+message Ancestor {
+  repeated string argv = 1;
+}
+
+message DecideResponse {
+  // "actor", an executor name, or empty when denied.
+  string target = 1;
+  repeated string argv = 2;
+  map<string, string> env = 3;
+  bool clear_env = 4;
+  string cwd = 5;
+  // Set when a rule refuses the command: the message to show,
+  // "denied: <rule message>".
+  string deny = 6;
+  // The value of `ExecStart.search_path_if_missing` for the routed exec.
+  bool search_path_if_missing = 7;
+  // Set when a chaos fault ends the command instead of running it.
+  ExecFault fault = 8;
+}
+
+// How a chaos fault ends a command in place of running it: exactly one of
+// `exit_code`, `signal` and `hang`.
+message ExecFault {
+  // The fault's name.
+  string name = 1;
+  // Exit with this code.
+  optional int32 exit_code = 2;
+  // Die of this signal, by name, such as `SIGSEGV`.
+  string signal = 3;
+  // Never finish, until the caller gives up or the run ends.
+  bool hang = 4;
+  // Written to stderr first.
+  string stderr = 5;
+}
+
+message CheckProfileRequest {
+  // As in `CreateRunRequest`.
+  string profile_yaml = 1;
+  string recipe_yaml = 2;
+}
+
+message CheckProfileResponse {
+  // Where the actor would run; unset when its runner selector does not
+  // resolve, which a finding explains.
+  Placement actor = 1;
+  // Where each executor would run, by name; an executor whose selector does
+  // not resolve is missing, and a finding explains why.
+  map<string, Placement> executors = 2;
+  // The model name of the CPU the recipe was checked against; empty when the
+  // actor's host did not report one.
+  string actor_cpu = 3;
+  repeated ProfileFinding findings = 4;
+  // The image the actor would start from, as its driver names it: a
+  // container image's reference, or a VM image's directory and the OCI image
+  // it was made from. Empty when the actor's driver is not this control
+  // host's.
+  string actor_image = 5;
+  // The base ABI the actor image records, when it is the one this control
+  // plane speaks; empty when it is not, which a finding explains.
+  string actor_base_abi = 6;
+}
+
+// The host an actor or executor would run on.
+message Placement {
+  // A runner's name; empty for the control host itself.
+  string runner = 1;
+}
+
+message ProfileFinding {
+  ErrorDiagnostic diagnostic = 3;
+  FindingSeverity severity = 1;
+  string message = 2;
+}
+
+message AddFaultRequest {
+  // A run ID, an ID prefix, a name or `latest`.
+  string run_id = 1;
+  // The fault's name: letters, digits, `-`, `_` and `.`.
+  string name = 2;
+  // The fault as YAML, written as an entry of a profile's `chaos.faults`,
+  // for example `{ exec: "curl **", exit: 7 }`.
+  string fault_yaml = 3;
+}
+
+message AddFaultResponse {
+  // The full run ID.
+  string run_id = 1;
+  // What the fault cannot reach. Nothing does today: the daemon sends a
+  // running actor its new route list (`GuestService.Control`), so an exec
+  // fault reaches every command.
+  repeated string warnings = 2;
+}
+
+message ListFaultsRequest {
+  string run_id = 1;
+}
+
+message ListFaultsResponse {
+  string run_id = 1;
+  // In name order.
+  repeated FaultInfo faults = 2;
+}
+
+message FaultInfo {
+  string name = 1;
+  // `exec`, `file`, `net` or `sensor`.
+  string domain = 2;
+  // The fault as YAML, as `AddFaultRequest.fault_yaml` takes it.
+  string fault_yaml = 3;
+  FaultSource source = 4;
+  // Operations it matched within its time window.
+  uint64 matched = 5;
+  // Times it fired.
+  uint64 fired = 6;
+}
+
+enum FaultSource {
+  FAULT_SOURCE_UNSPECIFIED = 0;
+  // The run's profile.
+  FAULT_SOURCE_PROFILE = 1;
+  // AddFault, while the run ran.
+  FAULT_SOURCE_ADDED = 2;
+}
+
+message RemoveFaultRequest {
+  string run_id = 1;
+  string name = 2;
+}
+
+message RemoveFaultResponse {
+  string run_id = 1;
+}
+
+enum FindingSeverity {
+  FINDING_SEVERITY_UNSPECIFIED = 0;
+  FINDING_SEVERITY_ERROR = 1;
+  FINDING_SEVERITY_WARNING = 2;
+}
+
+// Local host facts; native execution always runs as the holder's OS account.
+message PrepareClientExecutionRequest {
+  RunnerHost host = 1;
+}
+message PrepareClientExecutionResponse {
+  // Internal identity for the existing outbound task transport.
+  string holder = 1;
+  // Used once by CreateRun and by this holder on Control/Task/Heartbeat.
+  string capability = 2;
+  // Reserved invocation identity; task inputs must name this run.
+  string run_id = 3;
+}

@@ -222,6 +222,7 @@ type WorkspaceService struct {
 
 // WorkspaceSpec defines a development machine with an explicit lifetime.
 // +kubebuilder:validation:XValidation:rule="!has(self.services) || size(self.services) == 0 || !has(self.os) || self.os != 'darwin'",message="Darwin Workspaces do not support services"
+// +kubebuilder:validation:XValidation:rule="!has(self.needy) || !has(self.os) || self.os == 'linux'",message="needy is supported only on Linux Workspaces"
 type WorkspaceSpec struct {
 	// executionRetention bounds terminal execution history independently of this
 	// target's lifetime. Omission preserves existing history on upgrade.
@@ -377,6 +378,30 @@ type WorkspaceSpec struct {
 	// +kubebuilder:default=Retain
 	// +optional
 	RetentionPolicy WorkspaceRetentionPolicy `json:"retentionPolicy,omitempty"`
+
+	// needy connects the Workspace to the namespace's needy daemon.
+	// +optional
+	Needy *WorkspaceNeedy `json:"needy,omitempty"`
+}
+
+// WorkspaceNeedy configures the Workspace's part in needy runs.
+// +kubebuilder:validation:XValidation:rule="has(self.executor)",message="needy must set executor"
+type WorkspaceNeedy struct {
+	// executor runs a needy executor runner as a resident service, so an Actor
+	// can route commands to this Workspace. rc generates the runner's
+	// credential, registers it with the namespace's needy daemon, and installs
+	// needy into the runtime. The Workspace image needs sftp-server for
+	// workspace mounts.
+	// +optional
+	Executor *WorkspaceNeedyExecutor `json:"executor,omitempty"`
+}
+
+// WorkspaceNeedyExecutor configures the executor runner.
+type WorkspaceNeedyExecutor struct {
+	// labels are added to the runner, next to rc.ayaka.io/workspace.
+	// +kubebuilder:validation:MaxProperties=16
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // EffectiveRetentionPolicy returns the API default for an omitted policy.

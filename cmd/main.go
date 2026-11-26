@@ -90,6 +90,8 @@ func main() {
 	var needyGatewayBlockCIDRs string
 	var needyNetworkPolicies bool
 	var needyControllerNamespace string
+	var needyUpstreamProvider string
+	var needyUpstreamImage string
 
 	var secureMetrics bool
 	var enableHTTP2 bool
@@ -137,6 +139,11 @@ func main() {
 	flag.StringVar(&needyControllerNamespace, "needy-controller-namespace", os.Getenv("POD_NAMESPACE"),
 		"The manager's namespace, whose manager Pods each needy daemon's NetworkPolicy admits. "+
 			"Defaults to POD_NAMESPACE.")
+	flag.StringVar(&needyUpstreamProvider, "needy-upstream-provider", "",
+		"The provider of each namespace's managed upstream proxy, for Actors with spec.upstream.managed: "+
+			"mihomo, or empty to disable managed upstreams.")
+	flag.StringVar(&needyUpstreamImage, "needy-upstream-image", "docker.io/metacubex/mihomo:v1.19.34",
+		"The image of the managed upstream provider.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -263,6 +270,20 @@ func main() {
 	}
 	needyConfig.NetworkPolicies = needyNetworkPolicies
 	needyConfig.ControllerNamespace = needyControllerNamespace
+	var upstream workspacescontroller.UpstreamProvider
+	switch needyUpstreamProvider {
+	case "":
+	case "mihomo":
+		upstream = &workspacescontroller.MihomoUpstream{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+			Config: needyConfig,
+			Image:  needyUpstreamImage,
+		}
+	default:
+		setupLog.Error(fmt.Errorf("unknown provider %q", needyUpstreamProvider), "Invalid --needy-upstream-provider")
+		os.Exit(1)
+	}
 
 	if err := (&controller.AgentCredentialReconciler{
 		Client: mgr.GetClient(),
@@ -365,17 +386,19 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&workspacescontroller.ActorReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Config: needyConfig,
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Config:   needyConfig,
+		Upstream: upstream,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "workspaces-actor")
 		os.Exit(1)
 	}
 	if err := (&workspacescontroller.NeedyReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Config: needyConfig,
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Config:   needyConfig,
+		Upstream: upstream,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "workspaces-needy")
 		os.Exit(1)

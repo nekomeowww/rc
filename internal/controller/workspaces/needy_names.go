@@ -58,6 +58,26 @@ const (
 	needyMetadataCIDR = "169.254.169.254/32"
 )
 
+// The namespace's managed upstream: one filtering SOCKS5 proxy, run by the
+// upstream provider that the manager is configured with.
+const (
+	// needyUpstreamName names its Deployment, Service, and NetworkPolicy.
+	needyUpstreamName = "needy-upstream"
+	// needyUpstreamConfigSecretName holds the provider's configuration.
+	needyUpstreamConfigSecretName = "needy-upstream-config"
+	// needyUpstreamCredentialsSecretName holds USERNAME:PASSWORD for actor
+	// runners.
+	needyUpstreamCredentialsSecretName = "needy-upstream-actor"
+	// needyUpstreamConfigKey is the configuration in its config Secret.
+	needyUpstreamConfigKey = "config.yaml"
+	// needyUpstreamPort is its SOCKS5 port.
+	needyUpstreamPort = 1080
+	// needyUpstreamActorUser is the user that actor runners log in as.
+	needyUpstreamActorUser = "actor"
+	// needyComponentUpstream labels its objects.
+	needyComponentUpstream = "upstream"
+)
+
 // Values of workspacesv1alpha1.NeedyComponentLabel.
 const (
 	needyComponentDaemon   = "daemon"

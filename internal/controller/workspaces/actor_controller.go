@@ -94,6 +94,8 @@ type ActorReconciler struct {
 	// DaemonAddress overrides the daemon's in-cluster address, for a manager
 	// that reaches the daemon another way.
 	DaemonAddress func(namespace string) string
+	// Upstream runs managed upstreams. Nil refuses spec.upstream.managed.
+	Upstream UpstreamProvider
 	// Now defaults to time.Now.
 	Now func() time.Time
 }
@@ -178,7 +180,13 @@ func (r *ActorReconciler) start(ctx context.Context, actor *workspacesv1alpha1.A
 	}
 	// Known from here on, so that a failure below still revokes it.
 	actor.Status.RunnerName = runner
-	upstream := actor.Spec.Upstream
+	upstream, message, err := r.resolveUpstream(ctx, actor)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if message != "" {
+		return r.wait(ctx, actor, workspacesv1alpha1.ActorReasonWaitingForUpstream, message, needyDaemonPoll)
+	}
 	if err := r.ensureUpstreamPolicy(ctx, actor, upstream); err != nil {
 		return r.fail(ctx, actor, workspacesv1alpha1.ActorReasonInvalidProfile, err.Error())
 	}
@@ -705,6 +713,20 @@ func actorRunnerPod(actor *workspacesv1alpha1.Actor, config NeedyConfig, upstrea
 	}
 }
 
+// resolveUpstream returns the proxy that the actor runner uses: the spec's,
+// or the namespace's managed upstream from the provider.
+func (r *ActorReconciler) resolveUpstream(ctx context.Context, actor *workspacesv1alpha1.Actor) (*workspacesv1alpha1.ActorUpstream, string, error) {
+	upstream := actor.Spec.Upstream
+	if upstream == nil || !upstream.Managed {
+		return upstream, "", nil
+	}
+	if r.Upstream == nil {
+		return nil, "The manager has no upstream provider (--needy-upstream-provider)", nil
+	}
+
+	return r.Upstream.Endpoint(ctx, actor.Namespace)
+}
+
 func upstreamCredentialsReference(upstream *workspacesv1alpha1.ActorUpstream) *corev1.SecretKeySelector {
 	if upstream == nil {
 		return nil
@@ -839,7 +861,7 @@ func (r *ActorReconciler) now() time.Time {
 }
 
 // waitingActors requeues the namespace's Actors that have not started, when a
-// Workspace or the daemon's Deployment changes.
+// Workspace, the daemon's Deployment, or the upstream's Deployment changes.
 func (r *ActorReconciler) waitingActors(ctx context.Context, object client.Object) []reconcile.Request {
 	var actors workspacesv1alpha1.ActorList
 	if err := r.List(ctx, &actors, client.InNamespace(object.GetNamespace())); err != nil {
@@ -858,7 +880,7 @@ func (r *ActorReconciler) waitingActors(ctx context.Context, object client.Objec
 // SetupWithManager sets up the controller with the Manager.
 func (r *ActorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	daemonDeployment := builder.WithPredicates(predicate.NewPredicateFuncs(func(object client.Object) bool {
-		return object.GetName() == needyDaemonName
+		return object.GetName() == needyDaemonName || object.GetName() == needyUpstreamName
 	}))
 
 	return ctrl.NewControllerManagedBy(mgr).

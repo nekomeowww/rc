@@ -105,6 +105,20 @@ adds no policy, because one for the proxy alone would cut the Pod off from
 the daemon. The actor Pod keeps its internet egress: the runner downloads
 the base VM image when it starts.
 
+With `managed: true` the Actor uses the namespace's managed upstream, which
+the manager runs through an upstream provider while an Actor uses it. A
+provider must refuse private, cluster, and metadata addresses by the address
+a name resolves to, because the runner hands it names with `socks5h`. No
+provider is on by default. The first one, `--needy-upstream-provider=mihomo`,
+runs Mihomo: its rules check the resolved address against the cluster's
+ranges, the special-purpose ranges, and the metadata range, and refuse a
+name that does not resolve. Mihomo matches one resolved address but dials
+every address of a name, so its own NetworkPolicy, which only selects the
+proxy, refuses the same ranges even without `--needy-network-policies`. A
+refused HTTPS connection through Mihomo is not a `net.error` in the trace:
+Mihomo accepts the SOCKS request before it applies its rules, so the actor
+sees its tunnel close.
+
 ### Configuration
 
 needy is off until the manager has `--needy-image`. A KVM pool is described by

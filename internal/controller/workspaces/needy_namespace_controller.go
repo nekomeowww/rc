@@ -85,6 +85,8 @@ type NeedyReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	Config NeedyConfig
+	// Upstream runs managed upstreams. Nil disables them.
+	Upstream UpstreamProvider
 	// Now defaults to time.Now.
 	Now func() time.Time
 }
@@ -153,6 +155,11 @@ func (r *NeedyReconciler) Reconcile(ctx context.Context, request ctrl.Request) (
 			return ctrl.Result{}, err
 		}
 	}
+	if r.Upstream != nil {
+		if err := r.Upstream.Ensure(ctx, namespace, use.upstream); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	if !use.liveUntil.IsZero() {
 		// Scale to zero once the last grace ends.
 		return ctrl.Result{RequeueAfter: use.liveUntil.Sub(r.now()) + time.Second}, nil
@@ -170,6 +177,8 @@ type needyUse struct {
 	// liveUntil is when the daemon may scale to zero, if no Actor is live
 	// for another reason.
 	liveUntil time.Time
+	// upstream is true while an Actor needs the managed upstream.
+	upstream bool
 }
 
 // needyUsers returns the namespace's executor Workspaces and whether an
@@ -186,6 +195,9 @@ func (r *NeedyReconciler) needyUsers(ctx context.Context, namespace string) (nee
 	}
 	now := r.now()
 	for _, actor := range actors.Items {
+		if actor.Spec.Upstream != nil && actor.Spec.Upstream.Managed && !actor.Status.Phase.IsTerminal() {
+			use.upstream = true
+		}
 		// A deleting Actor still needs the daemon to stop its run, and an
 		// ended one to revoke its runner's credential.
 		if !actor.Status.Phase.IsTerminal() || actor.DeletionTimestamp != nil ||

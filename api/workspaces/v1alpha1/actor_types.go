@@ -44,6 +44,7 @@ const (
 	ActorReasonInvalidProfile     = "InvalidProfile"
 	ActorReasonExecutorNotReady   = "ExecutorNotReady"
 	ActorReasonWaitingForRunner   = "WaitingForRunner"
+	ActorReasonWaitingForUpstream = "WaitingForUpstream"
 	ActorReasonRunnerFailed       = "RunnerFailed"
 	ActorReasonCreatingRun        = "CreatingRun"
 	ActorReasonRunning            = "Running"
@@ -98,14 +99,20 @@ type ActorExecutor struct {
 // ActorUpstream sends the actor's internet traffic through a SOCKS5 proxy.
 // The actor runner dials it for every connection that the gateway allows;
 // a proxy that fails refuses the connection instead of dialing directly.
+// +kubebuilder:validation:XValidation:rule="has(self.managed) && self.managed ? !has(self.url) && !has(self.credentialsSecretRef) && !has(self.podSelector) : has(self.url)",message="set either managed or url"
 type ActorUpstream struct {
-	// url is socks5h://HOST:PORT or socks5://HOST:PORT. With socks5h the
-	// proxy resolves names, so it must itself refuse private, cluster, and
-	// metadata addresses.
+	// managed uses the namespace's managed upstream: a proxy that the manager
+	// runs with the provider it is configured with (--needy-upstream-provider).
+	// +optional
+	Managed bool `json:"managed,omitempty"`
+
+	// url is socks5h://HOST:PORT or socks5://HOST:PORT of a proxy that you
+	// run. With socks5h the proxy resolves names, so it must itself refuse
+	// private, cluster, and metadata addresses.
 	// +kubebuilder:validation:Pattern=`^socks5h?://[^/@\s]+:[0-9]{1,5}$`
 	// +kubebuilder:validation:MaxLength=255
-	// +required
-	URL string `json:"url"`
+	// +optional
+	URL string `json:"url,omitempty"`
 
 	// credentialsSecretRef names a Secret key in the Actor's namespace that
 	// holds one line, USERNAME:PASSWORD. The runner reads it for every

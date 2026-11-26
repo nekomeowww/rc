@@ -148,7 +148,7 @@ func TestNeedyPlacesTheDaemonOnKVMAndKeepsItsState(t *testing.T) {
 	config := needyTestConfig()
 	config.DaemonKVM = true
 	config.DaemonStorageClass = "fast"
-	config.GatewayBlockCIDRs = []string{"10.0.0.0/8"}
+	config.GatewayBlockCIDRs = []string{testClusterRange}
 	harness := newNeedyHarness(t, config, executorWorkspace())
 	harness.reconcile()
 

@@ -52,3 +52,16 @@ type NeedyConfig struct {
 func (config NeedyConfig) IsEnabled() bool {
 	return config.Image != ""
 }
+
+// ActorUnavailableReason says why Actors cannot run, or is empty when they
+// can.
+func (config NeedyConfig) ActorUnavailableReason() string {
+	switch {
+	case !config.IsEnabled():
+		return "the manager has no needy image (--needy-image)"
+	case config.KVMResource == "":
+		return "the manager has no KVM resource (--needy-kvm-resource)"
+	}
+
+	return ""
+}

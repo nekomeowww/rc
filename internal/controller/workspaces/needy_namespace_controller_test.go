@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -204,6 +205,40 @@ func TestNeedyScalesTheDaemonToZeroWhenUnused(t *testing.T) {
 	require.NoError(t, harness.client.Update(context.Background(), &workspace))
 	harness.reconcile()
 	var deployment appsv1.Deployment
+	require.NoError(t, harness.get(needyDaemonName, &deployment))
+	assert.Equal(t, int32(0), *deployment.Spec.Replicas)
+
+	// A live Actor needs the daemon.
+	require.NoError(t, harness.client.Create(context.Background(), testActor()))
+	harness.reconcile()
+	require.NoError(t, harness.get(needyDaemonName, &deployment))
+	assert.Equal(t, int32(1), *deployment.Spec.Replicas)
+
+	// An ended Actor keeps it until its credential is revoked, then for a
+	// grace in which its run can still be read.
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	harness.reconciler.Now = func() time.Time { return now }
+	var actor workspacesv1alpha1.Actor
+	require.NoError(t, harness.get(testActorName, &actor))
+	completed := metav1.NewTime(now)
+	actor.Status.Phase = workspacesv1alpha1.ActorPhaseSucceeded
+	actor.Status.RunnerName = testActorRunner
+	actor.Status.CompletedAt = &completed
+	require.NoError(t, harness.client.Update(context.Background(), &actor))
+	harness.reconcile()
+	require.NoError(t, harness.get(needyDaemonName, &deployment))
+	assert.Equal(t, int32(1), *deployment.Spec.Replicas, "the credential is not revoked yet")
+
+	require.NoError(t, harness.get(testActorName, &actor))
+	actor.Annotations = map[string]string{actorCredentialRevokedAnnotation: testTrueValue}
+	require.NoError(t, harness.client.Update(context.Background(), &actor))
+	result := harness.reconcile()
+	require.NoError(t, harness.get(needyDaemonName, &deployment))
+	assert.Equal(t, int32(1), *deployment.Spec.Replicas, "the run can still be read")
+	assert.Equal(t, needyDaemonGrace+time.Second, result.RequeueAfter)
+
+	now = now.Add(needyDaemonGrace)
+	harness.reconcile()
 	require.NoError(t, harness.get(needyDaemonName, &deployment))
 	assert.Equal(t, int32(0), *deployment.Spec.Replicas)
 }

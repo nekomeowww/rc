@@ -60,11 +60,17 @@ const (
 	needyComponentDaemon   = "daemon"
 	needyComponentClient   = "client"
 	needyComponentExecutor = "executor"
+	needyComponentActor    = "actor"
 )
 
 // needyDaemonAddress is the daemon's control address in a namespace.
 func needyDaemonAddress(namespace string) string {
 	return fmt.Sprintf("%s.%s.svc:%d", needyDaemonName, namespace, needyControlPort)
+}
+
+// needyGatewayAddress is the daemon's gateway address in a namespace.
+func needyGatewayAddress(namespace string) string {
+	return fmt.Sprintf("%s.%s.svc:%d", needyDaemonName, namespace, needyGatewayPort)
 }
 
 // needyExecutorSecretName holds a Workspace's executor runner credential.
@@ -75,6 +81,13 @@ func needyExecutorSecretName(workspace string) string {
 // needyWorkspaceRunnerName is the executor runner name of a Workspace.
 func needyWorkspaceRunnerName(workspace string) string {
 	return needyRunnerName("ws-", workspace)
+}
+
+// needyActorRunnerName is the actor runner name of an Actor. The UID makes it
+// fresh for every Actor, because needy refuses to mint a name that a live
+// runner still holds.
+func needyActorRunnerName(uid string) string {
+	return "actor-" + strings.ReplaceAll(uid, "-", "")[:12]
 }
 
 // needyRunnerName joins prefix and name into a runner name, which needy

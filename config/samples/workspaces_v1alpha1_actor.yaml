@@ -1,0 +1,25 @@
+apiVersion: workspaces.rc.ayaka.io/v1alpha1
+kind: Actor
+metadata:
+  labels:
+    app.kubernetes.io/name: rc
+    app.kubernetes.io/managed-by: kustomize
+  name: actor-sample
+spec:
+  terminal: true
+  maxRunDuration: 2h
+  idleTimeout: 30m
+  profile:
+    inline: |
+      extends: builtin:opencode
+      actor:
+        workspace:
+          path: ~/workspace
+          from: "executor:dev:~/project"
+          writable: true
+      commands:
+        - { match: "**", to: dev }
+  executors:
+  - name: dev
+    workspaceRef:
+      name: workspace-sample

@@ -1247,8 +1247,7 @@ func finishTopologyChange(cmd *cobra.Command, kubeClient client.Client, result w
 	indicator := progress.Start(cmd.ErrOrStderr(), "waiting for Workspace mount update...")
 	defer indicator.Stop()
 	if err := waitWorkspaceGenerationReady(cmd.Context(), kubeClient, result.workspace, result.workspace.Generation); err != nil {
-		var inUse *worktreeInUseError
-		if errors.As(err, &inUse) {
+		if inUse, ok := errors.AsType[*worktreeInUseError](err); ok {
 			indicator.Stop()
 			_, err = fmt.Fprintf(cmd.ErrOrStderr(), "workspace/%s topology updated; %s (check: rcctl workspace get %s)\n", result.workspace.Name, inUse.message, result.workspace.Name)
 		}

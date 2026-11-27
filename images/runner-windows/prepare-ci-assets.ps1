@@ -23,7 +23,12 @@ $vcRuntimeInstaller = Join-Path $downloadDirectory 'vc_redist.x64.exe'
 
 New-Item -ItemType Directory -Force $downloadDirectory | Out-Null
 function Get-Sha256FromList([string]$uri, [string]$fileName) {
-    $content = (Invoke-WebRequest -Uri $uri -UseBasicParsing).Content
+    $response = Invoke-WebRequest -Uri $uri -UseBasicParsing
+    $content = if ($response.Content -is [byte[]]) {
+        [System.Text.Encoding]::UTF8.GetString($response.Content)
+    } else {
+        [string]$response.Content
+    }
     foreach ($line in ($content -split "`r?`n")) {
         if ($line -match "^([0-9a-fA-F]{64})\s+\*?(\./)?$([regex]::Escape($fileName))$") {
             return $Matches[1].ToUpperInvariant()

@@ -56,6 +56,7 @@ type fakeDaemon struct {
 	stopped     []string
 	placement   error
 	credentials map[string]string
+	roles       map[string]needy.Role
 	offline     map[string]bool
 }
 
@@ -63,6 +64,7 @@ func newFakeDaemon() *fakeDaemon {
 	return &fakeDaemon{
 		runs:        make(map[string]needy.Run),
 		credentials: make(map[string]string),
+		roles:       make(map[string]needy.Role),
 		offline:     make(map[string]bool),
 	}
 }
@@ -79,8 +81,13 @@ func (daemon *fakeDaemon) IsActorRunnerConnected(_ context.Context, name string)
 	return !daemon.offline[name], nil
 }
 
-func (daemon *fakeDaemon) MintRunnerCredential(_ context.Context, name string, _ time.Duration) (string, error) {
+func (daemon *fakeDaemon) IsExecutorRunnerConnected(_ context.Context, name string) (bool, error) {
+	return !daemon.offline[name], nil
+}
+
+func (daemon *fakeDaemon) MintRunnerCredential(_ context.Context, name string, role needy.Role, _ time.Duration) (string, error) {
 	daemon.minted = append(daemon.minted, name)
+	daemon.roles[name] = role
 	// The daemon mints credentials in its prefixed form.
 	secret, err := needy.NewSecret()
 	credential := "needy-runner." + name + "." + secret
@@ -135,7 +142,7 @@ func testActor() *workspacesv1alpha1.Actor {
 			Executors: []workspacesv1alpha1.ActorExecutor{
 				{
 					Name:         "ws",
-					WorkspaceRef: corev1.LocalObjectReference{Name: testExecutorName},
+					WorkspaceRef: &corev1.LocalObjectReference{Name: testExecutorName},
 				},
 			},
 			Terminal:       true,
@@ -635,4 +642,112 @@ func TestDeletingALiveActorStopsItsRun(t *testing.T) {
 	var actor workspacesv1alpha1.Actor
 	err := harness.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: testActorName}, &actor)
 	assert.True(t, apierrors.IsNotFound(err))
+}
+
+const (
+	testExternalExecutor = "mac"
+	testExternalRunner   = "ext-0123abcd89ab-mac"
+	testExternalSecret   = testActorName + "-" + testExternalRunner
+)
+
+// externalActor binds ws to a Workspace and mac to an external runner.
+func externalActor() *workspacesv1alpha1.Actor {
+	actor := testActor()
+	actor.Spec.Profile.Inline = "extends: builtin:opencode\ncommands:\n  - { match: \"git **\", to: ws }\n  - { match: \"**\", to: mac }\n"
+	actor.Spec.Executors = append(actor.Spec.Executors, workspacesv1alpha1.ActorExecutor{
+		Name:     testExternalExecutor,
+		External: &workspacesv1alpha1.ActorExternalExecutor{},
+	})
+
+	return actor
+}
+
+func TestActorMintsACredentialForAnExternalExecutor(t *testing.T) {
+	harness := newActorHarnessFor(t, externalActor(), executorWorkspace(), daemonClientSecret(), availableDaemon())
+	harness.reconcile()
+
+	assert.Equal(t, []string{testActorRunner, testExternalRunner}, harness.daemon.minted)
+	assert.Equal(t, needy.RoleActor, harness.daemon.roles[testActorRunner])
+	assert.Equal(t, needy.RoleExecutor, harness.daemon.roles[testExternalRunner])
+
+	var credential corev1.Secret
+	require.NoError(t, harness.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: testExternalSecret}, &credential))
+	assert.Equal(t, harness.daemon.credentials[testExternalRunner], string(credential.Data[needyCredentialKey]))
+	assert.Equal(t, testActorName, credential.OwnerReferences[0].Name)
+	assert.Equal(t, needyComponentExecutor, credential.Labels[workspacesv1alpha1.NeedyComponentLabel])
+	assert.Equal(t, testActorName, credential.Labels[workspacesv1alpha1.NeedyActorLabel])
+
+	actor := harness.actor()
+	assert.Equal(t, []workspacesv1alpha1.ActorExecutorStatus{
+		{
+			Name:                 testExternalExecutor,
+			RunnerName:           testExternalRunner,
+			CredentialSecretName: testExternalSecret,
+		},
+	}, actor.Status.Executors, "only the external executor is listed")
+	assert.Equal(t, workspacesv1alpha1.ActorPhaseRunning, actor.Status.Phase)
+
+	require.Len(t, harness.daemon.created, 1)
+	var profile map[string]any
+	require.NoError(t, yaml.Unmarshal([]byte(harness.daemon.created[0].ProfileYAML), &profile))
+	executors := profile["executors"].(map[string]any)
+	assert.Equal(t, testExternalRunner, executors[testExternalExecutor].(map[string]any)["runner"])
+	assert.Equal(t, "native", executors[testExternalExecutor].(map[string]any)["driver"])
+	assert.Equal(t, "ws-"+testExecutorName, executors["ws"].(map[string]any)["runner"])
+}
+
+func TestActorWaitsForItsExternalRunnerBeforeCheckingPlacement(t *testing.T) {
+	harness := newActorHarnessFor(t, externalActor(), executorWorkspace(), daemonClientSecret(), availableDaemon())
+	harness.daemon.offline[testExternalRunner] = true
+	harness.daemon.placement = assert.AnError
+	result := harness.reconcile()
+
+	actor := harness.actor()
+	assert.Equal(t, workspacesv1alpha1.ActorPhaseStarting, actor.Status.Phase)
+	assert.Equal(t, workspacesv1alpha1.ActorReasonWaitingForRunner, actor.Status.Conditions[0].Reason)
+	assert.Contains(t, actor.Status.Conditions[0].Message, testExternalRunner)
+	assert.Len(t, actor.Status.Executors, 1, "the credential is published while the runner is awaited")
+	assert.Positive(t, result.RequeueAfter)
+	assert.Empty(t, harness.daemon.created)
+
+	harness.daemon.offline[testExternalRunner] = false
+	harness.daemon.placement = nil
+	harness.now = harness.now.Add(time.Minute)
+	harness.reconcile()
+	assert.Len(t, harness.daemon.created, 1)
+	assert.Equal(t, workspacesv1alpha1.ActorPhaseRunning, harness.actor().Status.Phase)
+}
+
+func TestActorFailsWhenItsExternalRunnerStaysOffline(t *testing.T) {
+	harness := newActorHarnessFor(t, externalActor(), executorWorkspace(), daemonClientSecret(), availableDaemon())
+	harness.daemon.offline[testExternalRunner] = true
+	harness.reconcile()
+	assert.Equal(t, workspacesv1alpha1.ActorPhaseStarting, harness.actor().Status.Phase)
+
+	harness.now = harness.now.Add(actorStartGrace)
+	harness.reconcile()
+	actor := harness.actor()
+	assert.Equal(t, workspacesv1alpha1.ActorPhaseFailed, actor.Status.Phase)
+	assert.Equal(t, workspacesv1alpha1.ActorReasonExecutorOffline, actor.Status.Conditions[0].Reason)
+	assert.Contains(t, actor.Status.Message, testExternalRunner)
+	assert.Empty(t, harness.daemon.created)
+
+	// Both credentials are revoked once the actor runner Pod has ended. The
+	// first two revokes freed the names before minting.
+	pod := harness.pod()
+	pod.Status.Phase = corev1.PodFailed
+	require.NoError(t, harness.client.Status().Update(context.Background(), pod))
+	harness.reconcile()
+	assert.Equal(t, []string{testActorRunner, testExternalRunner, testActorRunner, testExternalRunner}, harness.daemon.revoked)
+	assert.Equal(t, testTrueValue, harness.actor().Annotations[actorCredentialRevokedAnnotation])
+}
+
+func TestDeletingAnActorRevokesItsExternalRunner(t *testing.T) {
+	harness := newActorHarnessFor(t, externalActor(), executorWorkspace(), daemonClientSecret(), availableDaemon())
+	harness.reconcile()
+
+	require.NoError(t, harness.client.Delete(context.Background(), harness.actor()))
+	harness.reconcile()
+	assert.Equal(t, []string{testRunID}, harness.daemon.stopped)
+	assert.Equal(t, []string{testActorRunner, testExternalRunner, testActorRunner, testExternalRunner}, harness.daemon.revoked)
 }

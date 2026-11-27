@@ -55,11 +55,16 @@ import (
 
 const (
 	actorFinalizer = "workspaces.rc.ayaka.io/actor"
-	// actorCredentialRevokedAnnotation records that the actor runner's
-	// credential was revoked after its Pod ended.
+	// actorCredentialRevokedAnnotation records that the credentials of the
+	// actor runner and the external executor runners were revoked after the
+	// actor runner's Pod ended.
 	actorCredentialRevokedAnnotation = "workspaces.rc.ayaka.io/needy-credential-revoked"
-	annotationTrue                   = "true"
-	actorRunnerContainer             = "runner"
+	// actorCredentialMintedAnnotation records when rc minted the credential
+	// in a runner Secret, in RFC 3339. An external runner must connect within
+	// actorStartGrace of it.
+	actorCredentialMintedAnnotation = "workspaces.rc.ayaka.io/needy-credential-minted-at"
+	annotationTrue                  = "true"
+	actorRunnerContainer            = "runner"
 	// actorCredentialDirectory holds the runner credential. It is not under
 	// /var/run, which is /run in many images, where needy keeps its sockets.
 	actorCredentialDirectory = "/etc/needy/credential"
@@ -85,9 +90,10 @@ const (
 
 var errNeedyDaemonNotReady = errors.New("the namespace's needy daemon is not ready")
 
-// ActorReconciler runs one needy run per Actor: it mints the actor runner's
-// credential, starts the ephemeral runner Pod on a KVM node, creates the run
-// on the namespace's daemon, and follows it until it ends. Status comes from
+// ActorReconciler runs one needy run per Actor: it mints the credentials of
+// the actor runner and of any external executor runners, starts the
+// ephemeral runner Pod on a KVM node, creates the run on the namespace's
+// daemon, and follows it until it ends. Status comes from
 // the daemon's run record, never from the Pod's exit code: an ephemeral
 // runner exits 0 whatever the actor's outcome.
 type ActorReconciler struct {
@@ -184,15 +190,29 @@ func (r *ActorReconciler) start(ctx context.Context, actor *workspacesv1alpha1.A
 	if err := validateActorPod(actor.Spec.Pod); err != nil {
 		return r.fail(ctx, actor, workspacesv1alpha1.ActorReasonInvalidPod, err.Error())
 	}
-	minted, err := r.ensureRunnerCredential(ctx, actor, daemon, runner)
+	minted, err := r.ensureRunnerCredential(ctx, actor, daemon, actorRunnerCredential(actor))
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if minted {
 		log.Info("Minted needy actor runner credential", "runner", runner)
 	}
-	// Known from here on, so that a failure below still revokes it.
+	// Known from here on, so that a failure below still revokes it, and the
+	// external executors' credentials with it.
 	actor.Status.RunnerName = runner
+	// An external runner cannot connect before it has a credential, so rc
+	// mints them now and waits for the runners below.
+	external := externalExecutors(actor)
+	for _, executor := range external {
+		minted, err := r.ensureRunnerCredential(ctx, actor, daemon, externalRunnerCredential(actor, executor))
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if minted {
+			log.Info("Minted needy external executor runner credential", "executor", executor.Name, "runner", executor.RunnerName)
+		}
+	}
+	actor.Status.Executors = external
 	proxy := actor.Spec.Proxy
 	if err := r.ensureProxyPolicy(ctx, actor, proxy); err != nil {
 		return r.fail(ctx, actor, workspacesv1alpha1.ActorReasonInvalidProfile, err.Error())
@@ -223,6 +243,11 @@ func (r *ActorReconciler) start(ctx context.Context, actor *workspacesv1alpha1.A
 	}
 	if !online {
 		return ctrl.Result{RequeueAfter: needyDaemonPoll}, nil
+	}
+	// needy's placement check refuses a runner that has not connected, so
+	// the external runners must be online before it.
+	if result, waiting, err := r.awaitExternalRunners(ctx, actor, daemon, external); waiting || err != nil {
+		return result, err
 	}
 	checkContext, cancel := context.WithTimeout(ctx, actorCallTimeout)
 	err = daemon.CheckPlacement(checkContext, profile)
@@ -388,7 +413,7 @@ func (r *ActorReconciler) cleanUp(ctx context.Context, actor *workspacesv1alpha1
 		if err := r.Patch(ctx, actor, patch); err != nil {
 			return ctrl.Result{}, err
 		}
-		logf.FromContext(ctx).Info("Revoked needy actor runner credential", "runner", actor.Status.RunnerName)
+		logf.FromContext(ctx).Info("Revoked needy runner credentials", "runner", actor.Status.RunnerName, "external", len(externalExecutors(actor)))
 	}
 	after := actor.Spec.DeleteAfterCompleted
 	if after == nil || actor.Status.CompletedAt == nil {
@@ -478,6 +503,10 @@ func (r *ActorReconciler) daemonGone(ctx context.Context, namespace string) bool
 	return apierrors.IsNotFound(err)
 }
 
+// revoke revokes the actor runner's credential and the credentials of the
+// external executors' runners. The external runner names come from the spec,
+// not the status, so a credential minted before a lost status update is
+// revoked too; a name that was never minted is not found.
 func (r *ActorReconciler) revoke(ctx context.Context, actor *workspacesv1alpha1.Actor) error {
 	daemon, err := r.dial(ctx, actor.Namespace)
 	if err != nil {
@@ -488,18 +517,33 @@ func (r *ActorReconciler) revoke(ctx context.Context, actor *workspacesv1alpha1.
 	}()
 	callContext, cancel := context.WithTimeout(ctx, actorCallTimeout)
 	defer cancel()
-	if err := daemon.RevokeRunnerCredential(callContext, actor.Status.RunnerName); err != nil && !errors.Is(err, needy.ErrNotFound) {
-		return err
+	runners := []string{actor.Status.RunnerName}
+	for _, executor := range externalExecutors(actor) {
+		runners = append(runners, executor.RunnerName)
+	}
+	for _, runner := range runners {
+		if err := daemon.RevokeRunnerCredential(callContext, runner); err != nil && !errors.Is(err, needy.ErrNotFound) {
+			return err
+		}
 	}
 
 	return nil
 }
 
 // executorRunners maps the Actor's executor bindings to runner names. Every
-// bound Workspace must serve as a needy executor.
+// bound Workspace must serve as a needy executor. An external binding's
+// runner name is derived from the Actor; its runner connects later.
 func (r *ActorReconciler) executorRunners(ctx context.Context, actor *workspacesv1alpha1.Actor) (map[string]string, string, string, error) {
 	runners := make(map[string]string, len(actor.Spec.Executors))
 	for _, binding := range actor.Spec.Executors {
+		if binding.External != nil {
+			runners[binding.Name] = needyExternalRunnerName(string(actor.UID), binding.Name)
+			continue
+		}
+		if binding.WorkspaceRef == nil {
+			// The CRD requires one of the two; this guards a nil reference.
+			return nil, workspacesv1alpha1.ActorReasonExecutorNotReady, fmt.Sprintf("Executor %s sets neither workspaceRef nor external", binding.Name), nil
+		}
 		var workspace workspacesv1alpha1.Workspace
 		err := r.Get(ctx, types.NamespacedName{Namespace: actor.Namespace, Name: binding.WorkspaceRef.Name}, &workspace)
 		if apierrors.IsNotFound(err) {
@@ -605,13 +649,68 @@ func (r *ActorReconciler) profileText(ctx context.Context, actor *workspacesv1al
 	}
 }
 
-// ensureRunnerCredential mints the actor runner's credential once and keeps it
-// in a Secret that the Actor owns. It reports whether it minted one.
-func (r *ActorReconciler) ensureRunnerCredential(ctx context.Context, actor *workspacesv1alpha1.Actor, daemon needy.Daemon, runner string) (bool, error) {
-	key := types.NamespacedName{Namespace: actor.Namespace, Name: actorCredentialSecretName(actor)}
+// runnerCredential is a runner credential that an Actor owns: the runner it
+// is minted for, the one role that runner may declare, and the Secret that
+// keeps it.
+type runnerCredential struct {
+	runner string
+	role   needy.Role
+	secret string
+	labels map[string]string
+}
+
+func actorRunnerCredential(actor *workspacesv1alpha1.Actor) runnerCredential {
+	return runnerCredential{
+		runner: needyActorRunnerName(string(actor.UID)),
+		role:   needy.RoleActor,
+		secret: actorCredentialSecretName(actor),
+		labels: map[string]string{workspacesv1alpha1.NeedyComponentLabel: needyComponentActor},
+	}
+}
+
+func externalRunnerCredential(actor *workspacesv1alpha1.Actor, executor workspacesv1alpha1.ActorExecutorStatus) runnerCredential {
+	return runnerCredential{
+		runner: executor.RunnerName,
+		role:   needy.RoleExecutor,
+		secret: executor.CredentialSecretName,
+		labels: map[string]string{
+			workspacesv1alpha1.NeedyComponentLabel: needyComponentExecutor,
+			workspacesv1alpha1.NeedyActorLabel:     actor.Name,
+		},
+	}
+}
+
+// externalExecutors derives the runner and credential Secret of every
+// external executor binding. Both are fixed by the Actor's UID and the
+// executor's name.
+func externalExecutors(actor *workspacesv1alpha1.Actor) []workspacesv1alpha1.ActorExecutorStatus {
+	var executors []workspacesv1alpha1.ActorExecutorStatus
+	for _, binding := range actor.Spec.Executors {
+		if binding.External == nil {
+			continue
+		}
+		runner := needyExternalRunnerName(string(actor.UID), binding.Name)
+		executors = append(executors, workspacesv1alpha1.ActorExecutorStatus{
+			Name:       binding.Name,
+			RunnerName: runner,
+			// The runner name carries the UID, so the Secret is fresh for every
+			// Actor, and the executor name is already spelled as a DNS label.
+			CredentialSecretName: actor.Name + "-" + runner,
+		})
+	}
+
+	return executors
+}
+
+// ensureRunnerCredential mints a runner's credential once and keeps it in a
+// Secret that the Actor owns. Every credential lives as long as the actor
+// runner's: maxRunDuration plus the start grace. It reports whether it minted
+// one.
+func (r *ActorReconciler) ensureRunnerCredential(ctx context.Context, actor *workspacesv1alpha1.Actor, daemon needy.Daemon, wanted runnerCredential) (bool, error) {
+	key := types.NamespacedName{Namespace: actor.Namespace, Name: wanted.secret}
 	var existing corev1.Secret
 	err := r.Get(ctx, key, &existing)
-	if err == nil && needy.IsMintedCredential(string(existing.Data[needyCredentialKey]), runner) {
+	if err == nil && needy.IsMintedCredential(string(existing.Data[needyCredentialKey]), wanted.runner) {
 		return false, nil
 	}
 	if err != nil && !apierrors.IsNotFound(err) {
@@ -621,16 +720,18 @@ func (r *ActorReconciler) ensureRunnerCredential(ctx context.Context, actor *wor
 	defer cancel()
 	// A credential minted before a crash, but never stored, still holds the
 	// name; revoking it first lets the name be minted again.
-	if err := daemon.RevokeRunnerCredential(callContext, runner); err != nil && !errors.Is(err, needy.ErrNotFound) {
+	if err := daemon.RevokeRunnerCredential(callContext, wanted.runner); err != nil && !errors.Is(err, needy.ErrNotFound) {
 		return false, err
 	}
-	credential, err := daemon.MintRunnerCredential(callContext, runner, actorMaxRunDuration(actor)+actorStartGrace)
+	credential, err := daemon.MintRunnerCredential(callContext, wanted.runner, wanted.role, actorMaxRunDuration(actor)+actorStartGrace)
 	if err != nil {
 		return false, err
 	}
+	minted := r.now().UTC().Format(time.RFC3339)
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
-		secret.Labels = map[string]string{workspacesv1alpha1.NeedyComponentLabel: needyComponentActor}
+		secret.Labels = wanted.labels
+		secret.Annotations = map[string]string{actorCredentialMintedAnnotation: minted}
 		secret.Data = map[string][]byte{needyCredentialKey: []byte(credential)}
 
 		return controllerutil.SetControllerReference(actor, secret, r.Scheme)
@@ -639,6 +740,48 @@ func (r *ActorReconciler) ensureRunnerCredential(ctx context.Context, actor *wor
 	}
 
 	return true, nil
+}
+
+// awaitExternalRunners waits for the runners of the external executors to
+// connect. A runner that has not connected within actorStartGrace of its
+// credential's minting fails the Actor, as an actor runner Pod that ends
+// before the run does. It reports whether the caller must wait.
+func (r *ActorReconciler) awaitExternalRunners(ctx context.Context, actor *workspacesv1alpha1.Actor, daemon needy.Daemon, executors []workspacesv1alpha1.ActorExecutorStatus) (ctrl.Result, bool, error) {
+	for _, executor := range executors {
+		callContext, cancel := context.WithTimeout(ctx, actorCallTimeout)
+		online, err := daemon.IsExecutorRunnerConnected(callContext, executor.RunnerName)
+		cancel()
+		if err != nil {
+			return ctrl.Result{}, true, err
+		}
+		if online {
+			continue
+		}
+		var secret corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{Namespace: actor.Namespace, Name: executor.CredentialSecretName}, &secret); err != nil {
+			return ctrl.Result{}, true, err
+		}
+		minted, err := time.Parse(time.RFC3339, secret.Annotations[actorCredentialMintedAnnotation])
+		if err != nil {
+			minted = secret.CreationTimestamp.Time
+		}
+		if !r.now().Before(minted.Add(actorStartGrace)) {
+			result, err := r.fail(ctx, actor, workspacesv1alpha1.ActorReasonExecutorOffline,
+				fmt.Sprintf("The runner %s of external executor %s did not connect within %s", executor.RunnerName, executor.Name, actorStartGrace))
+
+			return result, true, err
+		}
+		message := fmt.Sprintf("Waiting for the runner %s of external executor %s to connect", executor.RunnerName, executor.Name)
+		if setActorReady(actor, metav1.ConditionFalse, workspacesv1alpha1.ActorReasonWaitingForRunner, message) {
+			if err := r.Status().Update(ctx, actor); err != nil {
+				return ctrl.Result{}, true, err
+			}
+		}
+
+		return ctrl.Result{RequeueAfter: needyDaemonPoll}, true, nil
+	}
+
+	return ctrl.Result{}, false, nil
 }
 
 func (r *ActorReconciler) ensureRunnerPod(ctx context.Context, actor *workspacesv1alpha1.Actor, runner string, proxy *workspacesv1alpha1.ActorProxy) (*corev1.Pod, error) {

@@ -78,6 +78,22 @@ file. An init container copies needy from the needy image, as for rc-kube in
 reports exec traffic with `rc-kube process touch`, so a Workspace that runs
 an Actor's commands is not suspended as idle.
 
+### External executors
+
+An executor binding sets either `workspaceRef` or `external` (a provisional
+name). An external executor runs on a machine outside the cluster, such as a
+user's laptop, as `needy runner serve --roles executor`, which dials the
+namespace's daemon. Its runner name comes from the Actor's UID and the
+executor's name, so it is fresh for every Actor. When the run starts, rc
+mints its credential with the actor runner's lifetime and the executor role
+only, keeps it in a Secret that the Actor owns, and lists the runner and the
+Secret in `status.executors`. rc does not start the runner: a system outside
+rc reads the Secret and hands the credential to the machine. rc waits for the
+runner to connect before it checks the placement, because needy refuses a
+runner that has not connected; one that has not connected within the start
+grace fails the Actor with `ExecutorRunnerOffline`. The credential is revoked
+with the actor runner's.
+
 ### Network
 
 The actor's gateway runs in its actor runner, so the actor's traffic
@@ -93,6 +109,13 @@ them, and because a cluster may have its own:
   actor names; the policy also covers the Pod itself.
 - The daemon admits the namespace's actor runners and Workspaces, and the
   manager's Pods, to its control port.
+
+TODO(external-executor-ingress): the daemon's policy does not admit external
+executor runners, so with these policies an external executor cannot
+connect. They are meant to arrive through a cluster byte-stream router that
+carries their gRPC to the namespace's daemon, from needy's Phase 3 data-plane
+design, which is not built. The policy stays closed until that router lands
+and can be admitted instead.
 
 `spec.proxy` sends an Actor's traffic through a SOCKS5 proxy of any
 implementation. The runner refuses a connection when the proxy fails
@@ -137,7 +160,8 @@ needy's API has no compatibility promise before 1.0.
   NetworkPolicies that rc can keep for needy are a separate, optional
   integration.
 - Executors on users' own machines need an ingress that carries gRPC to the
-  namespace's daemon. They are not part of this decision.
+  namespace's daemon. rc mints and revokes their credentials, but provides
+  no such ingress.
 
 ## Rejected options
 

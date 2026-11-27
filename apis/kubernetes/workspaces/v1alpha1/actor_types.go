@@ -46,6 +46,7 @@ const (
 	ActorReasonEnvNotReady        = "EnvNotReady"
 	ActorReasonInvalidPod         = "InvalidPod"
 	ActorReasonWaitingForRunner   = "WaitingForRunner"
+	ActorReasonExecutorOffline    = "ExecutorRunnerOffline"
 	ActorReasonRunnerFailed       = "RunnerFailed"
 	ActorReasonCreatingRun        = "CreatingRun"
 	ActorReasonRunning            = "Running"
@@ -83,8 +84,10 @@ type ActorProfile struct {
 	Inline string `json:"inline,omitempty"`
 }
 
-// ActorExecutor binds one executor of the profile to a Workspace that serves
-// as a needy executor (spec.needy.executor).
+// ActorExecutor binds one executor of the profile to a runner: a Workspace
+// that serves as a needy executor (spec.needy.executor), or an external
+// runner on a machine outside the cluster.
+// +kubebuilder:validation:XValidation:rule="(has(self.workspaceRef) ? 1 : 0) + (has(self.external) ? 1 : 0) == 1",message="exactly one of workspaceRef and external must be set"
 type ActorExecutor struct {
 	// name is the executor's name in the profile's executors map.
 	// +kubebuilder:validation:Pattern="^[A-Za-z0-9_-]+$"
@@ -93,8 +96,46 @@ type ActorExecutor struct {
 	Name string `json:"name"`
 
 	// workspaceRef names a Workspace in the Actor's namespace.
+	// +optional
+	WorkspaceRef *corev1.LocalObjectReference `json:"workspaceRef,omitempty"`
+
+	// external binds the executor to a runner outside the cluster, such as a
+	// user's machine that runs `needy runner serve --roles executor` and
+	// dials the namespace's daemon. rc mints the runner's credential when the
+	// run starts and lists it in status.executors; whatever starts the runner
+	// reads the credential from that Secret. The run waits for the runner to
+	// connect for as long as it waits for the actor runner to start.
+	// +optional
+	External *ActorExternalExecutor `json:"external,omitempty"`
+}
+
+// ActorExternalExecutor is an executor runner outside the cluster. The name
+// is provisional.
+//
+// TODO(external-executor): it has no fields yet. Runner labels, or a runner
+// name that an outside system chooses, are left out until a caller needs
+// one; it is a struct so that they can be added without a new field.
+type ActorExternalExecutor struct{}
+
+// ActorExecutorStatus is the runner of an external executor. An outside
+// system that starts the runner on the user's machine, such as a server that
+// brokers the executor's attach to a user's device, reads the credential from
+// credentialSecretName and hands it to the runner.
+type ActorExecutorStatus struct {
+	// name is the executor's name in spec.executors.
 	// +required
-	WorkspaceRef corev1.LocalObjectReference `json:"workspaceRef"`
+	Name string `json:"name"`
+
+	// runnerName is the needy runner name that the credential is minted for.
+	// The runner serves under this name.
+	// +required
+	RunnerName string `json:"runnerName"`
+
+	// credentialSecretName is a Secret in the Actor's namespace that the
+	// Actor owns. Its key credential holds the runner's credential, which
+	// expires with the actor runner's and is revoked when the run ends.
+	// +required
+	CredentialSecretName string `json:"credentialSecretName"`
 }
 
 // ActorProxy sends the actor's internet traffic through a SOCKS5 proxy.
@@ -171,8 +212,9 @@ type ActorSpec struct {
 	// +required
 	Profile ActorProfile `json:"profile"`
 
-	// executors binds the profile's executors to Workspaces. Every executor of
-	// the resolved profile must be bound; rc never places one on the daemon.
+	// executors binds the profile's executors to Workspaces or to external
+	// runners. Every executor of the resolved profile must be bound; rc never
+	// places one on the daemon.
 	// +listType=map
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=16
@@ -265,6 +307,15 @@ type ActorStatus struct {
 	// +optional
 	RunnerName string `json:"runnerName,omitempty"`
 
+	// executors lists the runners of the external executors and the Secrets
+	// that hold their credentials, once rc has minted them. Workspace
+	// executors are not listed: rc runs their runners itself.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=16
+	// +optional
+	Executors []ActorExecutorStatus `json:"executors,omitempty"`
+
 	// podName is the actor runner Pod.
 	// +optional
 	PodName string `json:"podName,omitempty"`
@@ -313,7 +364,8 @@ func (phase ActorPhase) IsTerminal() bool {
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=".metadata.creationTimestamp"
 
 // Actor is one needy run whose actor runs in a Firecracker VM in its own Pod.
-// Its commands go to Workspaces that serve as needy executors.
+// Its commands go to Workspaces that serve as needy executors, or to external
+// executor runners.
 type Actor struct {
 	metav1.TypeMeta `json:",inline"`
 

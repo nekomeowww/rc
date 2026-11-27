@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.29
 
 ARG RUNNER_IMAGE=ghcr.io/nekomeowww/rc/runner:latest
 

@@ -2,6 +2,9 @@
 
 ARG RUNNER_IMAGE=ghcr.io/nekomeowww/rc/runner:latest
 
+# ------------------------------------------------------------------------------
+# Stage 1: Install pinned OpenAI Codex CLI, Bun, and pnpm
+# ------------------------------------------------------------------------------
 FROM node:26.13.1-bookworm-slim AS codex
 
 # renovate: datasource=npm depName=bun
@@ -11,16 +14,22 @@ ARG CODEX_VERSION=0.172.0
 # renovate: datasource=npm depName=pnpm
 ARG PNPM_VERSION=12.23.0
 
-RUN npm install --global --prefix /opt/openai \
-        "@openai/codex@${CODEX_VERSION}" \
-        "bun@${BUN_VERSION}" \
-        "pnpm@${PNPM_VERSION}" \
-    && npm cache clean --force \
-    && test "$(/opt/openai/bin/bun --version)" = "${BUN_VERSION}" \
-    && test "$(/opt/openai/bin/codex --version)" = "codex-cli ${CODEX_VERSION}" \
-    && test "$(/opt/openai/bin/pnpm --version)" = "${PNPM_VERSION}"
+RUN <<'EOF'
+set -eu
+npm install --global --prefix /opt/openai \
+  "@openai/codex@${CODEX_VERSION}" \
+  "bun@${BUN_VERSION}" \
+  "pnpm@${PNPM_VERSION}"
+npm cache clean --force
+test "$(/opt/openai/bin/bun --version)" = "${BUN_VERSION}"
+test "$(/opt/openai/bin/codex --version)" = "codex-cli ${CODEX_VERSION}"
+test "$(/opt/openai/bin/pnpm --version)" = "${PNPM_VERSION}"
+EOF
 
-FROM ${RUNNER_IMAGE}
+# ------------------------------------------------------------------------------
+# Stage 2: Final OpenAI Codex CLI environment image
+# ------------------------------------------------------------------------------
+FROM ${RUNNER_IMAGE} AS openai-codex-cli
 
 # renovate: datasource=npm depName=@openai/codex
 ARG CODEX_VERSION=0.172.0
@@ -40,19 +49,26 @@ COPY --from=codex /opt/openai /opt/openai
 USER root
 # RUNNER_IMAGE is overridable, so keep the native build toolchain explicit for
 # older or custom Debian-compatible runner images.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        build-essential \
-        cmake \
-        pkg-config \
-        python3 \
-    && rm -rf /var/lib/apt/lists/* \
-    && ln -sfn /opt/openai/bin/bun /usr/local/bin/bun \
-    && ln -sfn /opt/openai/bin/bunx /usr/local/bin/bunx \
-    && ln -sfn /opt/openai/bin/codex /usr/local/bin/codex \
-    && ln -sfn /opt/openai/bin/pnpm /usr/local/bin/pnpm \
-    && ln -sfn /opt/openai/bin/pnpx /usr/local/bin/pnpx \
-    && install -d -m 0700 -o agent -g agent /tmp/cache /tmp/cache/pnpm /tmp/cache/pnpm/store /tmp/cache/pnpm/virtual
+RUN <<'EOF'
+set -eu
+apt-get update
+apt-get install -y --no-install-recommends \
+  build-essential \
+  cmake \
+  pkg-config \
+  python3
+rm -rf /var/lib/apt/lists/*
+ln -sfn /opt/openai/bin/bun /usr/local/bin/bun
+ln -sfn /opt/openai/bin/bunx /usr/local/bin/bunx
+ln -sfn /opt/openai/bin/codex /usr/local/bin/codex
+ln -sfn /opt/openai/bin/pnpm /usr/local/bin/pnpm
+ln -sfn /opt/openai/bin/pnpx /usr/local/bin/pnpx
+install -d -m 0700 -o agent -g agent \
+  /tmp/cache \
+  /tmp/cache/pnpm \
+  /tmp/cache/pnpm/store \
+  /tmp/cache/pnpm/virtual
+EOF
 USER 1000:1000
 
 # Repeat the cache default for older/custom RUNNER_IMAGE bases. pnpm 11+ no
@@ -62,7 +78,11 @@ ENV PATH="/opt/openai/bin:${PATH}" \
     XDG_CACHE_HOME="/tmp/cache" \
     pnpm_config_store_dir="/tmp/cache/pnpm/store"
 
-RUN test -w /tmp/cache/pnpm/store && test -w /tmp/cache/pnpm/virtual \
-    && test "$(pnpm config get storeDir)" = "/tmp/cache/pnpm/store"
+RUN <<'EOF'
+set -eu
+test -w /tmp/cache/pnpm/store
+test -w /tmp/cache/pnpm/virtual
+test "$(pnpm config get storeDir)" = "/tmp/cache/pnpm/store"
+EOF
 
 ENTRYPOINT ["codex"]

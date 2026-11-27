@@ -7,7 +7,7 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Track pinned runner tool ARG *_VERSION declarations in Dockerfiles",
+      "description": "Track pinned ARG *_VERSION declarations in Dockerfiles",
       "managerFilePatterns": [
         "/^images/.+/Dockerfile$/"
       ],
@@ -28,11 +28,12 @@
   ],
   "packageRules": [
     {
-      "description": "Group all runner image dependency updates into a single PR",
+      "description": "Group all container image dependency updates into a single PR",
       "matchFileNames": [
-        "images/**"
+        "images/**",
+        "test/e2e/Dockerfile.runner"
       ],
-      "groupName": "runner image dependencies",
+      "groupName": "container image dependencies",
       "commitMessagePrefix": "chore(images):",
       "labels": [
         "dependencies",

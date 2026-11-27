@@ -1,7 +1,9 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.7
 
-# Build rcctl and rc-kube for Workspace runtime Pods and Repository/Worktree Jobs.
-FROM --platform=$BUILDPLATFORM golang:1.27.4 AS builder
+# ------------------------------------------------------------------------------
+# Stage 1: Build rcctl and rc-kube binaries
+# ------------------------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM golang:1.27.4 AS rc-binaries
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -11,12 +13,18 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
-        go build -trimpath -o /out/rcctl ./cmd/rcctl \
-    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
-        go build -trimpath -o /out/rc-kube ./cmd/rc-kube
+RUN <<'EOF'
+set -eu
+CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH}" \
+  go build -trimpath -o /out/rcctl ./cmd/rcctl
+CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH}" \
+  go build -trimpath -o /out/rc-kube ./cmd/rc-kube
+EOF
 
-FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS tool-downloader
+# ------------------------------------------------------------------------------
+# Stage 2: Download and verify version managers (mise, proto)
+# ------------------------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS tools
 
 ARG TARGETARCH
 # renovate: datasource=github-releases depName=jdx/mise extractVersion=^v(?<version>.*)$
@@ -28,43 +36,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-RUN set -eux; \
-    case "${TARGETARCH}" in \
-        amd64) \
-            mise_arch=x64; \
-            proto_target=x86_64-unknown-linux-gnu \
-            ;; \
-        arm64) \
-            mise_arch=arm64; \
-            proto_target=aarch64-unknown-linux-gnu \
-            ;; \
-        *) \
-            echo "Unsupported target architecture: ${TARGETARCH}" >&2; \
-            exit 1 \
-            ;; \
-    esac; \
-    mise_asset="mise-v${MISE_VERSION}-linux-${mise_arch}.tar.xz"; \
-    curl -fsSLo /tmp/mise.tar.xz \
-        "https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/${mise_asset}"; \
-    mise_sha256="$(curl -fsSL "https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/SHASUMS256.txt" \
-        | awk -v asset="${mise_asset}" '$2 == asset || $2 == ("./" asset) { print $1; exit }')"; \
-    test -n "${mise_sha256}"; \
-    echo "${mise_sha256}  /tmp/mise.tar.xz" | sha256sum --check --strict; \
-    mkdir -p /tmp/mise; \
-    tar -xJf /tmp/mise.tar.xz -C /tmp/mise --strip-components=2 mise/bin/mise; \
-    install -Dm755 /tmp/mise/mise /out/mise; \
-    proto_asset="proto_cli-${proto_target}.tar.xz"; \
-    curl -fsSLo /tmp/proto.tar.xz \
-        "https://github.com/moonrepo/proto/releases/download/v${PROTO_VERSION}/${proto_asset}"; \
-    proto_sha256="$(curl -fsSL "https://github.com/moonrepo/proto/releases/download/v${PROTO_VERSION}/${proto_asset}.sha256" \
-        | awk '{ print $1; exit }')"; \
-    test -n "${proto_sha256}"; \
-    echo "${proto_sha256}  /tmp/proto.tar.xz" | sha256sum --check --strict; \
-    mkdir -p /tmp/proto; \
-    tar -xJf /tmp/proto.tar.xz -C /tmp/proto --strip-components=1; \
-    install -Dm755 /tmp/proto/proto /out/proto; \
-    install -Dm755 /tmp/proto/proto-shim /out/proto-shim
+RUN --mount=type=bind,source=images/scripts/install-mise-proto.sh,target=/tmp/install-mise-proto.sh \
+    bash /tmp/install-mise-proto.sh
 
+# ------------------------------------------------------------------------------
+# Stage 3: Final Linux Workspace runner image
+# ------------------------------------------------------------------------------
 FROM node:26.13.1-bookworm-slim AS runner
 
 # renovate: datasource=npm depName=corepack
@@ -73,98 +50,71 @@ ARG COREPACK_VERSION=0.36.0
 ARG LOBEHUB_CLI_VERSION=0.0.270
 
 LABEL org.opencontainers.image.source="https://github.com/nekomeowww/rc" \
-    org.opencontainers.image.title="rc runner"
+      org.opencontainers.image.title="rc runner"
 
-# Preinstall Playwright Chromium dependencies because Workspace processes
-# cannot elevate privileges to install system packages at runtime.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        bash \
-        btop \
-        build-essential \
-        ca-certificates \
-        cmake \
-        curl \
-        fonts-freefont-ttf \
-        fonts-ipafont-gothic \
-        fonts-liberation \
-        fonts-noto-color-emoji \
-        fonts-tlwg-loma-otf \
-        fonts-unifont \
-        fonts-wqy-zenhei \
-        gh \
-        git \
-        git-lfs \
-        gzip \
-        htop \
-        libasound2 \
-        libatk-bridge2.0-0 \
-        libatk1.0-0 \
-        libatomic1 \
-        libatspi2.0-0 \
-        libcairo2 \
-        libcups2 \
-        libdbus-1-3 \
-        libdrm2 \
-        libfontconfig1 \
-        libfreetype6 \
-        libgbm1 \
-        libglib2.0-0 \
-        libnspr4 \
-        libnss3 \
-        libpango-1.0-0 \
-        libx11-6 \
-        libxcb1 \
-        libxcomposite1 \
-        libxdamage1 \
-        libxext6 \
-        libxfixes3 \
-        libxkbcommon0 \
-        libxrandr2 \
-        openssh-client \
-        openssh-sftp-server \
-        pkg-config \
-        procps \
-        python3 \
-        ripgrep \
-        sudo \
-        tar \
-        tini \
-        tmux \
-        unzip \
-        wget \
-        xfonts-scalable \
-        xvfb \
-        xz-utils \
-        zip \
-    && npm install --global --ignore-scripts \
-        "corepack@${COREPACK_VERSION}" \
-        "@lobehub/cli@${LOBEHUB_CLI_VERSION}" \
-    && test "$(lh --version)" = "${LOBEHUB_CLI_VERSION}" \
-    && test "$(lobe --version)" = "${LOBEHUB_CLI_VERSION}" \
-    && test "$(lobehub --version)" = "${LOBEHUB_CLI_VERSION}" \
-    && rm -rf /tmp/lobehub \
-    && npm cache clean --force \
-    && gh --version \
-    && rm -rf /var/lib/apt/lists/* \
-    && usermod --login agent --home /home/agent --move-home --shell /bin/bash node \
-    && groupmod --new-name agent node \
-    && groupadd --gid 65532 rc \
-    && useradd --uid 65532 --gid 65532 --create-home --shell /bin/bash rc \
-    && git config --system --add safe.directory '*'
+# Install system packages. Playwright Chromium runtime dependencies are baked in
+# because unprivileged Workspace processes cannot elevate privileges at runtime.
+RUN bash -eu <<'EOF'
+packages=(
+  # Core CLI, shell, archive, and process utilities
+  bash btop ca-certificates curl gh git git-lfs gzip htop
+  openssh-client openssh-sftp-server procps ripgrep sudo tar tini tmux
+  unzip wget xz-utils zip
 
-COPY --from=builder /out/rcctl /usr/local/bin/rcctl
-# Linux runtime Pods run the rc-kube and tini that the controller injects from
-# the rc-kube image. This copy serves tools that use the image directly, such as
-# the rcctl reader for the logs of a suspended Workspace.
-COPY --from=builder /out/rc-kube /usr/local/bin/rc-kube
-COPY --from=tool-downloader /out/mise /usr/local/bin/mise
-COPY --from=tool-downloader /out/proto /usr/local/bin/proto
-COPY --from=tool-downloader /out/proto-shim /usr/local/bin/proto-shim
+  # Native build toolchain
+  build-essential cmake pkg-config python3
 
-# Keep rebuildable tool metadata on container-local storage, not the home PVC.
-# This directory is not a persistent volume and may disappear on runtime replacement.
-RUN install -d -m 0700 -o 1000 -g 1000 /tmp/cache
+  # Fonts (Latin, CJK, Emoji)
+  fonts-freefont-ttf fonts-ipafont-gothic fonts-liberation
+  fonts-noto-color-emoji fonts-tlwg-loma-otf fonts-unifont fonts-wqy-zenhei
+  xfonts-scalable
+
+  # Playwright / Chromium headless runtime libraries
+  libasound2 libatk-bridge2.0-0 libatk1.0-0 libatomic1 libatspi2.0-0
+  libcairo2 libcups2 libdbus-1-3 libdrm2 libfontconfig1 libfreetype6
+  libgbm1 libglib2.0-0 libnspr4 libnss3 libpango-1.0-0
+  libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3
+  libxkbcommon0 libxrandr2 xvfb
+)
+apt-get update
+apt-get install -y --no-install-recommends "${packages[@]}"
+gh --version
+rm -rf /var/lib/apt/lists/*
+EOF
+
+# Install pinned global npm CLIs and verify their entrypoints.
+RUN <<'EOF'
+set -eu
+npm install --global --ignore-scripts \
+  "corepack@${COREPACK_VERSION}" \
+  "@lobehub/cli@${LOBEHUB_CLI_VERSION}"
+test "$(lh --version)" = "${LOBEHUB_CLI_VERSION}"
+test "$(lobe --version)" = "${LOBEHUB_CLI_VERSION}"
+test "$(lobehub --version)" = "${LOBEHUB_CLI_VERSION}"
+rm -rf /tmp/lobehub
+npm cache clean --force
+EOF
+
+# Configure unprivileged runtime users and container-local cache directory.
+# Keep rebuildable tool caches on container-local storage, not the home PVC.
+RUN <<'EOF'
+set -eu
+usermod --login agent --home /home/agent --move-home --shell /bin/bash node
+groupmod --new-name agent node
+groupadd --gid 65532 rc
+useradd --uid 65532 --gid 65532 --create-home --shell /bin/bash rc
+git config --system --add safe.directory '*'
+install -d -m 0700 -o 1000 -g 1000 /tmp/cache
+EOF
+
+# Linux runtime Pods run the rc-kube and tini injected by the controller from
+# the rc-kube image. The copies below serve tools that invoke the runner image
+# directly (for example, rcctl reading logs of a suspended Workspace).
+COPY --from=rc-binaries /out/rcctl /usr/local/bin/rcctl
+COPY --from=rc-binaries /out/rc-kube /usr/local/bin/rc-kube
+COPY --from=tools /out/mise /usr/local/bin/mise
+COPY --from=tools /out/proto /usr/local/bin/proto
+COPY --from=tools /out/proto-shim /usr/local/bin/proto-shim
 
 ENV SHELL="/bin/bash" \
     XDG_CACHE_HOME="/tmp/cache"

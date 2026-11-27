@@ -10,6 +10,8 @@
 !go.mod
 !go.sum
 
-# Re-include the Wayland runner runtime files copied by its Dockerfile.
+# Re-include shared image build helper scripts and Wayland runner runtime files.
+!images/scripts/**
 !images/runner-wayland/rootfs/**
 !images/runner-wayland/patches/**
+!images/runner-wayland/scripts/**

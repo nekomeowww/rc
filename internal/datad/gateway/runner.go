@@ -124,9 +124,14 @@ func Run(args []string, scheme *runtime.Scheme) error {
 	}
 	gw := NewServer(resolver, certProvider)
 
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetHTTP2(true)
+	protocols.SetUnencryptedHTTP2(true)
 	httpServer := &http.Server{
 		Addr:              listenAddr,
 		Handler:           gw.Handler(),
+		Protocols:         protocols,
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 

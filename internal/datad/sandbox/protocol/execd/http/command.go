@@ -18,7 +18,6 @@ package execdhttp
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,28 +27,36 @@ import (
 	"strings"
 	"time"
 
+	"github.com/labstack/echo/v4"
+
 	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/rckube"
 	"github.com/nekomeowww/rc/pkg/execd"
 )
 
-const maxLogChunkBytes = 16 << 20
+const (
+	maxLogChunkBytes    = 16 << 20
+	codeCommandNotFound = "COMMAND_NOT_FOUND"
+)
 
-func (s *Server) handleRunCommand(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleRunCommand(c echo.Context) error {
+	w := c.Response().Writer
+	r := c.Request()
+
 	var req execd.RunCommandRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		execd.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST_BODY", fmt.Sprintf("decode request: %v", err))
-		return
+		return nil
 	}
 	hasCommand := strings.TrimSpace(req.Command) != ""
 	hasArgv := len(req.Argv) > 0
 	if hasCommand == hasArgv {
 		execd.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST_BODY", "supply exactly one of command or argv")
-		return
+		return nil
 	}
 	if req.GID != nil && req.UID == nil {
 		execd.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST_BODY", "gid requires uid")
-		return
+		return nil
 	}
 
 	var cmd string
@@ -58,7 +65,7 @@ func (s *Server) handleRunCommand(w http.ResponseWriter, r *http.Request) {
 	if hasArgv {
 		if req.Argv[0] == "" {
 			execd.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST_BODY", "argv[0] must be non-empty")
-			return
+			return nil
 		}
 		cmd = req.Argv[0]
 		args = req.Argv[1:]
@@ -89,7 +96,7 @@ func (s *Server) handleRunCommand(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		execd.WriteError(w, http.StatusInternalServerError, "COMMAND_START_FAILED", err.Error())
-		return
+		return nil
 	}
 
 	rec := &commandRecord{
@@ -134,7 +141,7 @@ func (s *Server) handleRunCommand(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		sub.Close()
 		execd.WriteError(w, http.StatusInternalServerError, "STREAMING_UNSUPPORTED", "response writer does not support streaming")
-		return
+		return nil
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -150,7 +157,7 @@ func (s *Server) handleRunCommand(w http.ResponseWriter, r *http.Request) {
 
 	if req.Background {
 		sub.Close()
-		return
+		return nil
 	}
 	defer sub.Close()
 
@@ -165,7 +172,7 @@ func (s *Server) handleRunCommand(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-pingTicker.C:
 			execd.WriteSSE(w, flusher, execd.ServerStreamEvent{
 				Type:      "ping",
@@ -199,7 +206,7 @@ func (s *Server) handleRunCommand(w http.ResponseWriter, r *http.Request) {
 								ExitCode: &code,
 							},
 						})
-						return
+						return nil
 					}
 					if outcome.ExitCode == 0 {
 						zero := int32(0)
@@ -209,7 +216,7 @@ func (s *Server) handleRunCommand(w http.ResponseWriter, r *http.Request) {
 							ExecutionTime: &elapsed,
 							Timestamp:     time.Now().UnixMilli(),
 						})
-						return
+						return nil
 					}
 					code := outcome.ExitCode
 					evalue := strconv.Itoa(int(code))
@@ -226,47 +233,43 @@ func (s *Server) handleRunCommand(w http.ResponseWriter, r *http.Request) {
 							ExitCode: &code,
 						},
 					})
-					return
+					return nil
 				}
 			}
 		}
 	}
 }
 
-func (s *Server) handleInterruptCommand(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimSpace(r.URL.Query().Get("id"))
+func (s *Server) handleInterruptCommand(c echo.Context) error {
+	id := strings.TrimSpace(c.QueryParam("id"))
 	if id == "" {
-		execd.WriteError(w, http.StatusBadRequest, "MISSING_QUERY_PARAMETER", "id query parameter is required")
-		return
+		return c.JSON(http.StatusBadRequest, execd.ErrorResponse{
+			Code:    "MISSING_QUERY_PARAMETER",
+			Message: "id query parameter is required",
+		})
 	}
 	if _, err := s.supervisor.Stop(id); err != nil {
 		if errors.Is(err, processruntime.ErrNotFound) {
-			execd.WriteError(w, http.StatusNotFound, "COMMAND_NOT_FOUND", fmt.Sprintf("command %q not found", id))
-			return
+			return c.JSON(http.StatusNotFound, execd.ErrorResponse{
+				Code:    codeCommandNotFound,
+				Message: fmt.Sprintf("command %q not found", id),
+			})
 		}
-		execd.WriteError(w, http.StatusInternalServerError, "COMMAND_STOP_FAILED", err.Error())
-		return
+		return c.JSON(http.StatusInternalServerError, execd.ErrorResponse{
+			Code:    "COMMAND_STOP_FAILED",
+			Message: err.Error(),
+		})
 	}
-	w.WriteHeader(http.StatusOK)
+	return c.NoContent(http.StatusOK)
 }
 
-func (s *Server) handleCommandSubroute(w http.ResponseWriter, r *http.Request) {
-	rest := strings.TrimPrefix(r.URL.Path, "/command/")
-	if id, ok := strings.CutPrefix(rest, "status/"); ok && id != "" && !strings.Contains(id, "/") {
-		s.handleCommandStatus(w, r, id)
-		return
-	}
-	if id, ok := strings.CutSuffix(rest, "/logs"); ok && id != "" && !strings.Contains(id, "/") {
-		s.handleCommandLogs(w, r, id)
-		return
-	}
-	execd.WriteError(w, http.StatusNotFound, "NOT_FOUND", "unknown command endpoint")
-}
-
-func (s *Server) handleCommandStatus(w http.ResponseWriter, _ *http.Request, id string) {
+func (s *Server) handleCommandStatus(c echo.Context) error {
+	id := strings.TrimSpace(c.Param("id"))
 	if id == "" {
-		execd.WriteError(w, http.StatusBadRequest, "INVALID_PATH_PARAMETER", "command id is required")
-		return
+		return c.JSON(http.StatusBadRequest, execd.ErrorResponse{
+			Code:    "INVALID_PATH_PARAMETER",
+			Message: "command id is required",
+		})
 	}
 
 	s.cmdMu.RLock()
@@ -289,11 +292,15 @@ func (s *Server) handleCommandStatus(w http.ResponseWriter, _ *http.Request, id 
 		state, err := s.supervisor.Inspect(id)
 		if err != nil {
 			if errors.Is(err, processruntime.ErrNotFound) {
-				execd.WriteError(w, http.StatusNotFound, "COMMAND_NOT_FOUND", fmt.Sprintf("command %q not found", id))
-				return
+				return c.JSON(http.StatusNotFound, execd.ErrorResponse{
+					Code:    "COMMAND_NOT_FOUND",
+					Message: fmt.Sprintf("command %q not found", id),
+				})
 			}
-			execd.WriteError(w, http.StatusInternalServerError, "COMMAND_STATUS_FAILED", err.Error())
-			return
+			return c.JSON(http.StatusInternalServerError, execd.ErrorResponse{
+				Code:    "COMMAND_STATUS_FAILED",
+				Message: err.Error(),
+			})
 		}
 		resp = execd.CommandStatusResponse{
 			ID:       state.ID,
@@ -303,22 +310,25 @@ func (s *Server) handleCommandStatus(w http.ResponseWriter, _ *http.Request, id 
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	return c.JSON(http.StatusOK, resp)
 }
 
-func (s *Server) handleCommandLogs(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) handleCommandLogs(c echo.Context) error {
+	id := strings.TrimSpace(c.Param("id"))
 	if id == "" {
-		execd.WriteError(w, http.StatusBadRequest, "INVALID_PATH_PARAMETER", "command id is required")
-		return
+		return c.JSON(http.StatusBadRequest, execd.ErrorResponse{
+			Code:    "INVALID_PATH_PARAMETER",
+			Message: "command id is required",
+		})
 	}
 	var cursor int64
-	if rawCursor := strings.TrimSpace(r.URL.Query().Get("cursor")); rawCursor != "" {
+	if rawCursor := strings.TrimSpace(c.QueryParam("cursor")); rawCursor != "" {
 		parsed, err := strconv.ParseInt(rawCursor, 10, 64)
 		if err != nil || parsed < 0 {
-			execd.WriteError(w, http.StatusBadRequest, "INVALID_QUERY_PARAMETER", "cursor must be a non-negative integer")
-			return
+			return c.JSON(http.StatusBadRequest, execd.ErrorResponse{
+				Code:    "INVALID_QUERY_PARAMETER",
+				Message: "cursor must be a non-negative integer",
+			})
 		}
 		cursor = parsed
 	}
@@ -326,11 +336,15 @@ func (s *Server) handleCommandLogs(w http.ResponseWriter, r *http.Request, id st
 	var buf bytes.Buffer
 	if err := s.supervisor.Logs(id, &buf); err != nil {
 		if errors.Is(err, processruntime.ErrNotFound) {
-			execd.WriteError(w, http.StatusNotFound, "COMMAND_NOT_FOUND", fmt.Sprintf("command %q not found", id))
-			return
+			return c.JSON(http.StatusNotFound, execd.ErrorResponse{
+				Code:    codeCommandNotFound,
+				Message: fmt.Sprintf("command %q not found", id),
+			})
 		}
-		execd.WriteError(w, http.StatusInternalServerError, "COMMAND_LOGS_FAILED", err.Error())
-		return
+		return c.JSON(http.StatusInternalServerError, execd.ErrorResponse{
+			Code:    "COMMAND_LOGS_FAILED",
+			Message: err.Error(),
+		})
 	}
 
 	all := buf.Bytes()
@@ -343,12 +357,8 @@ func (s *Server) handleCommandLogs(w http.ResponseWriter, r *http.Request, id st
 	}
 	nextCursor := cursor + int64(len(slice))
 
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set(execd.TailCursorHeader, strconv.FormatInt(nextCursor, 10))
-	w.WriteHeader(http.StatusOK)
-	if len(slice) > 0 {
-		_, _ = w.Write(slice)
-	}
+	c.Response().Header().Set(execd.TailCursorHeader, strconv.FormatInt(nextCursor, 10))
+	return c.Blob(http.StatusOK, "text/plain; charset=utf-8", slice)
 }
 
 func writeChunkSSE(w http.ResponseWriter, flusher http.Flusher, chunk rckube.DataPlaneChunk) {
@@ -365,5 +375,3 @@ func writeChunkSSE(w http.ResponseWriter, flusher http.Flusher, chunk rckube.Dat
 		Timestamp: time.Now().UnixMilli(),
 	})
 }
-
-var _ context.Context

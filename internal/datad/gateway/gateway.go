@@ -15,18 +15,16 @@ limitations under the License.
 */
 
 // Package gateway implements the Workspace Data Plane Gateway.
-// It authenticates external E2B envd requests by Workspace access token (or
-// signed /files URL) and forwards them over mTLS to the Workspace runtime Pod.
+// It authenticates external execd and envd requests by Workspace access token
+// (or signed /files URL) and forwards them over mTLS to the Workspace runtime Pod.
 package gateway
 
 import (
 	"context"
 	"crypto/subtle"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -34,8 +32,7 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
+	"github.com/labstack/echo/v4"
 
 	"github.com/nekomeowww/rc/internal/datad/pki"
 	"github.com/nekomeowww/rc/pkg/envd"
@@ -77,107 +74,122 @@ type Server struct {
 	resolver     Resolver
 	certProvider ClientCertProvider
 	now          func() time.Time
+	echo         *echo.Echo
 }
 
-// NewServer creates a Data Plane Gateway server.
+// NewServer creates a Data Plane Gateway server using Echo routing.
 func NewServer(resolver Resolver, certProvider ClientCertProvider) *Server {
-	return &Server{
+	s := &Server{
 		resolver:     resolver,
 		certProvider: certProvider,
 		now:          time.Now,
 	}
+
+	e := echo.New()
+	e.HideBanner = true
+	e.HidePort = true
+
+	e.GET("/healthz", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+	e.GET("/readyz", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+
+	ws := e.Group("/namespaces/:namespace/workspaces/:name")
+	ws.Any("/execd", s.proxyHandler(protocolExecd))
+	ws.Any("/execd/*", s.proxyHandler(protocolExecd))
+	ws.Any("/envd", s.proxyHandler(protocolEnvd))
+	ws.Any("/envd/*", s.proxyHandler(protocolEnvd))
+	ws.Any("/*", s.proxyHandler(protocolEnvd))
+
+	s.echo = e
+	return s
 }
 
-// Handler returns the HTTP/1.1 + h2c handler for the gateway.
+// Handler returns the root http.Handler for the gateway.
 func (s *Server) Handler() http.Handler {
-	return h2c.NewHandler(http.HandlerFunc(s.serveHTTP), &http2.Server{})
+	return s.echo
 }
 
-func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet && (r.URL.Path == "/healthz" || r.URL.Path == "/readyz") {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
+func (s *Server) proxyHandler(protocol string) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		w, r := c.Response().Writer, c.Request()
+		namespace := c.Param("namespace")
+		name := c.Param("name")
+		upstreamRemainder := "/" + strings.TrimPrefix(c.Param("*"), "/")
 
-	namespace, name, remainder, ok := parseWorkspaceRoute(r.URL.Path)
-	if !ok {
-		writeError(w, http.StatusNotFound, "route must match /namespaces/<namespace>/workspaces/<name>/...")
-		return
-	}
-
-	target, err := s.resolver.Resolve(r.Context(), namespace, name)
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			writeError(w, http.StatusNotFound, fmt.Sprintf("workspace %s/%s not found or data plane is disabled", namespace, name))
-			return
-		}
-		writeError(w, http.StatusBadGateway, fmt.Sprintf("resolve workspace %s/%s: %v", namespace, name, err))
-		return
-	}
-
-	protocol, upstreamRemainder := splitProtocolPrefix(remainder)
-	isHealth := (protocol == protocolEnvd && r.Method == http.MethodGet && upstreamRemainder == "/health") ||
-		(protocol == protocolExecd && r.Method == http.MethodGet && upstreamRemainder == "/ping")
-	if !isHealth {
-		if !s.authenticate(r, protocol, upstreamRemainder, target.AccessToken) {
-			writeError(w, http.StatusUnauthorized, "invalid or missing access token")
-			return
-		}
-	}
-
-	upstreamAddr := target.Address
-	if protocol == protocolExecd {
-		upstreamAddr = target.ExecdAddress
-	}
-	if !target.Ready || upstreamAddr == "" {
-		state := target.State
-		if state == "" {
-			state = "NotReady"
-		}
-		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("workspace %s/%s is not ready (state: %s)", namespace, name, state))
-		return
-	}
-
-	transport, scheme, err := s.transportFor(r.Context(), target)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, fmt.Sprintf("configure upstream transport: %v", err))
-		return
-	}
-
-	upstreamURL := &url.URL{
-		Scheme: scheme,
-		Host:   upstreamAddr,
-	}
-	proxy := &httputil.ReverseProxy{
-		Transport:     transport,
-		FlushInterval: -1,
-		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.SetURL(upstreamURL)
-			pr.Out.URL.Path = upstreamRemainder
-			pr.Out.URL.RawPath = ""
-			pr.Out.Host = upstreamURL.Host
-			// Never forward caller access tokens into the Workspace runtime Pod.
-			pr.Out.Header.Del("X-Access-Token")
-			pr.Out.Header.Del("X-EXECD-ACCESS-TOKEN")
-			if strings.HasPrefix(pr.Out.Header.Get("Authorization"), "Bearer ") {
-				pr.Out.Header.Del("Authorization")
+		target, err := s.resolver.Resolve(r.Context(), namespace, name)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				writeError(w, http.StatusNotFound,
+					fmt.Sprintf("workspace %s/%s not found or data plane is disabled", namespace, name))
+				return nil
 			}
-		},
-		ErrorHandler: func(rw http.ResponseWriter, _ *http.Request, proxyErr error) {
-			writeError(rw, http.StatusBadGateway, fmt.Sprintf("upstream data plane error: %v", proxyErr))
-		},
+			writeError(w, http.StatusBadGateway, fmt.Sprintf("resolve workspace %s/%s: %v", namespace, name, err))
+			return nil
+		}
+
+		isHealth := (protocol == protocolEnvd && r.Method == http.MethodGet && upstreamRemainder == "/health") ||
+			(protocol == protocolExecd && r.Method == http.MethodGet && upstreamRemainder == "/ping")
+		if !isHealth {
+			if !s.authenticate(r, protocol, upstreamRemainder, target.AccessToken) {
+				writeError(w, http.StatusUnauthorized, "invalid or missing access token")
+				return nil
+			}
+		}
+
+		upstreamAddr := target.Address
+		if protocol == protocolExecd {
+			upstreamAddr = target.ExecdAddress
+		}
+		if !target.Ready || upstreamAddr == "" {
+			state := target.State
+			if state == "" {
+				state = "NotReady"
+			}
+			writeError(w, http.StatusServiceUnavailable,
+				fmt.Sprintf("workspace %s/%s is not ready (state: %s)", namespace, name, state))
+			return nil
+		}
+
+		transport, scheme, err := s.transportFor(r.Context(), target)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, fmt.Sprintf("configure upstream transport: %v", err))
+			return nil
+		}
+
+		upstreamURL := &url.URL{
+			Scheme: scheme,
+			Host:   upstreamAddr,
+		}
+		proxy := &httputil.ReverseProxy{
+			Transport:     transport,
+			FlushInterval: -1,
+			Rewrite: func(pr *httputil.ProxyRequest) {
+				pr.SetURL(upstreamURL)
+				pr.Out.URL.Path = upstreamRemainder
+				pr.Out.URL.RawPath = ""
+				pr.Out.Host = upstreamURL.Host
+				// Never forward caller access tokens into the Workspace runtime Pod.
+				pr.Out.Header.Del(envd.AccessTokenHeader)
+				pr.Out.Header.Del(execd.AccessTokenHeader)
+				if strings.HasPrefix(pr.Out.Header.Get("Authorization"), "Bearer ") {
+					pr.Out.Header.Del("Authorization")
+				}
+			},
+			ErrorHandler: func(rw http.ResponseWriter, _ *http.Request, proxyErr error) {
+				writeError(rw, http.StatusBadGateway, fmt.Sprintf("upstream data plane error: %v", proxyErr))
+			},
+		}
+		proxy.ServeHTTP(w, r)
+		return nil
 	}
-	proxy.ServeHTTP(w, r)
 }
 
 func (s *Server) transportFor(ctx context.Context, target Target) (http.RoundTripper, string, error) {
 	if target.Insecure {
-		return &http2.Transport{
-			AllowHTTP: true,
-			DialTLSContext: func(dialCtx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-				var dialer net.Dialer
-				return dialer.DialContext(dialCtx, network, addr)
-			},
+		protocols := new(http.Protocols)
+		protocols.SetHTTP1(true)
+		protocols.SetUnencryptedHTTP2(true)
+		return &http.Transport{
+			Protocols: protocols,
 		}, "http", nil
 	}
 	if s.certProvider == nil {
@@ -201,25 +213,6 @@ func (s *Server) transportFor(ctx context.Context, target Target) (http.RoundTri
 	}, "https", nil
 }
 
-// splitProtocolPrefix routes `/execd/...` to the primary OpenSandbox execd
-// listener (44772) and `/envd/...` (or unprefixed paths for E2B compatibility)
-// to the E2B envd listener (49983).
-func splitProtocolPrefix(remainder string) (protocol, path string) {
-	if remainder == "/"+protocolExecd {
-		return protocolExecd, "/"
-	}
-	if rest, ok := strings.CutPrefix(remainder, "/"+protocolExecd+"/"); ok {
-		return protocolExecd, "/" + rest
-	}
-	if remainder == "/"+protocolEnvd {
-		return protocolEnvd, "/"
-	}
-	if rest, ok := strings.CutPrefix(remainder, "/"+protocolEnvd+"/"); ok {
-		return protocolEnvd, "/" + rest
-	}
-	return protocolEnvd, remainder
-}
-
 // authenticate checks caller tokens in constant time, or verifies an E2B
 // signed /files URL when signature query parameters are provided.
 func (s *Server) authenticate(r *http.Request, protocol, remainder, expectedToken string) bool {
@@ -227,7 +220,7 @@ func (s *Server) authenticate(r *http.Request, protocol, remainder, expectedToke
 		return false
 	}
 	if protocol == protocolExecd {
-		if provided := r.Header.Get("X-EXECD-ACCESS-TOKEN"); provided != "" {
+		if provided := r.Header.Get(execd.AccessTokenHeader); provided != "" {
 			return subtle.ConstantTimeCompare([]byte(provided), []byte(expectedToken)) == 1
 		}
 		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
@@ -235,7 +228,7 @@ func (s *Server) authenticate(r *http.Request, protocol, remainder, expectedToke
 			return subtle.ConstantTimeCompare([]byte(token), []byte(expectedToken)) == 1
 		}
 	}
-	if provided := r.Header.Get("X-Access-Token"); provided != "" {
+	if provided := r.Header.Get(envd.AccessTokenHeader); provided != "" {
 		return subtle.ConstantTimeCompare([]byte(provided), []byte(expectedToken)) == 1
 	}
 	if protocol == protocolEnvd && remainder == "/files" {
@@ -274,28 +267,6 @@ func (s *Server) verifySignedFileURL(r *http.Request, token string) bool {
 	user := q.Get("username")
 	expected := envd.SignFileURL(path, op, user, token, exp)
 	return subtle.ConstantTimeCompare([]byte(sig), []byte(expected)) == 1
-}
-
-// Keep pkg/execd header constant referenced cleanly.
-var _ = execd.AccessTokenHeader
-
-// parseWorkspaceRoute parses `/namespaces/<ns>/workspaces/<name>[/<rest>]`.
-func parseWorkspaceRoute(path string) (namespace, name, remainder string, ok bool) {
-	trimmed := strings.TrimPrefix(path, "/")
-	parts := strings.SplitN(trimmed, "/", 5)
-	if len(parts) < 4 || parts[0] != "namespaces" || parts[2] != "workspaces" {
-		return "", "", "", false
-	}
-	namespace, name = parts[1], parts[3]
-	if namespace == "" || name == "" {
-		return "", "", "", false
-	}
-	if len(parts) == 4 || parts[4] == "" {
-		remainder = "/"
-	} else {
-		remainder = "/" + parts[4]
-	}
-	return namespace, name, remainder, true
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {

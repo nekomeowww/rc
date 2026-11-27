@@ -32,8 +32,7 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
+	"github.com/labstack/echo/v4"
 
 	"github.com/nekomeowww/rc/internal/datad/pki"
 	execdws "github.com/nekomeowww/rc/internal/datad/sandbox/protocol/execd/ws"
@@ -71,7 +70,7 @@ type Server struct {
 	homeDir      string
 	workspaceDir string
 	runtimeUser  string
-	handler      http.Handler
+	echo         *echo.Echo
 
 	cmdMu    sync.RWMutex
 	commands map[string]*commandRecord
@@ -105,32 +104,37 @@ func NewServer(supervisor *rckube.Supervisor, homeDir, workspaceDir, runtimeUser
 		commands:     make(map[string]*commandRecord),
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /ping", s.handlePing)
-	mux.HandleFunc("POST /command", s.handleRunCommand)
-	mux.HandleFunc("DELETE /command", s.handleInterruptCommand)
-	mux.HandleFunc("GET /command/", s.handleCommandSubroute)
+	e := echo.New()
+	e.HideBanner = true
+	e.HidePort = true
+	e.Use(s.activityMiddleware)
 
-	mux.HandleFunc("GET /files/info", s.handleFilesInfo)
-	mux.HandleFunc("DELETE /files", s.handleRemoveFiles)
-	mux.HandleFunc("POST /files/permissions", s.handleChmodFiles)
-	mux.HandleFunc("POST /files/mv", s.handleRenameFiles)
-	mux.HandleFunc("GET /files/search", s.handleSearchFiles)
-	mux.HandleFunc("POST /files/replace", s.handleReplaceContent)
-	mux.HandleFunc("POST /files/upload", s.handleUploadFiles)
-	mux.HandleFunc("GET /files/download", s.handleDownloadFile)
-	mux.HandleFunc("GET /directories/list", s.handleListDirectory)
-	mux.HandleFunc("POST /directories", s.handleMakeDirs)
-	mux.HandleFunc("DELETE /directories", s.handleRemoveDirs)
-	mux.Handle("GET /pty", execdws.NewHandler(supervisor, s.workspaceDir))
+	e.GET("/ping", s.handlePing)
+	e.POST("/command", s.handleRunCommand)
+	e.DELETE("/command", s.handleInterruptCommand)
+	e.GET("/command/status/:id", s.handleCommandStatus)
+	e.GET("/command/:id/logs", s.handleCommandLogs)
 
-	s.handler = s.wrapHandler(mux)
+	e.GET("/files/info", s.handleFilesInfo)
+	e.DELETE("/files", s.handleRemoveFiles)
+	e.POST("/files/permissions", s.handleChmodFiles)
+	e.POST("/files/mv", s.handleRenameFiles)
+	e.GET("/files/search", s.handleSearchFiles)
+	e.POST("/files/replace", s.handleReplaceContent)
+	e.POST("/files/upload", s.handleUploadFiles)
+	e.GET("/files/download", s.handleDownloadFile)
+	e.GET("/directories/list", s.handleListDirectory)
+	e.POST("/directories", s.handleMakeDirs)
+	e.DELETE("/directories", s.handleRemoveDirs)
+	e.GET("/pty", echo.WrapHandler(execdws.NewHandler(supervisor, s.workspaceDir)))
+
+	s.echo = e
 	return s
 }
 
-// Handler returns the root http.Handler (supporting HTTP/1.1 and h2c).
+// Handler returns the root http.Handler.
 func (s *Server) Handler() http.Handler {
-	return h2c.NewHandler(s.handler, &http2.Server{})
+	return s.echo
 }
 
 // Serve runs the execd listener until ctx is cancelled.
@@ -147,28 +151,26 @@ func (s *Server) Serve(ctx context.Context, cfg Config) error {
 
 // ServeListener serves on an already-bound listener (useful for tests binding :0).
 func (s *Server) ServeListener(ctx context.Context, listener net.Listener, cfg Config) error {
-	var tlsConfig *tls.Config
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
 	if !cfg.Insecure {
 		if cfg.CAFile == "" || cfg.CertFile == "" || cfg.KeyFile == "" {
 			return errors.New("execd mTLS requires ca-file, cert-file, and key-file")
 		}
-		var err error
-		tlsConfig, err = pki.ReloadingServerTLSConfig(cfg.CAFile, cfg.CertFile, cfg.KeyFile)
+		tlsConfig, err := pki.ReloadingServerTLSConfig(cfg.CAFile, cfg.CertFile, cfg.KeyFile)
 		if err != nil {
 			return err
 		}
 		listener = tls.NewListener(listener, tlsConfig)
+		protocols.SetHTTP2(true)
+	} else {
+		protocols.SetUnencryptedHTTP2(true)
 	}
 
 	httpServer := &http.Server{
-		Handler:           s.Handler(),
+		Handler:           s.echo,
+		Protocols:         protocols,
 		ReadHeaderTimeout: 30 * time.Second,
-	}
-	if tlsConfig != nil {
-		httpServer.Handler = s.handler
-		if err := http2.ConfigureServer(httpServer, &http2.Server{}); err != nil {
-			return fmt.Errorf("configure HTTP/2 on execd server: %w", err)
-		}
 	}
 
 	stop := context.AfterFunc(ctx, func() {
@@ -185,22 +187,22 @@ func (s *Server) ServeListener(ctx context.Context, listener net.Listener, cfg C
 	return err
 }
 
-func (s *Server) wrapHandler(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(execd.VersionHeader, execd.Version)
-		isPing := r.Method == http.MethodGet && r.URL.Path == "/ping"
+func (s *Server) activityMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		c.Response().Header().Set(execd.VersionHeader, execd.Version)
+		isPing := c.Request().Method == http.MethodGet && c.Request().URL.Path == "/ping"
 		if !isPing && s.supervisor != nil {
 			s.supervisor.Touch(time.Now())
 			defer func() {
 				s.supervisor.Touch(time.Now())
 			}()
 		}
-		next.ServeHTTP(w, r)
-	})
+		return next(c)
+	}
 }
 
-func (s *Server) handlePing(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(http.StatusOK)
+func (s *Server) handlePing(c echo.Context) error {
+	return c.NoContent(http.StatusOK)
 }
 
 func (s *Server) resolvePath(raw string) string {
@@ -208,8 +210,8 @@ func (s *Server) resolvePath(raw string) string {
 	if raw == "" || raw == "~" {
 		return s.homeDir
 	}
-	if after, ok := strings.CutPrefix(raw, "~/"); ok {
-		return filepath.Clean(filepath.Join(s.homeDir, after))
+	if rest, ok := strings.CutPrefix(raw, "~/"); ok {
+		return filepath.Clean(filepath.Join(s.homeDir, rest))
 	}
 	if filepath.IsAbs(raw) {
 		return filepath.Clean(raw)

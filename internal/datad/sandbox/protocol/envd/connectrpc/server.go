@@ -35,8 +35,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
+	"github.com/labstack/echo/v4"
 
 	"github.com/nekomeowww/rc/apis/sdk/go/envd/filesystem/filesystemconnect"
 	"github.com/nekomeowww/rc/apis/sdk/go/envd/process/processconnect"
@@ -100,25 +99,34 @@ func NewServer(supervisor *rckube.Supervisor, homeDir, runtimeUser string) *Serv
 		metadata:    make(map[string]map[string]string),
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.HandleFunc("POST /init", s.handleNotImplemented)
-	mux.HandleFunc("GET /files", s.handleDownloadFile)
-	mux.HandleFunc("POST /files", s.handleUploadFiles)
+	e := echo.New()
+	e.HideBanner = true
+	e.HidePort = true
+	e.Use(s.activityMiddleware)
+
+	e.GET("/health", func(c echo.Context) error {
+		return c.NoContent(http.StatusNoContent)
+	})
+	e.POST("/init", func(c echo.Context) error {
+		envd.WriteJSONError(c.Response().Writer, http.StatusNotFound, "endpoint not implemented")
+		return nil
+	})
+	e.GET("/files", echo.WrapHandler(http.HandlerFunc(s.handleDownloadFile)))
+	e.POST("/files", echo.WrapHandler(http.HandlerFunc(s.handleUploadFiles)))
 
 	fsPath, fsHandler := filesystemconnect.NewFilesystemHandler(&filesystemHandler{server: s})
-	mux.Handle(fsPath, fsHandler)
+	e.Any(fsPath+"*", echo.WrapHandler(fsHandler))
 
 	procPath, procHandler := processconnect.NewProcessHandler(&processHandler{server: s})
-	mux.Handle(procPath, procHandler)
+	e.Any(procPath+"*", echo.WrapHandler(procHandler))
 
-	s.handler = s.wrapHandler(mux)
+	s.handler = e
 	return s
 }
 
-// Handler returns the root http.Handler (supporting HTTP/1.1 and h2c).
+// Handler returns the root http.Handler.
 func (s *Server) Handler() http.Handler {
-	return h2c.NewHandler(s.handler, &http2.Server{})
+	return s.handler
 }
 
 // Serve runs the Data Plane listener until ctx is cancelled.
@@ -135,28 +143,26 @@ func (s *Server) Serve(ctx context.Context, cfg Config) error {
 
 // ServeListener serves on an already-bound listener (useful for tests binding :0).
 func (s *Server) ServeListener(ctx context.Context, listener net.Listener, cfg Config) error {
-	var tlsConfig *tls.Config
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
 	if !cfg.Insecure {
 		if cfg.CAFile == "" || cfg.CertFile == "" || cfg.KeyFile == "" {
 			return errors.New("data plane mTLS requires ca-file, cert-file, and key-file")
 		}
-		var err error
-		tlsConfig, err = pki.ReloadingServerTLSConfig(cfg.CAFile, cfg.CertFile, cfg.KeyFile)
+		tlsConfig, err := pki.ReloadingServerTLSConfig(cfg.CAFile, cfg.CertFile, cfg.KeyFile)
 		if err != nil {
 			return err
 		}
 		listener = tls.NewListener(listener, tlsConfig)
+		protocols.SetHTTP2(true)
+	} else {
+		protocols.SetUnencryptedHTTP2(true)
 	}
 
 	httpServer := &http.Server{
-		Handler:           s.Handler(),
+		Handler:           s.handler,
+		Protocols:         protocols,
 		ReadHeaderTimeout: 30 * time.Second,
-	}
-	if tlsConfig != nil {
-		httpServer.Handler = s.handler
-		if err := http2.ConfigureServer(httpServer, &http2.Server{}); err != nil {
-			return fmt.Errorf("configure HTTP/2 on data plane server: %w", err)
-		}
 	}
 
 	stop := context.AfterFunc(ctx, func() {
@@ -174,26 +180,18 @@ func (s *Server) ServeListener(ctx context.Context, listener net.Listener, cfg C
 	return err
 }
 
-func (s *Server) wrapHandler(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(envd.VersionHeader, envd.Version)
-		isHealth := r.Method == http.MethodGet && r.URL.Path == "/health"
+func (s *Server) activityMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		c.Response().Header().Set(envd.VersionHeader, envd.Version)
+		isHealth := c.Request().Method == http.MethodGet && c.Request().URL.Path == "/health"
 		if !isHealth && s.supervisor != nil {
 			s.supervisor.Touch(time.Now())
 			defer func() {
 				s.supervisor.Touch(time.Now())
 			}()
 		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) handleNotImplemented(w http.ResponseWriter, _ *http.Request) {
-	envd.WriteJSONError(w, http.StatusNotFound, "endpoint not implemented")
+		return next(c)
+	}
 }
 
 // validateUser enforces the spec's user rule: empty, "user" (E2B default), or

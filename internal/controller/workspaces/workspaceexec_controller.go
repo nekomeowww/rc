@@ -232,7 +232,7 @@ func (r *WorkspaceExecReconciler) startProcess(ctx context.Context, key types.Na
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !current.DeletionTimestamp.IsZero() || current.Status.Phase.Terminal() {
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Millisecond}, nil
 	}
 	if target.workspace != nil {
 		gate := workspaceadmission.Gate{Client: r.Client, Reader: r.APIReader}
@@ -323,7 +323,7 @@ func (r *WorkspaceExecReconciler) handleWorkspaceExecLifecycle(ctx context.Conte
 		return ctrl.Result{}, true, fmt.Errorf("add WorkspaceExec finalizer: %w", err)
 	}
 
-	return ctrl.Result{Requeue: true}, true, nil
+	return ctrl.Result{RequeueAfter: time.Millisecond}, true, nil
 }
 
 func (r *WorkspaceExecReconciler) finalizeWorkspaceExec(ctx context.Context, process *workspacesv1alpha1.WorkspaceExec) (ctrl.Result, error) {

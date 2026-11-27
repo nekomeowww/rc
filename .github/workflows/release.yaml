@@ -34,7 +34,7 @@ jobs:
       contents: write
     steps:
       - name: Clone the code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -111,15 +111,15 @@ jobs:
           fi
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
       - name: Publish rcctl and the operator install manifest
-        uses: goreleaser/goreleaser-action@v7 # v7.2.3
+        uses: goreleaser/goreleaser-action@v7 # v7.3.0
         with:
           distribution: goreleaser
-          version: v2.15.2
+          version: v2.20.3
           args: release --clean --draft
         env:
           CONTROLLER_IMAGE: ghcr.io/${{ github.repository }}/controller
@@ -133,7 +133,7 @@ jobs:
           MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
 
       - name: Preserve the generated Homebrew cask
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: homebrew-cask
           path: dist/homebrew/Casks/rcctl.rb
@@ -168,13 +168,13 @@ jobs:
             platforms: linux/amd64
     steps:
       - name: Clone the code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.publish.outputs.tag }}
           persist-credentials: false
 
       - name: Generate image metadata
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}/${{ matrix.component }}
@@ -186,13 +186,13 @@ jobs:
             type=semver,value=${{ needs.publish.outputs.tag }},pattern={{major}},enable=${{ !startsWith(needs.publish.outputs.tag, 'v0.') }}
 
       - name: Setup QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
@@ -200,7 +200,7 @@ jobs:
 
       - name: Build and publish ${{ matrix.component }}
         id: push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -231,13 +231,13 @@ jobs:
       id-token: write
     steps:
       - name: Clone the code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.publish.outputs.tag }}
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
@@ -274,7 +274,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
@@ -362,7 +362,7 @@ jobs:
           fi
 
       - name: Download the generated Homebrew cask
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: homebrew-cask
           path: homebrew-cask

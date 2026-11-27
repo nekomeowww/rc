@@ -476,7 +476,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// The Pod may have terminated since the early recovery observation. Re-enter
 	// recovery on the next turn rather than running readiness/mount logic on it.
 	if runtimePodTerminal(pod) {
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Millisecond}, nil
 	}
 	expectedTopology, err := workspaceTopologyHash(workspace, resolved)
 	if err != nil {

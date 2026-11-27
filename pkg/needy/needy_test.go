@@ -29,7 +29,7 @@ import (
 
 const (
 	testWorkspaceRunner = "ws-dev"
-	testAPIKeyEnv       = "LOBEHUB_CLI_API_KEY"
+	testAPIKeyEnv       = "SERVICE_API_KEY"
 	testAPIKey          = "api-key-value"
 )
 
@@ -81,20 +81,20 @@ func TestComposeProfileSetsActorEnvOverTheProfile(t *testing.T) {
 actor:
   env:
     KEPT: profile
-    LOBEHUB_SERVER: https://profile.example.com
+    SERVICE_URL: https://profile.example.com
 `
 	composed, err := ComposeProfile(text, "actor-1", nil, map[string]string{
-		"LOBEHUB_SERVER": "https://lobehub.example.com",
-		testAPIKeyEnv:    testAPIKey,
+		"SERVICE_URL": "https://service.example.com",
+		testAPIKeyEnv: testAPIKey,
 	})
 	require.NoError(t, err)
 
 	decoded, err := profile.Decode([]byte(composed))
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{
-		"KEPT":           "profile",
-		"LOBEHUB_SERVER": "https://lobehub.example.com",
-		testAPIKeyEnv:    testAPIKey,
+		"KEPT":        "profile",
+		"SERVICE_URL": "https://service.example.com",
+		testAPIKeyEnv: testAPIKey,
 	}, decoded.Actor.Env)
 }
 

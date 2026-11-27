@@ -288,21 +288,21 @@ func TestActorStartsARunOnItsOwnRunner(t *testing.T) {
 }
 
 const (
-	testEnvSource     = "lobehub"
+	testEnvSource     = "service"
 	testEnvGatewayURL = "https://gateway.example.com"
 	testEnvGatewayKey = "gateway-url"
 )
 
 func envActor() *workspacesv1alpha1.Actor {
 	actor := testActor()
-	actor.Spec.Profile.Inline = "extends: builtin:opencode\nactor:\n  env:\n    KEPT: profile\n    LOBEHUB_SERVER: https://profile.example.com\ncommands:\n  - { match: \"**\", to: ws }\n"
+	actor.Spec.Profile.Inline = "extends: builtin:opencode\nactor:\n  env:\n    KEPT: profile\n    SERVICE_URL: https://profile.example.com\ncommands:\n  - { match: \"**\", to: ws }\n"
 	actor.Spec.Env = []corev1.EnvVar{
 		{
-			Name:  "LOBEHUB_SERVER",
-			Value: "https://lobehub.example.com",
+			Name:  "SERVICE_URL",
+			Value: "https://service.example.com",
 		},
 		{
-			Name: "LOBEHUB_CLI_API_KEY",
+			Name: "SERVICE_API_KEY",
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: testEnvSource},
@@ -311,7 +311,7 @@ func envActor() *workspacesv1alpha1.Actor {
 			},
 		},
 		{
-			Name: "LOBEHUB_DEVICE_GATEWAY_URL",
+			Name: "SERVICE_GATEWAY_URL",
 			ValueFrom: &corev1.EnvVarSource{
 				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: testEnvSource},
@@ -350,14 +350,14 @@ func TestActorPassesItsEnvToTheRun(t *testing.T) {
 	var profile map[string]any
 	require.NoError(t, yaml.Unmarshal([]byte(harness.daemon.created[0].ProfileYAML), &profile))
 	assert.Equal(t, map[string]any{
-		"KEPT":                       "profile",
-		"LOBEHUB_SERVER":             "https://lobehub.example.com",
-		"LOBEHUB_CLI_API_KEY":        "key",
-		"LOBEHUB_DEVICE_GATEWAY_URL": testEnvGatewayURL,
+		"KEPT":                "profile",
+		"SERVICE_URL":         "https://service.example.com",
+		"SERVICE_API_KEY":     "key",
+		"SERVICE_GATEWAY_URL": testEnvGatewayURL,
 	}, profile["actor"].(map[string]any)["env"])
 	for _, container := range harness.pod().Spec.Containers {
 		for _, variable := range container.Env {
-			assert.NotEqual(t, "LOBEHUB_CLI_API_KEY", variable.Name, "the runner Pod does not get the actor's env")
+			assert.NotEqual(t, "SERVICE_API_KEY", variable.Name, "the runner Pod does not get the actor's env")
 		}
 	}
 }
@@ -373,7 +373,7 @@ func TestActorWaitsForItsEnvSecret(t *testing.T) {
 	actor := harness.actor()
 	assert.Equal(t, workspacesv1alpha1.ActorPhasePending, actor.Status.Phase)
 	assert.Equal(t, workspacesv1alpha1.ActorReasonEnvNotReady, actor.Status.Conditions[0].Reason)
-	assert.Contains(t, actor.Status.Conditions[0].Message, "Secret lobehub of env LOBEHUB_CLI_API_KEY does not exist")
+	assert.Contains(t, actor.Status.Conditions[0].Message, "Secret service of env SERVICE_API_KEY does not exist")
 	assert.Positive(t, result.RequeueAfter)
 	assert.Empty(t, harness.daemon.minted, "nothing starts before the env is readable")
 	assert.Empty(t, harness.daemon.created)
@@ -393,7 +393,7 @@ func TestActorWaitsForAMissingEnvKey(t *testing.T) {
 
 	actor := harness.actor()
 	assert.Equal(t, workspacesv1alpha1.ActorReasonEnvNotReady, actor.Status.Conditions[0].Reason)
-	assert.Contains(t, actor.Status.Conditions[0].Message, "Secret lobehub has no key api-key")
+	assert.Contains(t, actor.Status.Conditions[0].Message, "Secret service has no key api-key")
 	assert.Empty(t, harness.daemon.created)
 }
 

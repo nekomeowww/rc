@@ -29,3 +29,6 @@ go.work
 
 # Kubeconfig might contain secrets
 *.kubeconfig
+
+# Node / pnpm workspace
+node_modules/

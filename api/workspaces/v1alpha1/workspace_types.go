@@ -69,6 +69,12 @@ const (
 	WorkspaceReasonWaitingForHotMounts = "WaitingForHotMounts"
 	// WorkspaceReasonWaitingForPods means deletion waits for the runtime Pod.
 	WorkspaceReasonWaitingForPods = "WaitingForPods"
+	// WorkspaceReasonAccessTokenNotFound means the Data Plane Secret referenced
+	// by spec.dataPlane.accessTokenSecretRef does not exist or lacks the key.
+	WorkspaceReasonAccessTokenNotFound = "AccessTokenNotFound"
+	// WorkspaceReasonInvalidAccessToken means the Data Plane access token is
+	// shorter than the 32-byte minimum.
+	WorkspaceReasonInvalidAccessToken = "InvalidAccessToken"
 )
 
 // Outdated reasons published for a blank Workspace.
@@ -382,6 +388,35 @@ type WorkspaceSpec struct {
 	// needy connects the Workspace to the namespace's needy daemon.
 	// +optional
 	Needy *WorkspaceNeedy `json:"needy,omitempty"`
+
+	// dataPlane enables the E2B envd-compatible Workspace Data Plane on this Workspace.
+	// +optional
+	DataPlane *WorkspaceDataPlaneSpec `json:"dataPlane,omitempty"`
+}
+
+// WorkspaceDataPlaneSpec configures the E2B envd-compatible Workspace Data Plane.
+type WorkspaceDataPlaneSpec struct {
+	// enabled turns on the in-Pod envd listener and Data Plane Gateway routing.
+	// +kubebuilder:default=true
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// accessTokenSecretRef references an existing Secret key holding an access
+	// token of at least 32 bytes. When omitted, the controller generates one
+	// into a Workspace-owned Secret and records its name in status.dataPlane.
+	// +optional
+	AccessTokenSecretRef *corev1.SecretKeySelector `json:"accessTokenSecretRef,omitempty"`
+}
+
+// WorkspaceDataPlaneStatus publishes generated Data Plane Secret names.
+type WorkspaceDataPlaneStatus struct {
+	// accessTokenSecretName is the Secret holding the Workspace Data Plane access token.
+	// +optional
+	AccessTokenSecretName string `json:"accessTokenSecretName,omitempty"`
+
+	// serverCertSecretName is the Secret holding the Workspace Data Plane mTLS server certificate.
+	// +optional
+	ServerCertSecretName string `json:"serverCertSecretName,omitempty"`
 }
 
 // WorkspaceNeedy configures the Workspace's part in needy runs.
@@ -504,6 +539,10 @@ type WorkspaceStatus struct {
 	// runtimePodName is the active runtime Pod when desiredState is Running.
 	// +optional
 	RuntimePodName string `json:"runtimePodName,omitempty"`
+
+	// dataPlane publishes the Secret names backing the Workspace Data Plane.
+	// +optional
+	DataPlane *WorkspaceDataPlaneStatus `json:"dataPlane,omitempty"`
 
 	// conditions represent the current state of the Workspace resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.

@@ -126,6 +126,9 @@ type resolvedWorkspace struct {
 	rcKubeImage string
 	// needyImage is set when the runtime runs a needy executor.
 	needyImage string
+	// dataPlane configures the E2B envd Data Plane on the runtime Pod.
+	dataPlane       *rcplatform.WorkspaceDataPlanePodConfig
+	dataPlaneStatus *workspacesv1alpha1.WorkspaceDataPlaneStatus
 	// storageReady is published as StorageReady once home storage has been
 	// evaluated in this pass; nil leaves the previous condition unchanged.
 	storageReady *metav1.Condition
@@ -182,6 +185,9 @@ type WorkspaceReconciler struct {
 	// NeedyImage provides the needy that a needy executor Workspace runs.
 	// Empty refuses spec.needy.
 	NeedyImage string
+	// DataPlaneCANamespace is the namespace where the controller keeps the
+	// internal Data Plane CA Secret. Empty defaults to the Workspace namespace.
+	DataPlaneCANamespace string
 
 	// admissionRetries backs off creates the API server rejected; see
 	// admission_rejection.go. The zero value is ready to use.
@@ -365,6 +371,15 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if err := r.ensureWorkspaceAccess(ctx, workspace.Namespace); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+
+	if dpPodCfg, dpStatus, dpReason, dpMessage, err := r.reconcileDataPlane(ctx, workspace); err != nil {
+		return ctrl.Result{}, err
+	} else if dpReason != "" {
+		return ctrl.Result{RequeueAfter: workspaceDependencyRequeue}, r.setWorkspaceStatus(ctx, req.NamespacedName, resolved, metav1.ConditionFalse, dpReason, dpMessage)
+	} else {
+		resolved.dataPlane = dpPodCfg
+		resolved.dataPlaneStatus = dpStatus
 	}
 
 	pod := new(corev1.Pod)
@@ -1130,6 +1145,7 @@ func workspaceRuntimePod(workspace *workspacesv1alpha1.Workspace, resolved *reso
 		LXCFSDir:    resolved.lxcfsDir,
 		RCKubeImage: resolved.rcKubeImage,
 		NeedyImage:  resolved.needyImage,
+		DataPlane:   resolved.dataPlane,
 	})
 	if err != nil {
 		return nil, err
@@ -1185,6 +1201,8 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 		// Adding the field replaced each idle Linux runtime once, so Pods
 		// that run the rc-kube of their image move to the injected one.
 		RCKube string `json:",omitempty"`
+		// DataPlane is omitted when disabled, keeping existing Pod hashes unchanged.
+		DataPlane *rcplatform.WorkspaceDataPlanePodConfig `json:",omitempty"`
 	}{
 		RuntimePolicy: workspaceRuntimePolicyVersion, OS: resolved.runtime.OS(),
 		Image: resolved.image, Mounts: mounts, ConfigMapRefs: workspace.Spec.ConfigMapRefs,
@@ -1195,7 +1213,8 @@ func workspaceTopologyHash(workspace *workspacesv1alpha1.Workspace, resolved *re
 		Affinity: workspace.Spec.Affinity, RuntimeClassName: workspace.Spec.RuntimeClassName, Lifecycle: workspace.Spec.Lifecycle,
 		PriorityClassName: workspace.Spec.PriorityClassName,
 		Services:          resolved.services, ServiceEnvironment: resolved.serviceEnvironment,
-		LXCFSDir: resolved.lxcfsDir,
+		LXCFSDir:  resolved.lxcfsDir,
+		DataPlane: resolved.dataPlane,
 	}
 	if resolved.runtime.OS() == corev1.Linux {
 		topology.RCKube = rcplatform.RCKubeDirectory
@@ -1394,6 +1413,9 @@ func (r *WorkspaceReconciler) setWorkspaceStatus(ctx context.Context, key types.
 		current.Status.SuspendedAt = nil
 	}
 	current.Status.ObservedGeneration = current.Generation
+	if resolved != nil {
+		current.Status.DataPlane = resolved.dataPlaneStatus
+	}
 	if current.Spec.OS == rcplatform.Darwin {
 		current.Status.HomeVolumeClaimName = ""
 	} else if resolved != nil && resolved.homeClaimName != "" {

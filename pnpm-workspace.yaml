@@ -1,0 +1,20 @@
+allowBuilds:
+  esbuild: true
+
+minimumReleaseAgeExclude:
+  - e2b@2.66.0
+
+packages:
+  - 'test/e2e/dataplane/sdk'
+
+catalog:
+  '@alibaba-group/opensandbox': ^1.2.1
+  '@types/node': ^22.15.0
+  '@types/ws': ^8.18.1
+  e2b: ^2.66.0
+  typescript: ^5.8.3
+  ws: ^8.18.0
+
+catalogs:
+  vitest:
+    vitest: ^3.2.4

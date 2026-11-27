@@ -154,7 +154,30 @@ type WorkspacePodIntent struct {
 	// NeedyImage, when set, installs needy into the runtime for a needy
 	// executor service.
 	NeedyImage string
+	// DataPlane, when non-nil, enables the E2B envd-compatible Data Plane
+	// listener on the runtime container.
+	DataPlane *WorkspaceDataPlanePodConfig
 }
+
+// WorkspaceDataPlanePodConfig configures the in-Pod mTLS Data Plane listeners
+// (OpenSandbox execd on 44772 as primary and optional E2B envd on 49983).
+type WorkspaceDataPlanePodConfig struct {
+	ExecdPort      int32
+	Port           int32
+	DisableExecd   bool
+	DisableEnvd    bool
+	CertSecretName string
+	Insecure       bool
+}
+
+const (
+	dataPlaneVolumeName = "rc-data-plane-tls"
+	dataPlaneMountPath  = "/var/run/rc/data-plane"
+	execdPortName       = "execd"
+	execdPort           = int32(44772)
+	dataPlanePortName   = "envd"
+	dataPlanePort       = int32(49983)
+)
 
 // LXCFSVolumePrefix starts the name of every LXCFS volume in a Workspace Pod.
 const LXCFSVolumePrefix = "lxcfs-"
@@ -310,9 +333,14 @@ func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, err
 		}
 		serveArgs = append(serveArgs, servicesArgument, encoded)
 	}
+	dpPorts, dpArgs, dpVolumes, dpMounts := runtime.dataPlanePodWiring(intent.DataPlane)
+	serveArgs = append(serveArgs, dpArgs...)
+	volumes = append(volumes, dpVolumes...)
+	mounts = append(mounts, dpMounts...)
 	container := corev1.Container{
 		Name: runtimeContainerName, Image: intent.Image,
 		Command: []string{runtime.layout.executable, serveCommand}, Args: serveArgs,
+		Ports:     dpPorts,
 		Env:       slices.Clone(intent.ServiceEnvironment),
 		Resources: intent.Resources, VolumeMounts: mounts, Lifecycle: containerLifecycle,
 		ReadinessProbe: runtime.readinessProbe(), SecurityContext: runtimepolicy.ContainerSecurityContext(runtime.os),
@@ -350,6 +378,65 @@ func (runtime Runtime) WorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, err
 	}
 
 	return pod, nil
+}
+
+func (runtime Runtime) dataPlanePodWiring(cfg *WorkspaceDataPlanePodConfig) (
+	[]corev1.ContainerPort, []string, []corev1.Volume, []corev1.VolumeMount,
+) {
+	if cfg == nil {
+		return nil, nil, nil, nil
+	}
+	var ports []corev1.ContainerPort
+	var args []string
+	var volumes []corev1.Volume
+	var mounts []corev1.VolumeMount
+	if !cfg.DisableExecd {
+		ep := cfg.ExecdPort
+		if ep == 0 {
+			ep = execdPort
+		}
+		ports = append(ports, corev1.ContainerPort{
+			Name:          execdPortName,
+			ContainerPort: ep,
+			Protocol:      corev1.ProtocolTCP,
+		})
+		args = append(args, "--execd-listen", fmt.Sprintf(":%d", ep))
+	}
+	if !cfg.DisableEnvd {
+		port := cfg.Port
+		if port == 0 {
+			port = dataPlanePort
+		}
+		ports = append(ports, corev1.ContainerPort{
+			Name:          dataPlanePortName,
+			ContainerPort: port,
+			Protocol:      corev1.ProtocolTCP,
+		})
+		args = append(args, "--data-plane-listen", fmt.Sprintf(":%d", port))
+	}
+	if cfg.Insecure {
+		args = append(args, "--data-plane-insecure")
+	} else if cfg.CertSecretName != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: dataPlaneVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: cfg.CertSecretName,
+				},
+			},
+		})
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      dataPlaneVolumeName,
+			MountPath: dataPlaneMountPath,
+			ReadOnly:  true,
+		})
+		args = append(args,
+			"--data-plane-ca-file", runtime.join(dataPlaneMountPath, "ca.crt"),
+			"--data-plane-cert-file", runtime.join(dataPlaneMountPath, "tls.crt"),
+			"--data-plane-key-file", runtime.join(dataPlaneMountPath, "tls.key"),
+		)
+	}
+	return ports, args, volumes, mounts
 }
 
 func (runtime Runtime) darwinWorkspacePod(intent WorkspacePodIntent) (*corev1.Pod, error) {

@@ -1027,6 +1027,43 @@ spec:
                   - name
                   type: object
                 type: array
+              dataPlane:
+                description: dataPlane enables the E2B envd-compatible Workspace Data
+                  Plane on this Workspace.
+                properties:
+                  accessTokenSecretRef:
+                    description: |-
+                      accessTokenSecretRef references an existing Secret key holding an access
+                      token of at least 32 bytes. When omitted, the controller generates one
+                      into a Workspace-owned Secret and records its name in status.dataPlane.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  enabled:
+                    default: true
+                    description: enabled turns on the in-Pod envd listener and Data
+                      Plane Gateway routing.
+                    type: boolean
+                type: object
               defaultWorkingDirectory:
                 description: defaultWorkingDirectory is used when a process does not
                   set --cwd.
@@ -1934,6 +1971,19 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              dataPlane:
+                description: dataPlane publishes the Secret names backing the Workspace
+                  Data Plane.
+                properties:
+                  accessTokenSecretName:
+                    description: accessTokenSecretName is the Secret holding the Workspace
+                      Data Plane access token.
+                    type: string
+                  serverCertSecretName:
+                    description: serverCertSecretName is the Secret holding the Workspace
+                      Data Plane mTLS server certificate.
+                    type: string
+                type: object
               executionAdmissionClosed:
                 description: |-
                   executionAdmissionClosed fences new command starts during automatic

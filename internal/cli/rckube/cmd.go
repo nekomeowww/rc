@@ -23,10 +23,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
+	"github.com/nekomeowww/bo"
 	"github.com/spf13/cobra"
 
+	envdconnectrpc "github.com/nekomeowww/rc/internal/datad/sandbox/protocol/envd/connectrpc"
+	execdhttp "github.com/nekomeowww/rc/internal/datad/sandbox/protocol/execd/http"
 	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/filecopy"
 	"github.com/nekomeowww/rc/internal/lifecycle"
@@ -159,6 +163,12 @@ func newServeCommand() *cobra.Command {
 	var maxTranscriptBytes int64
 	var initializeActions string
 	var encodedServices string
+	var execdListen string
+	var dataPlaneListen string
+	var dataPlaneCAFile string
+	var dataPlaneCertFile string
+	var dataPlaneKeyFile string
+	var dataPlaneInsecure bool
 	command := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the Workspace process supervisor",
@@ -197,7 +207,79 @@ func newServeCommand() *cobra.Command {
 			if err := supervisor.RecoverHistory(time.Now()); err != nil {
 				return fmt.Errorf("recover process history: %w", err)
 			}
-			return runtime.NewServer(supervisor).Serve(command.Context(), socketPath)
+			app := bo.New()
+			var (
+				serveErrMu sync.Mutex
+				serveErr   error
+			)
+			recordErr := func(err error) error {
+				if err != nil {
+					serveErrMu.Lock()
+					if serveErr == nil {
+						serveErr = err
+					}
+					serveErrMu.Unlock()
+				}
+				return err
+			}
+			addServer := func(serve func(context.Context) error) {
+				app.Add(func(_ context.Context, lc bo.LifeCycle) error {
+					srvCtx, srvCancel := context.WithCancel(command.Context())
+					done := make(chan struct{})
+					lc.Append(bo.Hook{
+						OnStart: func(_ context.Context) error {
+							defer close(done)
+							return recordErr(serve(srvCtx))
+						},
+						OnStop: func(stopCtx context.Context) error {
+							srvCancel()
+							select {
+							case <-done:
+								return nil
+							case <-stopCtx.Done():
+								return stopCtx.Err()
+							}
+						},
+					})
+					return nil
+				})
+			}
+
+			addServer(func(ctx context.Context) error {
+				return runtime.NewServer(supervisor).Serve(ctx, socketPath)
+			})
+			if execdListen != "" {
+				execdServer := execdhttp.NewServer(supervisor, native.Home, native.Workspace, "")
+				execdCfg := execdhttp.Config{
+					ListenAddr:   execdListen,
+					CAFile:       dataPlaneCAFile,
+					CertFile:     dataPlaneCertFile,
+					KeyFile:      dataPlaneKeyFile,
+					Insecure:     dataPlaneInsecure,
+					HomeDir:      native.Home,
+					WorkspaceDir: native.Workspace,
+				}
+				addServer(func(ctx context.Context) error {
+					return execdServer.Serve(ctx, execdCfg)
+				})
+			}
+			if dataPlaneListen != "" {
+				dpServer := envdconnectrpc.NewServer(supervisor, native.Home, "")
+				dpCfg := envdconnectrpc.Config{
+					ListenAddr: dataPlaneListen,
+					CAFile:     dataPlaneCAFile,
+					CertFile:   dataPlaneCertFile,
+					KeyFile:    dataPlaneKeyFile,
+					Insecure:   dataPlaneInsecure,
+					HomeDir:    native.Home,
+				}
+				addServer(func(ctx context.Context) error {
+					return dpServer.Serve(ctx, dpCfg)
+				})
+			}
+
+			app.Start()
+			return serveErr
 		},
 	}
 	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
@@ -207,6 +289,12 @@ func newServeCommand() *cobra.Command {
 	command.Flags().StringVar(&encodedServices, "services", "", "Base64url-encoded resident services to keep running")
 	command.Flags().DurationVar(&stopGrace, "stop-grace", 10*time.Second, "Process stop grace period before forced tree termination")
 	command.Flags().Int64Var(&maxTranscriptBytes, "max-transcript-bytes", 64<<20, "Maximum durable bytes retained per process; zero disables")
+	command.Flags().StringVar(&execdListen, "execd-listen", "", "Optional TCP address for the OpenSandbox execd Data Plane (for example :44772)")
+	command.Flags().StringVar(&dataPlaneListen, "data-plane-listen", "", "Optional TCP address for the E2B envd-compatible Data Plane (for example :49983)")
+	command.Flags().StringVar(&dataPlaneCAFile, "data-plane-ca-file", "", "PEM CA certificate file verifying Data Plane Gateway client certificates")
+	command.Flags().StringVar(&dataPlaneCertFile, "data-plane-cert-file", "", "PEM server certificate file for the Workspace Data Plane")
+	command.Flags().StringVar(&dataPlaneKeyFile, "data-plane-key-file", "", "PEM server private key file for the Workspace Data Plane")
+	command.Flags().BoolVar(&dataPlaneInsecure, "data-plane-insecure", false, "Serve the Workspace Data Plane without mTLS (for local testing or exec bridges only)")
 
 	return command
 }

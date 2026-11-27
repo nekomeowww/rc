@@ -47,6 +47,7 @@ import (
 	"github.com/nekomeowww/rc/internal/controller"
 	repositoriescontroller "github.com/nekomeowww/rc/internal/controller/repositories"
 	workspacescontroller "github.com/nekomeowww/rc/internal/controller/workspaces"
+	"github.com/nekomeowww/rc/internal/datad/gateway"
 	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/version"
 	// +kubebuilder:scaffold:imports
@@ -68,6 +69,13 @@ func init() {
 
 // nolint:gocyclo
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "data-plane-gateway" {
+		if err := gateway.Run(os.Args[2:], scheme); err != nil {
+			fmt.Fprintf(os.Stderr, "data-plane-gateway: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string

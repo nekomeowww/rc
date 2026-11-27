@@ -115,6 +115,15 @@ type supervisedProcess struct {
 	tty              bool
 	startedAt        *time.Time
 	completedAt      *time.Time
+
+	// Data Plane (envd) metadata and typed stream subscribers.
+	isDataPlane     bool
+	dataPlaneTag    string
+	dataPlaneConfig *DataPlaneProcessConfig
+	dataPlaneSubs   map[uint64]*dataPlaneSubscriber
+	nextDataPlaneID uint64
+	dataPlaneLog    []DataPlaneChunk
+	dataPlaneLogLen int64
 }
 
 // Supervisor owns child processes independently of attach connections.
@@ -137,6 +146,8 @@ type Supervisor struct {
 	services       []processruntime.Service
 	serviceLog     io.Writer
 	serviceBackoff serviceBackoff
+
+	dataPlaneSeq atomic.Uint64
 }
 
 type credentialAlias struct {
@@ -188,8 +199,14 @@ func (supervisor *Supervisor) Touch(now time.Time) {
 }
 
 // LastActivity returns the last recorded activity, or the zero time when
-// nothing was recorded since the supervisor started.
+// nothing was recorded since the supervisor started. While any Data Plane
+// process is running, it reports the current time so idle suspension waits.
 func (supervisor *Supervisor) LastActivity() time.Time {
+	if supervisor.hasRunningDataPlaneProcess() {
+		now := time.Now()
+		supervisor.Touch(now)
+		return now
+	}
 	value := supervisor.lastActivity.Load()
 	if value == 0 {
 		return time.Time{}
@@ -670,6 +687,7 @@ func (process *supervisedProcess) cleanupCredentials() {
 
 type processOutput struct {
 	process *supervisedProcess
+	kind    DataPlaneStreamKind
 }
 
 func (output processOutput) Write(data []byte) (int, error) {
@@ -721,6 +739,27 @@ func (output processOutput) distribute(data, copyOfData []byte) ([]*attachClient
 			}
 			output.process.truncated = true
 			output.process.state.TranscriptTruncated = true
+		}
+	}
+	if output.process.isDataPlane && len(copyOfData) > 0 {
+		kind := output.kind
+		if kind == 0 {
+			if output.process.tty {
+				kind = DataPlaneStreamPTY
+			} else {
+				kind = DataPlaneStreamStdout
+			}
+		}
+		chunk := DataPlaneChunk{Kind: kind, Data: copyOfData}
+		if output.process.transcriptMax == 0 || output.process.dataPlaneLogLen+int64(len(copyOfData)) <= output.process.transcriptMax {
+			output.process.dataPlaneLog = append(output.process.dataPlaneLog, chunk)
+			output.process.dataPlaneLogLen += int64(len(copyOfData))
+		}
+		for _, sub := range output.process.dataPlaneSubs {
+			select {
+			case sub.chunks <- chunk:
+			default:
+			}
 		}
 	}
 	var lossless []*attachClient

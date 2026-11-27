@@ -19,6 +19,17 @@ spec:
           writable: true
       commands:
         - { match: "**", to: dev }
+  # env reaches the driving program; a Secret key stays out of the profile.
+  # env:
+  # - name: OPENAI_API_KEY
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: openai
+  #       key: api-key
+  # pod places the runner Pod within the manager's KVM nodes.
+  # pod:
+  #   nodeSelector:
+  #     topology.kubernetes.io/zone: zone-a
   executors:
   - name: dev
     workspaceRef:

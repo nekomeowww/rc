@@ -38,7 +38,8 @@ func BuiltinProfile(name string) string {
 // state, so the profile may not choose runners itself, and every executor
 // that it names must be bound. actor.network.services is refused too: its
 // URLs bypass the gateway's egress policy and reach whatever the daemon can.
-func ComposeProfile(text, actorRunner string, executorRunners map[string]string) (string, error) {
+// actorEnv is set over the profile's actor.env.
+func ComposeProfile(text, actorRunner string, executorRunners, actorEnv map[string]string) (string, error) {
 	decoded, err := profile.Decode([]byte(text))
 	if err != nil {
 		return "", fmt.Errorf("profile is not valid: %w", err)
@@ -53,6 +54,10 @@ func ComposeProfile(text, actorRunner string, executorRunners map[string]string)
 		return "", fmt.Errorf("profile sets actor.network.services, which bypasses the gateway's egress policy")
 	}
 	decoded.Actor.Runner = &profile.RunnerSelector{Name: actorRunner}
+	if len(actorEnv) > 0 && decoded.Actor.Env == nil {
+		decoded.Actor.Env = make(map[string]string, len(actorEnv))
+	}
+	maps.Copy(decoded.Actor.Env, actorEnv)
 	for _, name := range slices.Sorted(maps.Keys(decoded.Executors)) {
 		if decoded.Executors[name].Runner != nil {
 			return "", fmt.Errorf("profile executor %s sets runner; rc chooses executor runners", name)

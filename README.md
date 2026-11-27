@@ -1,5 +1,3 @@
-# rc
-
 <picture>
   <source
     width="100%"
@@ -11,31 +9,44 @@
     srcset="./docs/images/cover-light.webp"
     media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)"
   />
-  <img width="100%" src="./docs/images/cover-light.webp" />
+  <img width="100%" alt="rc: Persistent Kubernetes workspaces" src="./docs/images/cover-light.webp" />
 </picture>
 
-`rc` runs persistent, Kubernetes-backed development workspaces for coding agents.
-It keeps repositories, Git worktrees, home directories, credentials, and processes as explicit Kubernetes resources, while `rcctl` provides the day-to-day command-line workflow.
+<h1 align="center">rc</h1>
 
-The project consists of three programs:
+`rc` runs persistent, Kubernetes-native development workspaces and agent sandboxes.
 
-- `rcctl` creates resources, imports credentials, and starts or reconnects to processes.
-- `rc-kube` supervises processes inside Workspace and Environment Pods.
-- `rc-controller` reconciles rc resources in Kubernetes.
+- **Git-native storage**: **Repositories** mirror Git remotes on PVCs; **Worktrees** branch off as independent CSI volume clones without re-cloning remotes.
+- **Persistent Workspaces**: Long-lived Pods with persistent home directories, credentials, hot-mounted Worktrees, and `rc-kube` process supervision that survives terminal disconnects.
+- **Sandbox SDK compatible (`e2b`, `opensandbox`)**: Opt-in per-Workspace HTTP/ConnectRPC/WebSocket data plane (`execd` & `envd`) behind an mTLS **Data Plane Gateway** — build custom agent sandboxes without Kubernetes Pod exec.
+- **Multi-OS & agent-ready**: Runs on Linux (including headless Wayland GUI + [AUV](https://github.com/moeru-ai/auv) Computer Use), Windows, and macOS, with first-class `rcctl` workflows and installable Agent Skills.
 
-> rc is under active development. Its APIs are currently `v1alpha1` and may
-> change between releases.
+> [!NOTE]
+> `rc` is under active development. Its CRDs are currently `v1alpha1` and may change between releases.
 
-## Why Worktrees?
+## Table of Contents
 
-rc models a remote Git repository and a writable checkout separately:
+- [Start here](#start-here)
+- [How it works](#how-it-works)
+- [Getting started with `rcctl`](#getting-started-with-rcctl)
+- [Deploy](#deploy)
+- [Use with sandbox SDKs (`e2b`, `opensandbox`, etc.)](#use-with-sandbox-sdks-e2b-opensandbox-etc)
+- [Agent Skills](#agent-skills)
+- [Platform support](#platform-support)
+- [Resource model at a glance](#resource-model-at-a-glance)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [License](#license)
 
-```text
-Git remote -> Repository parent PVC -> Worktree child PVC -> Workspace
-                                                        \-> WorkspaceExec
-```
+## Start here
 
-A `Repository` is the synchronized, authoritative mirror of a Git remote. A `Worktree` is an independent CSI clone of that Repository volume. rc initializes the requested branch or ref directly in the cloned Repository root, without downloading the remote or materializing a second linked worktree. A `Workspace` mounts one or more Worktrees together with a persistent home directory, and can run multiple concurrent `WorkspaceExec` resources.
+| If you are... | Start with |
+| --- | --- |
+| **A developer using `rcctl`** | [Getting started with `rcctl`](#getting-started-with-rcctl) · [Agent Skills](#agent-skills) · [Using `rcctl`](docs/guides/rcctl.md) |
+| **A platform engineer or SDK user** building agent sandboxes with `e2b` / `opensandbox` | [Use with sandbox SDKs](#use-with-sandbox-sdks-e2b-opensandbox-etc) · [Data Plane guide](docs/guides/data-plane.md) |
+| **A cluster operator or Kubernetes developer** | [Deploy](#deploy) · [Operations & custom images](docs/guides/operations.md) · [Doctor](docs/doctor.md) |
+
+## How it works
 
 <picture>
   <source
@@ -48,17 +59,190 @@ A `Repository` is the synchronized, authoritative mirror of a Git remote. A `Wor
     srcset="./docs/images/resource-model-light.webp"
     media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)"
   />
-  <img width="100%" src="./docs/images/resource-model-light.webp" />
+  <img width="100%" alt="rc resource model" src="./docs/images/resource-model-light.webp" />
 </picture>
 
-This gives each task an ordinary Git branch and working tree without repeatedly downloading the same remote. Worktrees remain inspectable after a process exits, and a disconnected terminal does not stop the process it started.
+```mermaid
+flowchart LR
+    Remote["Git Remote"] -->|mirror| Repo["Repository PVC"]
+    Repo -->|CSI clone| WT["Worktree PVC"]
+    WT -->|mount| WS["Workspace Pod<br/>(rc-kube supervisor)"]
+    Env["WorkspaceEnvironment"] -->|CSI clone home| WS
+    CLI["rcctl"] -->|K8s API / Pod exec| WS
+    SDK["OpenSandbox execd /<br/>E2B envd SDKs"] -->|HTTPS + Token| GW["Data Plane Gateway"]
+    GW -->|mTLS| WS
+```
 
-Because Worktrees and prepared Workspace Environments use Kubernetes PVC cloning, the selected StorageClass must support volume cloning. The default `local-path` StorageClass in a standard Kind cluster does not provide that capability. Workspace storage also needs a StorageClass that binds volumes immediately. rc creates the runtime Pod only after its home volume is bound, so a `WaitForFirstConsumer` class such as `local-path` reports `StorageReady=False` with reason `WaitForFirstConsumerUnsupported` instead of starting. For local development on macOS or Linux, rc uses the SIG Storage `csi-driver-host-path` with a single-node Kind cluster. It is a sample/CI driver, not a production storage system, and implements cloning as a full file copy.
+`rc` consists of three binaries:
+
+- **`rc-controller`** reconciles `Repository`, `Worktree`, `WorkspaceEnvironment`, `Workspace`, `WorkspaceExec`, and `Credential` CRDs, and also serves the **Data Plane Gateway** (`manager data-plane-gateway`).
+- **`rc-kube`** supervises processes, transcripts, resident services, and opt-in `execd` / `envd` endpoints inside every Workspace Pod (injected automatically on Linux).
+- **`rcctl`** provides the day-to-day CLI for repositories, worktrees, workspaces, credentials, file copy, and process attachment.
+
+## Getting started with `rcctl`
+
+<picture>
+  <source
+    width="100%"
+    srcset="./docs/images/quick-start-dark.webp"
+    media="(prefers-color-scheme: dark)"
+  />
+  <source
+    width="100%"
+    srcset="./docs/images/quick-start-light.webp"
+    media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)"
+  />
+  <img width="100%" alt="rc quick start" src="./docs/images/quick-start-light.webp" />
+</picture>
+
+Install `rcctl` via Homebrew (or see [Installation](docs/guides/installation.md#install-rcctl) for GitHub Releases and `go install`):
+
+```sh
+brew install --cask nekomeowww/rc/rcctl
+```
+
+Clone a repository mirror, branch an independent Worktree, and launch an interactive Workspace:
+
+```sh
+# 1. Mirror a repository (replace csi-hostpath-sc with your clone-capable StorageClass)
+rcctl -n development repo clone https://github.com/nekomeowww/rc.git \
+  --name rc --storage-class csi-hostpath-sc
+
+# 2. Branch an independent Worktree via CSI PVC clone
+rcctl -n development worktree add --repo rc --name rc-dev --branch feat/demo
+
+# 3. Create a persistent Workspace and mount the Worktree
+rcctl -n development workspace create dev \
+  --image ghcr.io/nekomeowww/rc/runner:latest \
+  --storage-class csi-hostpath-sc
+rcctl -n development workspace mount worktree rc-dev --workspace dev --path rc
+
+# 4. Run an interactive command (survives terminal disconnects)
+rcctl -n development exec -it --cwd /workspace/rc dev -- sh
+```
+
+Day-2 commands:
+
+```sh
+rcctl -n development ps                  # List running processes across Workspaces
+rcctl -n development logs <process-id>   # Stream or inspect process logs
+rcctl -n development attach <process-id> # Reconnect to a running terminal
+rcctl -n development cp ./file dev:/workspace/rc/file
+rcctl -n development doctor              # Read-only health and storage audit
+```
+
+See [Using `rcctl`](docs/guides/rcctl.md) for credentials, `repo sync`, temporary `rcctl run`, Linux Worktree hot-mounts, lifetimes, and npm caching.
+
+## Deploy
+
+`rc` requires a Kubernetes `StorageClass` that supports **CSI volume cloning** and **`Immediate` volume binding** (not `WaitForFirstConsumer`).
+
+### Operator
+
+Install the latest released controller, CRDs, and RBAC into the current Kubernetes context:
+
+```sh
+kubectl apply -f https://github.com/nekomeowww/rc/releases/latest/download/install.yaml
+kubectl rollout status deployment/rc-controller-manager -n rc-system
+```
+
+Each stable release publishes matching images under `ghcr.io/nekomeowww/rc/`:
+
+- `controller` — Kubernetes controller manager and `data-plane-gateway`
+- `rc-kube` — injected Linux process supervisor and `tini`
+- `runner` — default Linux Workspace runner
+- `runner-wayland` — headless Wayland GUI + AUV Computer Use runner
+- `runner-windows` — experimental Windows runner
+
+### Data Plane Gateway (optional)
+
+To expose `execd` and `envd` to external orchestrators or SDKs without Pod exec, run the Gateway subcommand from the `controller` image behind an Ingress, Gateway API route, or Cloudflare Tunnel:
+
+```sh
+/manager data-plane-gateway \
+  --listen :8080 \
+  --ca-secret-namespace rc-system \
+  --ca-secret-name rc-data-plane-ca
+```
+
+<details>
+<summary>Try locally with Kind (disposable cluster + CSI hostpath)</summary>
+
+```sh
+git clone https://github.com/nekomeowww/rc.git
+cd rc
+make setup-kind KIND_CLUSTER=rc-dev
+kubectl config use-context kind-rc-dev
+kubectl create namespace development --dry-run=client -o yaml | kubectl apply -f -
+```
+
+`make setup-kind` installs a pinned `csi-driver-host-path` release and creates the clone-capable `csi-hostpath-sc` StorageClass. Do not use it for production data.
+
+</details>
+
+See [Installation](docs/guides/installation.md) for development builds, registry mirrors, and uninstall instructions, and [Operations & custom images](docs/guides/operations.md) for image upgrades and custom Linux images.
+
+## Use with sandbox SDKs (`e2b`, `opensandbox`, etc.)
+
+Enable `spec.dataPlane.enabled: true` on a Workspace to expose both OpenSandbox `execd` and E2B `envd` wire protocols over mTLS through the Data Plane Gateway. Both protocols share the same Workspace filesystem and `rc-kube` supervisor.
+
+### OpenSandbox SDK (`execd`)
+
+```ts
+import { ConnectionConfig, createDefaultAdapterFactory } from '@alibaba-group/opensandbox'
+
+const execdBaseUrl = 'https://dataplane.example.com/namespaces/development/workspaces/dev/execd'
+const execd = createDefaultAdapterFactory().createExecdStack({
+  connectionConfig: new ConnectionConfig({ domain: new URL(execdBaseUrl).host }),
+  execdBaseUrl,
+  endpointHeaders: { 'X-EXECD-ACCESS-TOKEN': process.env.WORKSPACE_ACCESS_TOKEN! },
+})
+
+await execd.files.writeFiles([
+  { path: '/workspace/hello.txt', data: 'hello from opensandbox', mode: 644 },
+])
+```
+
+### E2B SDK (`envd`)
+
+```ts
+import { Sandbox } from 'e2b'
+
+const sandbox = new Sandbox({
+  sandboxId: 'dev',
+  envdVersion: '0.11.0',
+  envdAccessToken: process.env.WORKSPACE_ACCESS_TOKEN!,
+  sandboxUrl: 'https://dataplane.example.com/namespaces/development/workspaces/dev/envd',
+  debug: true,
+})
+
+await sandbox.files.write([
+  { path: '/workspace/hello.txt', data: 'hello from e2b' },
+])
+const res = await sandbox.commands.run('cat /workspace/hello.txt')
+```
+
+See [Workspace Data Plane (`execd` & `envd`)](docs/guides/data-plane.md) for authentication, mTLS certificates, signed file URLs, and scope details.
+
+## Agent Skills
+
+Install `rc`'s agent skills with the [Skills CLI](https://www.skills.sh/docs) and select the skills that fit your workflow:
+
+```sh
+pnpm dlx skills add nekomeowww/rc
+```
+
+With `npx`:
+
+```sh
+npx skills add nekomeowww/rc
+```
+
+Keep account mappings, private endpoints, and credential caches on the access device outside shared skills — see [local access and migration](skills/use-rc/references/local-access.md).
 
 ## Platform support
 
-Each Workspace runs a native `rc-kube` supervisor built for its operating system.
-The controller and Repository jobs run on Linux.
+Each Workspace runs a native `rc-kube` supervisor built for its operating system. The controller and Repository jobs run on Linux.
 
 | Capability | Linux | Windows | macOS |
 | --- | :---: | :---: | :---: |
@@ -79,496 +263,50 @@ The controller and Repository jobs run on Linux.
 
 🚧 Not yet supported on this platform.
 
-See the [Windows](docs/guides/windows-workspaces.md),
-[macOS](docs/guides/darwin-workspaces.md), and
-[GUI](docs/guides/run-gui-applications.md) guides for setup and current limits.
-To show each Linux Workspace its own memory limit, CPU count, uptime, and load
-average, run LXCFS on the nodes and set `--lxcfs-dir`. See the
-[LXCFS guide](docs/guides/lxcfs.md).
+See the [Windows](docs/guides/windows-workspaces.md), [macOS](docs/guides/darwin-workspaces.md), [GUI](docs/guides/run-gui-applications.md), and [LXCFS](docs/guides/lxcfs.md) guides for setup and current limits.
 
-## Install
+## Resource model at a glance
 
-### Deploy the operator
+Workspaces are ordinary Kubernetes resources, so platform teams can manage them directly with controllers, GitOps, or the Kubernetes REST API:
 
-Install the latest released controller, CRDs, and RBAC into the current Kubernetes context:
-
-```sh
-kubectl apply -f https://github.com/nekomeowww/rc/releases/latest/download/install.yaml
-kubectl rollout status deployment/rc-controller-manager -n rc-system
+```yaml
+apiVersion: workspaces.rc.ayaka.io/v1alpha1
+kind: Workspace
+metadata:
+  name: dev
+  namespace: development
+spec:
+  image: ghcr.io/nekomeowww/rc/runner:latest
+  idleTimeout: 1h
+  maxRunDuration: 8h
+  deleteAfterSuspended: 168h
+  dataPlane:
+    enabled: true
+  mounts:
+    - name: rc
+      path: rc
+      worktreeRef:
+        name: rc-dev
 ```
 
-Each release publishes matching versions of these public images:
+See [Operations & custom images](docs/guides/operations.md) for image upgrades, controller-injected `rc-kube`, custom Linux images, and Pod scheduling.
 
-- `ghcr.io/nekomeowww/rc/controller`
-- `ghcr.io/nekomeowww/rc/rc-kube`
-- `ghcr.io/nekomeowww/rc/runner`
-- `ghcr.io/nekomeowww/rc/runner-wayland`
-- `ghcr.io/nekomeowww/rc/runner-windows`
+## Documentation
 
-The install manifest configures the controller, the rc-kube image, and the
-Linux runner. Select the experimental Windows runner explicitly on a Windows
-Workspace or through the manager's `--windows-runner-image` flag.
+Browse the full index in [docs/README.md](docs/README.md):
 
-### Image upgrades
-
-A blank Workspace uses `spec.image`, or the controller's runner image when
-`spec.image` is empty. When this image changes, the Workspace moves to it at
-its next start. A running Workspace keeps its image and reports
-`Outdated=True` with reason `ImageChangePending`. `status.runtimeImage` shows
-the image of the current or last runtime Pod. A Workspace cloned from a
-WorkspaceEnvironment keeps the image of its Environment revision. See
-[ADR 0011](docs/adr/0011-workspace-image-upgrades.md).
-
-```sh
-kubectl patch workspace dev --type merge -p '{"spec":{"image":"ghcr.io/nekomeowww/rc/runner:<version>"}}'
-rcctl workspace stop dev
-rcctl workspace start dev
-```
-
-### Custom Linux images
-
-The controller adds `rc-kube` and `tini` of its own version to every Linux
-Workspace and WorkspaceEnvironment Pod. They come from the
-`ghcr.io/nekomeowww/rc/rc-kube` image, which the manager flag
-`--rc-kube-image` selects. The default is the image of the same release. If
-your cluster pulls through a mirror, mirror this image and set the flag. A
-first init container copies both files to `/opt/rc/bin`, and the runtime runs
-`/opt/rc/bin/rc-kube`. Thus a controller upgrade cannot break a Workspace that
-uses an older image.
-
-A custom Linux image therefore does not need `rc-kube` or `tini`. It needs:
-
-- the processes and tools that your Workspace runs, and a POSIX shell for
-  lifecycle scripts;
-- files that UID and GID 1000 can use, because the runtime runs as that
-  user; and
-- `rc-kube` on `PATH` only to read the logs of a suspended Workspace with
-  `rcctl`. The helper Pod for those logs uses the Workspace image.
-
-Processes that `rc-kube` starts find the injected `rc-kube` first on `PATH`.
-A process that replaces `PATH`, or a login shell that resets it, can call
-`/opt/rc/bin/rc-kube` directly.
-
-When `rc-kube serve` starts as Linux PID 1, it starts itself under the
-injected Tini. Tini reaps orphaned descendants while rc-kube keeps ownership of
-direct command exit statuses. An image with its own init system sets
-`RC_KUBE_INIT` to a program. `rc-kube serve` then runs
-`$RC_KUBE_INIT <rc-kube path> serve <arguments>` instead of Tini, as the
-`runner-wayland` image does. Windows and macOS images still provide their own
-`rc-kube`. See
-[ADR 0010](docs/adr/0010-inject-rc-kube-from-the-controller.md) for the upgrade
-behavior.
-
-Run `bash hack/test-runner-reaping.sh <runner-image>` to check orphan cleanup,
-command exit status, and supervisor shutdown in an isolated Docker container.
-
-Releases also publish `openai-codex-cli` (Linux amd64/arm64) and
-`openai-codex-cli-windows` (Windows amd64) under the same GHCR namespace.
-These derived images use `rc-<rc-version>` and `<codex-version>-rc.<rc-version>`
-tags, plus `latest`; the other images use `<rc-version>` tags.
-For example, release `v0.12.1` with Codex `0.154.0` publishes
-`openai-codex-cli:rc-0.12.1` and `openai-codex-cli:0.154.0-rc.0.12.1`.
-Existing tags containing only the Codex version remain available but are no
-longer updated by this workflow.
-
-Push a stable `vMAJOR.MINOR.PATCH` tag to start the complete release. GitHub
-Release assets are staged as a draft, and the release becomes public only after
-all seven images and their attestations succeed. Linux Codex extends the exact
-runner version from that release. A failed release stays a draft; fix the
-failure and rerun the failed jobs before treating that version as complete.
-Image tags can become visible while the draft is building.
-The separate Codex workflow can still be dispatched against a selected ref
-with a released runner version and an optional Codex version override.
-
-Your production StorageClass must support CSI PVC cloning. The local Kind setup described below is intentionally disposable and must not be used for production data.
-
-### Install rcctl
-
-On macOS or Linux, install the latest release from the Homebrew tap:
-
-```sh
-brew install --cask nekomeowww/rc/rcctl
-```
-
-Homebrew adds `nekomeowww/rc` automatically when the fully qualified cask name
-is used. Each stable rc release updates the cask.
-
-Alternatively, download a binary archive for Linux, macOS, or Windows from
-[GitHub Releases](https://github.com/nekomeowww/rc/releases), or install it from
-source with Go:
-
-```sh
-go install github.com/nekomeowww/rc/cmd/rcctl@latest
-```
-
-`rcctl` uses the same kubeconfig resolution as `kubectl`. Every command accepts
-`--kubeconfig`, `--context`, and `--namespace` (`-n`):
-
-```sh
-rcctl --context kind-rc-dev -n development repo list
-```
-
-### Install agent skills
-
-`use-rc` composes access only when needed. Install `use-op-for-secret-access` for
-1Password-backed credential access and `use-cloudflared-for-remote-access` for
-Cloudflare routes; direct Kubernetes access needs neither companion. Keep account
-mappings, private endpoints, and credential caches on the access device, outside
-shared skills. For migration from a private `use-rcctl`, see
-[local access and migration](skills/use-rc/references/local-access.md).
-
-Install rc's agent skills with the [Skills CLI](https://www.skills.sh/docs).
-The command prompts for the target agent and scope; select only the skills that
-fit the intended workflow:
-
-```sh
-pnpm dlx skills add nekomeowww/rc \
-  --skill use-rc --skill setup-rc --skill setup-rc-locally --skill setup-lobehub-cli \
-  --skill use-op-for-secret-access --skill use-cloudflared-for-remote-access
-```
-
-`npx` is equivalent when pnpm is unavailable:
-
-```sh
-npx skills add nekomeowww/rc \
-  --skill use-rc --skill setup-rc --skill setup-rc-locally --skill setup-lobehub-cli \
-  --skill use-op-for-secret-access --skill use-cloudflared-for-remote-access
-```
-
-## Quick start with rcctl
-
-The top-level command groups follow the rc resource model:
-
-| Command | Purpose |
-| --- | --- |
-| `rcctl credentials` | Import Git, agent, and process credentials |
-| `rcctl repo` | Clone, inspect, execute commands in, and delete Repository mirrors |
-| `rcctl worktree` | Create, inspect, execute in, and delete independent Git checkouts |
-| `rcctl doctor` | Audit references, storage requests, runtime failures and deletion blockers |
-| `rcctl env` | Prepare and commit reusable Workspace home environments |
-| `rcctl workspace` | Create persistent development machines and manage their mounts |
-| `rcctl run` / `rcctl exec` | Run commands in a new / existing Workspace |
-| `rcctl ps` / `attach` / `logs` / `stop` / `inspect` / `rm` | List and manage processes |
-| `rcctl cp` | Copy files and directories to and from a running Workspace |
-
-For read-only diagnostics, see [Doctor](docs/doctor.md).
-
-In most cases, it takes only a few steps to get started with rcctl:
-
-<picture>
-  <source
-    width="100%"
-    srcset="./docs/images/quick-start-dark.webp"
-    media="(prefers-color-scheme: dark)"
-  />
-  <source
-    width="100%"
-    srcset="./docs/images/quick-start-light.webp"
-    media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)"
-  />
-  <img width="100%" src="./docs/images/quick-start-light.webp" />
-</picture>
-
-<details>
-  <summary>Try without Kubernetes</summary>
-
-For a disposable local cluster on macOS or Linux, install Kind and Docker, then create a single-node cluster with the clone-capable CSI hostpath driver:
-
-```sh
-git clone https://github.com/nekomeowww/rc.git
-cd rc
-make setup-kind KIND_CLUSTER=rc-dev
-kubectl config use-context kind-rc-dev
-```
-
-`setup-kind` pins and installs the upstream `csi-driver-host-path` release and creates the `csi-hostpath-sc` StorageClass. Driver volumes live inside the Kind node and are lost when the cluster or driver Pod is recreated.
-
-The examples below use the `development` namespace and the local StorageClass. When using another cluster, replace `csi-hostpath-sc` with one whose CSI driver supports PVC cloning.
-
-```sh
-kubectl create namespace development --dry-run=client -o yaml | kubectl apply -f -
-```
-
-</details>
-
-### Import credentials
-
-For a public repository, no Git credential is required. For GitHub repositories, `rcctl` can read the token from an authenticated GitHub CLI session and store it as a namespaced rc `Credential` backed by a Kubernetes Secret:
-
-```sh
-gh auth login
-rcctl -n development credentials import --type github
-```
-
-The default resource name is `github-com`. Pass it when cloning a private repository. Placeholder commands are comments so copying the block does not run them accidentally:
-
-```sh
-# rcctl -n development repo clone https://github.com/OWNER/REPOSITORY.git \
-#   --name repository \
-#   --storage-class csi-hostpath-sc \
-#   --credential-ref github-com
-```
-
-To make an existing Codex login available to an process, import the local credential file:
-
-```sh
-rcctl -n development credentials import --type agent --agent codex --file "$HOME/.codex/auth.json"
-```
-
-This creates an `AgentCredential` named `codex`. Credential resources and their Secrets stay in the selected namespace. A generic credential file can also be projected into explicitly selected processes:
-
-```sh
-# rcctl -n development credentials import \
-#   --type process \
-#   --name tool-auth \
-#   --file ./credentials.json \
-#   --mount-path /home/agent/.tool/credentials.json \
-#   --env TOOL_HOME=/home/agent/.tool
-```
-
-### Clone a repository
-
-Create the persistent Repository mirror and wait for its initial synchronization:
-
-```sh
-rcctl -n development repo clone https://github.com/nekomeowww/rc.git --name rc --storage-class csi-hostpath-sc
-```
-
-Inspect it or run an exact command against the parent volume:
-
-```sh
-rcctl -n development repo list
-rcctl -n development repo exec rc -- git status --short
-```
-
-Fetch remote changes and reset the parent to its configured ref before creating a new Worktree:
-
-```sh
-rcctl -n development repo sync rc
-```
-
-`sync` uses the Repository Credential and submodule policy. It removes untracked files from the parent and prints the resolved commit. A submodule that cannot be updated, for example because its upstream dropped the recorded commit, fails the sync and names the path. Set `spec.submodules.failurePolicy: Continue` (or clone with `--continue-on-submodule-failure`) to keep the parent ready and report the path on the `SubmodulesReady` condition instead. Existing Worktrees keep their commits and local changes. Add `--wait=false` to print the request name immediately. Inspect its result with `kubectl get repositorysync <name> -o yaml`.
-
-Completed sync requests are automatically deleted after 3 days, whether they succeed or fail. Set `spec.ttlSecondsAfterFinished` when creating a `RepositorySync` to change retention.
-
-Sync waits for other parent writers, pending clones, and direct Repository mounts. Suspend Workspaces that mount the parent directly before syncing. [Repository sync](docs/design/repository-sync.md) describes coordination and failure handling.
-
-Repository parents are not writable Workspace checkouts. Create a Worktree when you want an isolated branch:
-
-```sh
-rcctl -n development worktree add --repo rc --name rc-readme --branch docs/readme
-rcctl -n development worktree list
-rcctl -n development worktree exec rc-readme -- git status --short
-```
-
-The add command creates a child PVC through CSI cloning and initializes the requested Git checkout in the clone root. `worktree exec` is the lightweight path for short commands that need only the base Runner Image: it runs in a separate Job, does not allocate a Workspace home PVC, and holds the Worktree's exclusive writer, like a writable Workspace mount. It intentionally does not provide Workspace Environment state, caches, credentials, process persistence, or an interactive terminal. Use `run --rm --worktree rc-readme -- COMMAND` when a command needs those Workspace capabilities. Checkout modes remain available through flags such as `--ref`, `--detach`, `--orphan`, and `--no-checkout`. `--lock` and `--reason` record their requested intent, but no Git lock is required because the clone root has no linked-worktree metadata to prune. Delete an unmounted Worktree and its owned PVC and bootstrap Job with `rcctl worktree rm rc-readme`.
-
-New Worktrees inherit their source PVC access modes and StorageClass. The default
-size covers both the source's requested and reported capacity; a smaller explicit
-`--size` is rejected before creating the child PVC. Explicit
-`--access-mode ReadWriteMany` remains available on compatible drivers. See [clone
-storage planning](docs/design/worktree-storage.md) for defaults, validation, and existing
-claim compatibility.
-
-### Run a process
-
-The shortest isolated path is to explicitly request a temporary Workspace and a writable Worktree from an existing Repository:
-
-```sh
-rcctl -n development run -it --rm --repo rc --image ghcr.io/nekomeowww/rc/runner:latest --storage-class csi-hostpath-sc --agent-credential codex --cwd /workspace/rc -- codex
-```
-
-`run` always creates a new Workspace. **Unnamed runs are temporary by default**:
-the Workspace and owned storage are deleted five minutes after all processes
-terminate. Add `--retain` to preserve a run for later `exec` or log inspection.
-Named runs retain by default; `--rm` explicitly makes a named run temporary.
-Use `--retain` to keep an unnamed run. `--rm=false` remains a compatible explicit retained form.
-
-Generated Worktrees from `--repo` are owned by the new Workspace. Existing
-Worktrees selected with `--worktree` are never deleted by this cleanup.
-`workspace create` remains retained by default. Long-lived Workspaces can opt
-into `--idle-timeout=1h --delete-after-suspended=168h`: the first stage
-stops compute; the second deletes owned storage after a full suspended grace
-period. Both stages default to disabled for CLI and direct API creation.
-`--max-run-duration=8h` also stops compute 8 hours after each start, even
-while busy, which bounds stuck or looping work. A resident service inside the
-Workspace reports activity with `rc-kube process touch` so idle suspension
-waits for it.
-See [Workspace lifetime decisions and migration](docs/adr/0007-workspace-lifetimes.md)
-for the behavior matrix, timer rules, and script migration.
-
-For a named development machine, create the Workspace first and mount the Worktree explicitly:
-
-```sh
-rcctl -n development workspace create dev --image ghcr.io/nekomeowww/rc/runner:latest --storage-class csi-hostpath-sc --agent-credential codex
-rcctl -n development workspace mount worktree rc-readme --workspace dev --path rc
-rcctl -n development workspace default dev
-
-rcctl -n development exec -it --agent-credential codex --cwd /workspace/rc dev -- codex
-```
-
-On Linux, add ready Worktree PVCs without replacing the Workspace runtime Pod:
-
-```sh
-rcctl -n development env create prepared --image ghcr.io/nekomeowww/rc/runner:latest --storage-class csi-hostpath-sc
-rcctl -n development workspace create dev-hot --environment prepared
-rcctl -n development workspace mount worktree rc-readme --workspace dev-hot --path rc
-```
-
-Each Worktree keeps its own cloned PVC. A privileged mount helper runs on the
-Workspace node and publishes that PVC into the existing Pod. The Workspace
-keeps its Environment, home, cache, and running processes when a Worktree is
-added. Linux Workspaces require a cluster that permits privileged Pods and
-hostPath mounts. Stop active Workspace processes before unmounting a Worktree.
-Upgrading the controller replaces existing runtime Pods to install the mount
-propagation path. Windows Workspaces retain Pod replacement for mount changes.
-If a mount helper crashes, rc cleans the node bind mount and reports the failure.
-Unmount and remount that Worktree to retry.
-
-#### Scheduling and runtime Pod metadata
-
-`workspace create` and `run` place the runtime Pod with `--node-selector`,
-`--toleration`, and `--priority-class NAME`. They also add labels and
-annotations to that Pod with the repeatable `--pod-label key=value` and
-`--pod-annotation key=value` flags, for example to keep node consolidation
-from evicting a running Workspace or to select it in a NetworkPolicy:
-
-```sh
-rcctl -n development workspace create dev --image ghcr.io/nekomeowww/rc/runner:latest --storage-class csi-hostpath-sc \
-  --priority-class workspace-standard \
-  --pod-label example.com/tenant=team-a \
-  --pod-annotation karpenter.sh/do-not-disrupt=true
-```
-
-These values apply only to the Workspace runtime Pod, and `workspace get`
-shows them. Keys with an `rc.ayaka.io` prefix, or a prefix in one of its
-subdomains, are reserved for rc and rejected. Changing only `spec.podMetadata`
-updates the running Pod in place. Changing `spec.priorityClassName` replaces an
-idle runtime Pod and waits while executions are active.
-
-#### Optimizations
-
-##### npm
-
-rc natively supports selecting an npm registry for each Workspace. Point
-`--npm-registry` at an npm-compatible registry, cache, or proxy to speed up
-dependency downloads while keeping the configuration scoped to that Workspace:
-
-```sh
-rcctl workspace create rc-dev \
-  --npm-registry http://verdaccio.rc-system.svc.cluster.local:4873
-```
-
-For example, you can deploy Verdaccio as a caching proxy in the cluster. A
-ClusterIP Service named `verdaccio` in the `rc-system` namespace is reachable
-from other namespaces at
-`http://verdaccio.rc-system.svc.cluster.local:4873`.
-
-The convenience flag sets two `Workspace.Spec.Env` defaults:
-`NPM_CONFIG_REGISTRY` receives the URL with one trailing slash, while Corepack
-receives the same URL without a trailing slash through its independent
-`COREPACK_NPM_REGISTRY` variable.
-
-The same flag is available on `run` and `exec`. With an existing
-Workspace, it overrides registry defaults only for that WorkspaceExec and does
-not modify the Workspace. With `run`, the generated Workspace receives
-the defaults. Supplying either registry variable explicitly through `--env` or
-`--env-file` conflicts with `--npm-registry`. This convenience flag configures
-registry locations only; it does not provide registry tokens, usernames, or
-passwords. Configure authentication separately when the selected registry
-requires it.
-
-Both `run` and `exec WORKSPACE` wait for completion and return the command's
-exit code by default. Use `-it` for an interactive terminal or `-d` to detach.
-Without `-i`, the command reads end of file on standard input; with `-i`,
-piped input reaches it and its end closes the command's input, so
-`tar c dir | rcctl exec -i dev -- tar x` works. Output reaches a foreground
-`run` or `exec` in full, with the command waiting for a slow terminal, except
-that more than 64 MiB written before rcctl attaches is cut off with an error;
-use `rcctl cp` for files. Each command creates a `WorkspaceExec`, so you can inspect and reconnect
-independently of the original terminal. `ps` asks the supervisor of every
-running Workspace and WorkspaceEnvironment, like `ps` on each machine: a stopped
-Workspace, or a command that has not started yet, lists no processes. A finished
-command's WorkspaceExec is deleted after ten minutes; its supervisor keeps the
-history (90 days and 15000 entries by default, set by `spec.executionRetention`). Put rcctl flags before the
-Workspace name for `exec`; everything after that name is command argv.
-
-```sh
-rcctl -n development ps                    # Running processes in this namespace
-rcctl -n development ps -a                 # Include finished processes
-rcctl -n development ps --workspace dev    # Ask only one Workspace
-
-# Replace PROCESS_ID with a value printed by `ps`:
-# rcctl -n development inspect PROCESS_ID
-# rcctl -n development logs PROCESS_ID
-# rcctl -n development attach PROCESS_ID
-```
-
-List commands use compact, width-aware tables and shorten long values with an
-ellipsis. Pass `-o wide` for secondary columns, or `-o json`/`-o yaml` for the
-complete resource data. `inspect`, `workspace get`, `repo get`, and
-`worktree get` show an untruncated detail view of one resource.
-
-Use `rcctl --help` and `rcctl <command> --help` for the complete command surface.
-
-The execution API is now `workspaces.rc.ayaka.io/v1alpha1`, kind
-`WorkspaceExec`. This replaces `AgentProcess`; the old `rcctl agent` command
-group has been removed. Existing process records are not automatically migrated.
-Before upgrading an existing installation, use the old CLI/controller to stop
-and remove old process records after saving any needed logs. Upgrade the CRDs,
-controller, and CLI together. Do not relabel completed executions as new
-WorkspaceExec resources: recreating them requests a new command execution.
-
-## Deploy a development build
-
-To deploy images built from the checkout into the local Kind cluster, build and load both images with matching development tags:
-
-```sh
-make docker-build IMG=rc-controller:dev RC_KUBE_IMG=rc-kube:dev
-make docker-build-runner RUNNER_IMG=rc-runner:dev
-kind load docker-image rc-controller:dev rc-kube:dev rc-runner:dev --name rc-dev
-make deploy IMG=rc-controller:dev RC_KUBE_IMG=rc-kube:dev RUNNER_IMG=rc-runner:dev
-```
-
-`make docker-build` builds the controller image and the rc-kube image that it
-injects. Deploy them together.
-
-To publish the images, replace the commented registry names with repositories that the target cluster can pull:
-
-```sh
-# make docker-build docker-push IMG=REGISTRY/rc/controller:TAG RC_KUBE_IMG=REGISTRY/rc/rc-kube:TAG
-# make docker-build-runner docker-push-runner RUNNER_IMG=REGISTRY/rc/runner:TAG
-```
-
-To generate one distributable manifest for the locally loaded images, run:
-
-```sh
-make build-installer IMG=rc-controller:dev RC_KUBE_IMG=rc-kube:dev RUNNER_IMG=rc-runner:dev
-kubectl apply -f dist/install.yaml
-```
-
-## Uninstall
-
-Delete rc custom resources before removing the CRDs if their persistent data is no longer needed. Then remove the released installation:
-
-```sh
-kubectl delete -f https://github.com/nekomeowww/rc/releases/latest/download/install.yaml
-```
-
-Removing the CRDs deletes all rc custom resources from the cluster. Review the associated PVC retention behavior before uninstalling a production deployment.
+- **Users**: [Installation](docs/guides/installation.md) · [Using `rcctl`](docs/guides/rcctl.md) · [GUI applications](docs/guides/run-gui-applications.md) · [Doctor](docs/doctor.md)
+- **Platform engineers & SDKs**: [Workspace Data Plane (`execd` & `envd`)](docs/guides/data-plane.md) · [Workspace lifetimes (ADR 0007)](docs/adr/0007-workspace-lifetimes.md) · [Domain glossary](CONTEXT.md)
+- **Operators**: [Operations & custom images](docs/guides/operations.md) · [LXCFS](docs/guides/lxcfs.md) · [Windows](docs/guides/windows-workspaces.md) · [macOS](docs/guides/darwin-workspaces.md) · [Experimental Windows 11 worker](docs/guides/experimental-windows-11-worker.md)
+- **Architecture**: [ADRs (`docs/adr/`)](docs/adr/) · [Design specs (`docs/design/`)](docs/design/)
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the Kind development loop, tests, generated-file rules, and pull request checklist.
-
-Design decisions and the detailed runtime model live under [`docs/`](docs/).
-To attach a Windows 11 development node, see the
-[experimental Windows 11 worker guide](docs/guides/experimental-windows-11-worker.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the Kind development loop, test suites, generated-file rules, and pull request checklist.
 
 ## License
 
-Licensed under the
-[Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0).
+Licensed under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0).
 
 <picture>
   <source
@@ -581,5 +319,5 @@ Licensed under the
     srcset="./docs/images/overview-light.webp"
     media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)"
   />
-  <img width="100%" src="./docs/images/overview-light.webp" />
+  <img width="100%" alt="rc overview" src="./docs/images/overview-light.webp" />
 </picture>

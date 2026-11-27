@@ -9,7 +9,7 @@ packages:
 
 catalog:
   '@alibaba-group/opensandbox': ^1.2.1
-  '@types/node': ^22.15.0
+  '@types/node': ^26.0.0
   '@types/ws': ^8.18.1
   e2b: ^2.66.0
   typescript: ^5.8.3

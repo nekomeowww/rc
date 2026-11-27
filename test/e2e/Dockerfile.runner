@@ -6,7 +6,7 @@
 # under the injected tini when it runs as PID 1. The controller runs the
 # runtime as UID/GID 1000, mounts the home volume at /home/agent and an
 # emptyDir at /run/rc, and execs "/opt/rc/bin/rc-kube process ..." for
-# activity, history, and WorkspaceExec. The full Dockerfile.runner adds the
+# activity, history, and WorkspaceExec. The full images/runner/Dockerfile adds the
 # developer toolchains, which the e2e suite does not use.
 FROM alpine:3.23
 

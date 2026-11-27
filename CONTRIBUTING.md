@@ -162,7 +162,7 @@ The runtime suite (`test/e2e`, build tag `e2e`) runs real containers. It
 builds the manager image, the rc-kube image, and a minimal runner image from
 `test/e2e/Dockerfile.runner`, which contains only a shell. The manager injects
 `rc-kube` and `tini` from this checkout into each runtime Pod, so every spec
-also checks the injection. The full `Dockerfile.runner` is not needed because
+also checks the injection. The full `images/runner/Dockerfile` is not needed because
 the specs use only `rc-kube` and `sh`. The specs use short clocks, so the suite
 takes several minutes.
 

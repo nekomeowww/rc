@@ -153,15 +153,15 @@ jobs:
       matrix:
         include:
           - component: controller
-            dockerfile: Dockerfile
+            dockerfile: images/controller/Dockerfile
             platforms: linux/amd64,linux/arm64
           # The controller injects the rc-kube of its own version into Linux
           # runtime Pods, so both images carry the same version.
           - component: rc-kube
-            dockerfile: Dockerfile.rc-kube
+            dockerfile: images/rc-kube/Dockerfile
             platforms: linux/amd64,linux/arm64
           - component: runner
-            dockerfile: Dockerfile.runner
+            dockerfile: images/runner/Dockerfile
             platforms: linux/amd64,linux/arm64
           - component: runner-wayland
             dockerfile: images/runner-wayland/Dockerfile

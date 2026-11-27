@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -124,10 +125,15 @@ func TestExecdCommandsSSEBackgroundStatusAndLogs(t *testing.T) {
 	baseURL, client, supervisor, _ := startTestExecdServer(t)
 
 	// 1. Foreground SSE streaming command.
-	resp, err := client.Post(baseURL+"/command", "application/json", strings.NewReader(`{
-		"command": "echo hello-stdout; echo hello-stderr >&2",
-		"envs": {"FOO": "bar"}
-	}`))
+	fgCmd := "echo hello-stdout; echo hello-stderr >&2"
+	bgCmd := "echo line1; echo line2; sleep 30"
+	if runtime.GOOS == "windows" {
+		fgCmd = "echo hello-stdout & echo hello-stderr 1>&2"
+		bgCmd = "echo line1 & echo line2 & ping -n 30 127.0.0.1 >nul"
+	}
+	resp, err := client.Post(baseURL+"/command", "application/json", strings.NewReader(
+		`{"command": "`+fgCmd+`", "envs": {"FOO": "bar"}}`,
+	))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, resp.Header.Get("Content-Type"), "text/event-stream")
@@ -148,10 +154,9 @@ func TestExecdCommandsSSEBackgroundStatusAndLogs(t *testing.T) {
 	assert.Equal(t, "execution_complete", events[len(events)-1]["type"])
 
 	// 2. Background command -> status -> incremental cursor logs -> interrupt.
-	bgResp, err := client.Post(baseURL+"/command", "application/json", strings.NewReader(`{
-		"command": "echo line1; echo line2; sleep 30",
-		"background": true
-	}`))
+	bgResp, err := client.Post(baseURL+"/command", "application/json", strings.NewReader(
+		`{"command": "`+bgCmd+`", "background": true}`,
+	))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, bgResp.StatusCode)
 	var bgID string

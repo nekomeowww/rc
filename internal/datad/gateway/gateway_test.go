@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -208,10 +209,14 @@ func TestGatewayRoutingAuthRotationAndStreaming(t *testing.T) {
 
 	// Streaming ConnectRPC Process.Start through the gateway with rotated token.
 	procClient := processconnect.NewProcessClient(http.DefaultClient, wsBase)
+	shellCmd, shellArgs := "/bin/sh", []string{"-c", "echo streamed-through-gateway"}
+	if runtime.GOOS == "windows" {
+		shellCmd, shellArgs = "cmd.exe", []string{"/C", "echo streamed-through-gateway"}
+	}
 	startReq := connect.NewRequest(&procpb.StartRequest{
 		Process: &procpb.ProcessConfig{
-			Cmd:  "/bin/sh",
-			Args: []string{"-c", "echo streamed-through-gateway"},
+			Cmd:  shellCmd,
+			Args: shellArgs,
 		},
 	})
 	startReq.Header().Set("X-Access-Token", "rotated-token-987654321098765432109876543210")
@@ -224,7 +229,7 @@ func TestGatewayRoutingAuthRotationAndStreaming(t *testing.T) {
 		}
 	}
 	require.NoError(t, stream.Err())
-	assert.Equal(t, "streamed-through-gateway\n", out.String())
+	assert.Contains(t, out.String(), "streamed-through-gateway")
 
 	// Primary execd route through the same gateway with X-EXECD-ACCESS-TOKEN over mTLS.
 	pingResp, err := http.Get(wsBase + "/execd/ping")

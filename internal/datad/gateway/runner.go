@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package main
+package gateway
 
 import (
 	"context"
@@ -25,18 +25,19 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	"github.com/nekomeowww/rc/internal/datad/gateway"
 	"github.com/nekomeowww/rc/internal/datad/pki"
 	"github.com/nekomeowww/rc/pkg/envd"
 	"github.com/nekomeowww/rc/pkg/execd"
 )
 
-func runDataPlaneGateway(args []string) error {
+// Run executes the `manager data-plane-gateway` subcommand.
+func Run(args []string, scheme *runtime.Scheme) error {
 	fs := flag.NewFlagSet("data-plane-gateway", flag.ExitOnError)
 	var listenAddr string
 	var tlsCertFile string
@@ -68,6 +69,7 @@ func runDataPlaneGateway(args []string) error {
 		return err
 	}
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	log := ctrl.Log.WithName("data-plane-gateway")
 
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
@@ -78,7 +80,7 @@ func runDataPlaneGateway(args []string) error {
 		return fmt.Errorf("create Kubernetes client: %w", err)
 	}
 
-	var certProvider gateway.ClientCertProvider
+	var certProvider ClientCertProvider
 	if caFile != "" && clientCertFile != "" && clientKeyFile != "" {
 		certProvider = func(_ context.Context) ([]byte, []byte, []byte, error) {
 			caPEM, err := os.ReadFile(caFile)
@@ -115,12 +117,12 @@ func runDataPlaneGateway(args []string) error {
 		}
 	}
 
-	resolver := &gateway.KubernetesResolver{
+	resolver := &KubernetesResolver{
 		Client:    kubeClient,
 		ExecdPort: int32(execdUpstreamPort),
 		Port:      int32(upstreamPort),
 	}
-	gw := gateway.NewServer(resolver, certProvider)
+	gw := NewServer(resolver, certProvider)
 
 	httpServer := &http.Server{
 		Addr:              listenAddr,
@@ -136,7 +138,7 @@ func runDataPlaneGateway(args []string) error {
 		_ = httpServer.Shutdown(shutdownCtx)
 	}()
 
-	setupLog.Info("Starting Data Plane Gateway", "listen", listenAddr, "upstreamPort", upstreamPort)
+	log.Info("Starting Data Plane Gateway", "listen", listenAddr, "execdPort", execdUpstreamPort, "envdPort", upstreamPort)
 	if tlsCertFile != "" && tlsKeyFile != "" {
 		err = httpServer.ListenAndServeTLS(tlsCertFile, tlsKeyFile)
 	} else {

@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -233,6 +234,9 @@ func TestEnvdFilesRESTAndFilesystemRPC(t *testing.T) {
 }
 
 func TestEnvdProcessRPCAndActivity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX shell utilities (/bin/sh, /bin/cat)")
+	}
 	baseURL, client, supervisor, _ := startTestEnvdServer(t)
 	procClient := processconnect.NewProcessClient(client, baseURL)
 	ctx := context.Background()

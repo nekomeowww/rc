@@ -19,12 +19,10 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
 FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS tool-downloader
 
 ARG TARGETARCH
+# renovate: datasource=github-releases depName=jdx/mise extractVersion=^v(?<version>.*)$
 ARG MISE_VERSION=2026.11.14
-ARG MISE_SHA256_AMD64=fdf945a962cd4a3217f8f6bc8d6bbbbd1c600d0b252cbd05f87652887e020baa
-ARG MISE_SHA256_ARM64=073ce6409e68b875251c9bfc3d697568d8039f8008ee5c78a5fe08ca7e68ad51
+# renovate: datasource=github-releases depName=moonrepo/proto extractVersion=^v(?<version>.*)$
 ARG PROTO_VERSION=0.64.1
-ARG PROTO_SHA256_AMD64=3c1e9d5b5308d398ef14e331b5d03ed809e751553a420164c53278427d0e800c
-ARG PROTO_SHA256_ARM64=37fc55586ecd5ca0208b371668c31b7c23569e90c6b6e16a9632e89c7a52ab49
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
@@ -34,29 +32,33 @@ RUN set -eux; \
     case "${TARGETARCH}" in \
         amd64) \
             mise_arch=x64; \
-            mise_sha256="${MISE_SHA256_AMD64}"; \
-            proto_target=x86_64-unknown-linux-gnu; \
-            proto_sha256="${PROTO_SHA256_AMD64}" \
+            proto_target=x86_64-unknown-linux-gnu \
             ;; \
         arm64) \
             mise_arch=arm64; \
-            mise_sha256="${MISE_SHA256_ARM64}"; \
-            proto_target=aarch64-unknown-linux-gnu; \
-            proto_sha256="${PROTO_SHA256_ARM64}" \
+            proto_target=aarch64-unknown-linux-gnu \
             ;; \
         *) \
             echo "Unsupported target architecture: ${TARGETARCH}" >&2; \
             exit 1 \
             ;; \
     esac; \
+    mise_asset="mise-v${MISE_VERSION}-linux-${mise_arch}.tar.xz"; \
     curl -fsSLo /tmp/mise.tar.xz \
-        "https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/mise-v${MISE_VERSION}-linux-${mise_arch}.tar.xz"; \
+        "https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/${mise_asset}"; \
+    mise_sha256="$(curl -fsSL "https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/SHASUMS256.txt" \
+        | awk -v asset="${mise_asset}" '$2 == asset || $2 == ("./" asset) { print $1; exit }')"; \
+    test -n "${mise_sha256}"; \
     echo "${mise_sha256}  /tmp/mise.tar.xz" | sha256sum --check --strict; \
     mkdir -p /tmp/mise; \
     tar -xJf /tmp/mise.tar.xz -C /tmp/mise --strip-components=2 mise/bin/mise; \
     install -Dm755 /tmp/mise/mise /out/mise; \
+    proto_asset="proto_cli-${proto_target}.tar.xz"; \
     curl -fsSLo /tmp/proto.tar.xz \
-        "https://github.com/moonrepo/proto/releases/download/v${PROTO_VERSION}/proto_cli-${proto_target}.tar.xz"; \
+        "https://github.com/moonrepo/proto/releases/download/v${PROTO_VERSION}/${proto_asset}"; \
+    proto_sha256="$(curl -fsSL "https://github.com/moonrepo/proto/releases/download/v${PROTO_VERSION}/${proto_asset}.sha256" \
+        | awk '{ print $1; exit }')"; \
+    test -n "${proto_sha256}"; \
     echo "${proto_sha256}  /tmp/proto.tar.xz" | sha256sum --check --strict; \
     mkdir -p /tmp/proto; \
     tar -xJf /tmp/proto.tar.xz -C /tmp/proto --strip-components=1; \
@@ -65,7 +67,9 @@ RUN set -eux; \
 
 FROM node:26.13.1-bookworm-slim AS runner
 
+# renovate: datasource=npm depName=corepack
 ARG COREPACK_VERSION=0.36.0
+# renovate: datasource=npm depName=@lobehub/cli
 ARG LOBEHUB_CLI_VERSION=0.0.270
 
 LABEL org.opencontainers.image.source="https://github.com/nekomeowww/rc" \

@@ -58,8 +58,11 @@ CMD ["rc-kube.exe", "serve"]
 
 FROM runner AS codex
 
+# renovate: datasource=npm depName=@openai/codex
 ARG CODEX_VERSION=0.172.0
+# renovate: datasource=npm depName=pnpm
 ARG PNPM_VERSION=12.23.0
+# renovate: datasource=npm depName=bun
 ARG BUN_VERSION=1.4.5
 
 USER ContainerAdministrator

@@ -1,24 +1,45 @@
 param(
     [Parameter(Mandatory=$true)][string]$RCBinaryDirectory,
     [switch]$IncludeCodex,
+    # renovate: datasource=node-version depName=node
     [string]$NodeVersion = '26.13.1',
-    [string]$NodeSHA256 = 'e2edda75bfb089654705cf65a13b58933bfd5f57148e8ebda916f58a2474f1f7',
+    # renovate: datasource=python-version depName=python
     [string]$PythonVersion = '3.14.10',
-    [string]$PythonSHA256 = '92480239264744fe0386a1bd8275786fefa126e3129e56a68e22b52c73329965',
-    [string]$CMakeVersion = '4.5.1',
-    [string]$CMakeSHA256 = '0041a25845bc8c399b42d20f836616cb0b7020a8605348c089563bbc0c023356'
+    # renovate: datasource=github-releases depName=Kitware/CMake extractVersion=^v(?<version>.*)$
+    [string]$CMakeVersion = '4.5.1'
 )
 
 $ErrorActionPreference = 'Stop'
 $downloadDirectory = Join-Path $env:RUNNER_TEMP 'rc-windows-runner-assets'
-$nodeArchive = Join-Path $downloadDirectory "node-v$NodeVersion-win-x64.zip"
+$nodeFile = "node-v$NodeVersion-win-x64.zip"
+$nodeArchive = Join-Path $downloadDirectory $nodeFile
 $nodeDirectory = Join-Path $downloadDirectory "node-v$NodeVersion-win-x64"
-$pythonInstaller = Join-Path $downloadDirectory "python-$PythonVersion-amd64.exe"
-$cmakeInstaller = Join-Path $downloadDirectory "cmake-$CMakeVersion-windows-x86_64.msi"
+$pythonFile = "python-$PythonVersion-amd64.exe"
+$pythonInstaller = Join-Path $downloadDirectory $pythonFile
+$cmakeFile = "cmake-$CMakeVersion-windows-x86_64.msi"
+$cmakeInstaller = Join-Path $downloadDirectory $cmakeFile
 $vsBuildToolsBootstrapper = Join-Path $downloadDirectory 'vs_buildtools.exe'
 $vcRuntimeInstaller = Join-Path $downloadDirectory 'vc_redist.x64.exe'
 
 New-Item -ItemType Directory -Force $downloadDirectory | Out-Null
+function Get-Sha256FromList([string]$uri, [string]$fileName) {
+    $content = (Invoke-WebRequest -Uri $uri -UseBasicParsing).Content
+    foreach ($line in ($content -split "`r?`n")) {
+        if ($line -match "^([0-9a-fA-F]{64})\s+\*?(\./)?$([regex]::Escape($fileName))$") {
+            return $Matches[1].ToUpperInvariant()
+        }
+    }
+    throw "Could not find SHA-256 for $fileName in $uri"
+}
+function Get-PythonSha256FromSpdx([string]$uri) {
+    $spdx = Invoke-RestMethod -Uri $uri
+    $pkg = @($spdx.packages | Where-Object { $_.name -eq 'CPython' })[0]
+    $sum = @($pkg.checksums | Where-Object { $_.algorithm -eq 'SHA256' })[0]
+    if (-not $sum -or $sum.checksumValue -notmatch '^[0-9a-fA-F]{64}$') {
+        throw "Could not find CPython SHA-256 in $uri"
+    }
+    return $sum.checksumValue.ToUpperInvariant()
+}
 function Get-VerifiedAsset($uri, $destination, $sha256) {
     Invoke-WebRequest -Uri $uri -OutFile $destination
     $actual = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
@@ -32,19 +53,22 @@ function Assert-MicrosoftSignedAsset($path) {
         throw "Expected a valid Microsoft signature on ${path}: $($signature.Status)"
     }
 }
+$nodeSha256 = Get-Sha256FromList "https://nodejs.org/dist/v$NodeVersion/SHASUMS256.txt" $nodeFile
 Get-VerifiedAsset `
-    "https://nodejs.org/dist/v$NodeVersion/node-v$NodeVersion-win-x64.zip" `
+    "https://nodejs.org/dist/v$NodeVersion/$nodeFile" `
     $nodeArchive `
-    $NodeSHA256
+    $nodeSha256
 Expand-Archive -LiteralPath $nodeArchive -DestinationPath $downloadDirectory -Force
+$pythonSha256 = Get-PythonSha256FromSpdx "https://www.python.org/ftp/python/$PythonVersion/$pythonFile.spdx.json"
 Get-VerifiedAsset `
-    "https://www.python.org/ftp/python/$PythonVersion/python-$PythonVersion-amd64.exe" `
+    "https://www.python.org/ftp/python/$PythonVersion/$pythonFile" `
     $pythonInstaller `
-    $PythonSHA256
+    $pythonSha256
+$cmakeSha256 = Get-Sha256FromList "https://github.com/Kitware/CMake/releases/download/v$CMakeVersion/cmake-$CMakeVersion-SHA-256.txt" $cmakeFile
 Get-VerifiedAsset `
-    "https://github.com/Kitware/CMake/releases/download/v$CMakeVersion/cmake-$CMakeVersion-windows-x86_64.msi" `
+    "https://github.com/Kitware/CMake/releases/download/v$CMakeVersion/$cmakeFile" `
     $cmakeInstaller `
-    $CMakeSHA256
+    $cmakeSha256
 # Microsoft publishes the VS 2022 bootstrapper only through a mutable official
 # release channel. The requested component set is stable, but its servicing
 # release can advance between builds.

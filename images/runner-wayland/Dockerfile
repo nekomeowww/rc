@@ -14,25 +14,33 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o /o
 
 FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS tool-downloader
 ARG TARGETARCH
+# renovate: datasource=github-releases depName=jdx/mise extractVersion=^v(?<version>.*)$
 ARG MISE_VERSION=2026.11.14
-ARG MISE_SHA256_AMD64=fdf945a962cd4a3217f8f6bc8d6bbbbd1c600d0b252cbd05f87652887e020baa
+# renovate: datasource=github-releases depName=moonrepo/proto extractVersion=^v(?<version>.*)$
 ARG PROTO_VERSION=0.64.1
-ARG PROTO_SHA256_AMD64=3c1e9d5b5308d398ef14e331b5d03ed809e751553a420164c53278427d0e800c
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
     && rm -rf /var/lib/apt/lists/*
 RUN set -eux; \
     test "${TARGETARCH}" = amd64; \
+    mise_asset="mise-v${MISE_VERSION}-linux-x64.tar.xz"; \
     curl -fsSLo /tmp/mise.tar.xz \
-        "https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/mise-v${MISE_VERSION}-linux-x64.tar.xz"; \
-    echo "${MISE_SHA256_AMD64}  /tmp/mise.tar.xz" | sha256sum --check --strict; \
+        "https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/${mise_asset}"; \
+    mise_sha256="$(curl -fsSL "https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/SHASUMS256.txt" \
+        | awk -v asset="${mise_asset}" '$2 == asset || $2 == ("./" asset) { print $1; exit }')"; \
+    test -n "${mise_sha256}"; \
+    echo "${mise_sha256}  /tmp/mise.tar.xz" | sha256sum --check --strict; \
     mkdir -p /tmp/mise; \
     tar -xJf /tmp/mise.tar.xz -C /tmp/mise --strip-components=2 mise/bin/mise; \
     install -Dm755 /tmp/mise/mise /out/mise; \
+    proto_asset="proto_cli-x86_64-unknown-linux-gnu.tar.xz"; \
     curl -fsSLo /tmp/proto.tar.xz \
-        "https://github.com/moonrepo/proto/releases/download/v${PROTO_VERSION}/proto_cli-x86_64-unknown-linux-gnu.tar.xz"; \
-    echo "${PROTO_SHA256_AMD64}  /tmp/proto.tar.xz" | sha256sum --check --strict; \
+        "https://github.com/moonrepo/proto/releases/download/v${PROTO_VERSION}/${proto_asset}"; \
+    proto_sha256="$(curl -fsSL "https://github.com/moonrepo/proto/releases/download/v${PROTO_VERSION}/${proto_asset}.sha256" \
+        | awk '{ print $1; exit }')"; \
+    test -n "${proto_sha256}"; \
+    echo "${proto_sha256}  /tmp/proto.tar.xz" | sha256sum --check --strict; \
     mkdir -p /tmp/proto; \
     tar -xJf /tmp/proto.tar.xz -C /tmp/proto --strip-components=1; \
     install -Dm755 /tmp/proto/proto /out/proto; \
@@ -88,13 +96,14 @@ RUN set -eux; \
 FROM ubuntu:24.04
 
 ARG TARGETARCH
+# renovate: datasource=npm depName=corepack
 ARG COREPACK_VERSION=0.36.0
+# renovate: datasource=npm depName=@lobehub/cli
 ARG LOBEHUB_CLI_VERSION=0.0.270
+# renovate: datasource=github-releases depName=moeru-ai/auv extractVersion=^v(?<version>.*)$
 ARG AUV_VERSION=0.0.43
-ARG AUV_SHA256_AMD64=632281f745f224cc3f468c1ccb35129739ca6cda89f87607aa630b1c30aaab78
+# renovate: datasource=github-releases depName=just-containers/s6-overlay versioning=loose extractVersion=^v(?<version>.*)$
 ARG S6_OVERLAY_VERSION=3.2.3.2
-ARG S6_OVERLAY_NOARCH_SHA256=5379750ed30a84bbd2e2dd74847ba6b5bd29cd0b2e3ea2ec58049b57eb2eda12
-ARG S6_OVERLAY_AMD64_SHA256=e6befcc96a437a3831386ecfc51808c5d3e939dc5fe3c02ae9284599e8aa2408
 
 LABEL org.opencontainers.image.source="https://github.com/nekomeowww/rc" \
       org.opencontainers.image.title="rc Wayland runner"
@@ -185,19 +194,29 @@ RUN apt-get update \
 
 RUN set -eux; \
     test "${TARGETARCH}" = amd64; \
+    auv_asset="auv-x86_64-unknown-linux-gnu.tar.gz"; \
     curl -fsSLo /tmp/auv.tar.gz \
-        "https://github.com/moeru-ai/auv/releases/download/v${AUV_VERSION}/auv-x86_64-unknown-linux-gnu.tar.gz"; \
-    echo "${AUV_SHA256_AMD64}  /tmp/auv.tar.gz" | sha256sum --check --strict; \
+        "https://github.com/moeru-ai/auv/releases/download/v${AUV_VERSION}/${auv_asset}"; \
+    auv_sha256="$(curl -fsSL "https://github.com/moeru-ai/auv/releases/download/v${AUV_VERSION}/${auv_asset}.sha256" \
+        | awk '{ print $1; exit }')"; \
+    test -n "${auv_sha256}"; \
+    echo "${auv_sha256}  /tmp/auv.tar.gz" | sha256sum --check --strict; \
     mkdir -p /opt/auv; \
     tar -xzf /tmp/auv.tar.gz -C /opt/auv; \
     test "$(/opt/auv/auv --version)" = "auv ${AUV_VERSION}"; \
     ln -s /opt/auv/auv /usr/local/bin/auv; \
     curl -fsSLo /tmp/s6-overlay-noarch.tar.xz \
         "https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz"; \
-    echo "${S6_OVERLAY_NOARCH_SHA256}  /tmp/s6-overlay-noarch.tar.xz" | sha256sum --check --strict; \
+    s6_noarch_sha256="$(curl -fsSL "https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz.sha256" \
+        | awk '{ print $1; exit }')"; \
+    test -n "${s6_noarch_sha256}"; \
+    echo "${s6_noarch_sha256}  /tmp/s6-overlay-noarch.tar.xz" | sha256sum --check --strict; \
     curl -fsSLo /tmp/s6-overlay-amd64.tar.xz \
         "https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-x86_64.tar.xz"; \
-    echo "${S6_OVERLAY_AMD64_SHA256}  /tmp/s6-overlay-amd64.tar.xz" | sha256sum --check --strict; \
+    s6_amd64_sha256="$(curl -fsSL "https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-x86_64.tar.xz.sha256" \
+        | awk '{ print $1; exit }')"; \
+    test -n "${s6_amd64_sha256}"; \
+    echo "${s6_amd64_sha256}  /tmp/s6-overlay-amd64.tar.xz" | sha256sum --check --strict; \
     tar -C / -Jxpf /tmp/s6-overlay-noarch.tar.xz; \
     tar -C / -Jxpf /tmp/s6-overlay-amd64.tar.xz; \
     rm -f /tmp/auv.tar.gz /tmp/s6-overlay-noarch.tar.xz /tmp/s6-overlay-amd64.tar.xz

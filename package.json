@@ -1,0 +1,14 @@
+{
+  "name": "@rc-js/root",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test:run": "pnpm --filter \"./test/e2e/dataplane/sdk\" --if-present test:run",
+    "typecheck": "pnpm --filter \"./test/e2e/dataplane/sdk\" --if-present typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:vitest"
+  }
+}

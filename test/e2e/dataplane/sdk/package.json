@@ -1,0 +1,21 @@
+{
+  "name": "@rc-js/dataplane-e2e",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "vitest",
+    "test:run": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@alibaba-group/opensandbox": "catalog:",
+    "e2b": "catalog:",
+    "ws": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@types/ws": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:vitest"
+  }
+}

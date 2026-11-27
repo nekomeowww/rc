@@ -21,6 +21,9 @@ type terminal interface {
 type Options struct {
 	TTY    bool
 	Output io.Writer
+	// Stderr, when non-nil for a non-TTY process, receives standard error
+	// separately from Output (which then receives only standard output).
+	Stderr io.Writer
 }
 
 // Process owns a started command, its input, terminal, and process tree.
@@ -31,6 +34,7 @@ type Process struct {
 	tree       *processTree
 	outputDone <-chan struct{}
 	output     *outputCopy
+	stderr     *outputCopy
 }
 
 // Start launches and claims a complete native process tree. A successful call
@@ -69,16 +73,37 @@ func Start(command *exec.Cmd, options Options) (*Process, error) {
 			return nil, fmt.Errorf("open process output: %w", err)
 		}
 		command.Stdout = writer
-		command.Stderr = writer
+		var stderrReader, stderrWriter *os.File
+		if options.Stderr != nil {
+			stderrReader, stderrWriter, err = os.Pipe()
+			if err != nil {
+				_ = reader.Close()
+				_ = writer.Close()
+				_ = input.Close()
+				return nil, fmt.Errorf("open process stderr: %w", err)
+			}
+			command.Stderr = stderrWriter
+		} else {
+			command.Stderr = writer
+		}
 		err = command.Start()
-		// Only the child keeps the write end, so the pipe ends when it does.
+		// Only the child keeps the write ends, so each pipe ends when it does.
 		_ = writer.Close()
+		if stderrWriter != nil {
+			_ = stderrWriter.Close()
+		}
 		if err != nil {
 			_ = reader.Close()
+			if stderrReader != nil {
+				_ = stderrReader.Close()
+			}
 			_ = input.Close()
 			return nil, err
 		}
 		process.output = startOutputCopy(reader, options.Output)
+		if stderrReader != nil {
+			process.stderr = startOutputCopy(stderrReader, options.Stderr)
+		}
 	}
 
 	tree, err := claimChild(command)
@@ -129,12 +154,14 @@ func (process *Process) Wait() error {
 func (process *Process) ProcessState() *os.ProcessState { return process.command.ProcessState }
 
 // finishOutput waits for the output copy after the child exits. It reports
-// whether WaitDelay closed the pipe before end of file.
+// whether WaitDelay closed any pipe before end of file.
 func (process *Process) finishOutput() bool {
-	if process.output == nil {
-		return false
+	expired := process.output != nil && process.output.wait(process.command.WaitDelay)
+
+	if process.stderr != nil && process.stderr.wait(process.command.WaitDelay) {
+		expired = true
 	}
-	return process.output.wait(process.command.WaitDelay)
+	return expired
 }
 
 func (process *Process) finishIO() {

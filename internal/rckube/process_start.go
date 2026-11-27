@@ -38,7 +38,16 @@ func (attempt *processStart) launchLocked(ctx context.Context, request processru
 	// The start context governs preparation, not the lifetime of a launched
 	// child. Attach disconnects must not kill a supervisor-owned process.
 	process := attempt.process
-	native, err := osprocess.Start(command, osprocess.Options{TTY: request.TTY, Output: processOutput{process: process}})
+	startOptions := osprocess.Options{
+		TTY:    request.TTY,
+		Output: processOutput{process: process, kind: DataPlaneStreamStdout},
+	}
+	if request.TTY {
+		startOptions.Output = processOutput{process: process, kind: DataPlaneStreamPTY}
+	} else if process.isDataPlane {
+		startOptions.Stderr = processOutput{process: process, kind: DataPlaneStreamStderr}
+	}
+	native, err := osprocess.Start(command, startOptions)
 	if err != nil {
 		exitCode := int32(125)
 		if code, known := commandStartFailureExitCode(err); known {

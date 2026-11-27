@@ -1,0 +1,3479 @@
+openapi: 3.1.0
+info:
+  title: OpenSandbox Execd API
+  version: 1.0.0
+  description: |
+    OpenSandbox Execd provides a comprehensive API for managing code execution, file operations,
+    and system monitoring within a sandboxed environment. The API supports multiple programming
+    languages, real-time streaming output via Server-Sent Events (SSE), and complete file system
+    management capabilities.
+
+    ## Key Features
+    - **Code Execution**: Execute code in Python, JavaScript, and other languages with stateful contexts
+    - **Command Execution**: Run shell commands with foreground/background modes
+    - **File Operations**: Complete CRUD operations for files and directories
+    - **Real-time Streaming**: SSE-based output streaming for code and command execution
+    - **System Monitoring**: CPU and memory metrics with real-time watching
+    - **Access Control**: Token-based authentication for all API endpoints
+
+  contact:
+    name: OpenSandbox Team
+    url: https://github.com/opensandbox-group/OpenSandbox
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: http://localhost:44772
+    description: Local development server
+  - url: https://api.opensandbox.example.com
+    description: Production server
+
+security:
+  - AccessToken: []
+
+tags:
+  - name: Health
+    description: Server health check and status monitoring
+  - name: CodeInterpreting
+    description: Code execution and context management
+  - name: Command
+    description: Shell command execution and interruption
+  - name: Filesystem
+    description: File and directory operations
+  - name: FilesystemIdentity
+    description: Linux filesystem operations under an explicit execution identity
+  - name: Metric
+    description: System resource monitoring and metrics
+  - name: IsolatedExecution
+    description: Per-session namespace isolation, code execution, and filesystem proxy
+
+paths:
+  /ping:
+    get:
+      summary: Health check endpoint
+      description: |
+        Performs a simple health check to verify that the server is running and responsive.
+        Returns HTTP 200 OK status if the server is healthy. This endpoint is typically used
+        by load balancers, monitoring systems, and orchestration platforms (like Kubernetes)
+        to check service availability.
+      operationId: ping
+      tags:
+        - Health
+      responses:
+        "200":
+          description: Server is alive and healthy
+
+  /code/contexts:
+    get:
+      summary: List active code execution contexts
+      description: |
+        Lists all active/available code execution contexts.
+        If `language` is provided, only contexts under that language/runtime are returned.
+      operationId: listContexts
+      tags:
+        - CodeInterpreting
+      parameters:
+        - name: language
+          in: query
+          required: true
+          description: Filter contexts by execution runtime (python, bash, java, etc.)
+          schema:
+            type: string
+          example: python
+      responses:
+        "200":
+          description: Array of active contexts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CodeContext"
+              examples:
+                python_only:
+                  summary: Context list filtered by language
+                  value:
+                    - id: session-abc123
+                      language: python
+                    - id: session-def456
+                      language: python
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    delete:
+      summary: Delete all contexts under a language
+      description: |
+        Deletes all existing code execution contexts under the specified `language`/runtime.
+        This is a bulk operation intended for code-interpreter context cleanup.
+      operationId: deleteContextsByLanguage
+      tags:
+        - CodeInterpreting
+      parameters:
+        - name: language
+          in: query
+          required: true
+          description: Target execution runtime whose contexts should be deleted
+          schema:
+            type: string
+          example: python
+      responses:
+        "200":
+          description: Contexts deleted successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /code/contexts/{context_id}:
+    get:
+      summary: Get a code execution context by id
+      description: |
+        Retrieves the details of an existing code execution context (session) by id.
+        Returns the context ID, language, and any associated metadata.
+      operationId: getContext
+      tags:
+        - CodeInterpreting
+      parameters:
+        - name: context_id
+          in: path
+          required: true
+          description: Session/context id to get
+          schema:
+            type: string
+          example: session-abc123
+      responses:
+        "200":
+          description: Context details retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodeContext"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    delete:
+      summary: Delete a code execution context by id
+      description: |
+        Deletes an existing code execution context (session) by id.
+        This should terminate the underlying context thread/process and release resources.
+      operationId: deleteContext
+      tags:
+        - CodeInterpreting
+      parameters:
+        - name: context_id
+          in: path
+          required: true
+          description: Session/context id to delete
+          schema:
+            type: string
+          example: session-abc123
+      responses:
+        "200":
+          description: Context deleted successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /code/context:
+    post:
+      summary: Create code execution context
+      description: |
+        Creates a new code execution environment and returns a session ID that can be used
+        for subsequent code execution requests. The context maintains state across multiple
+        code executions within the same session.
+      operationId: createCodeContext
+      tags:
+        - CodeInterpreting
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CodeContextRequest"
+            examples:
+              python:
+                summary: Create Python context
+                value:
+                  language: python
+              bash:
+                summary: Create Bash context
+                value:
+                  language: bash
+      responses:
+        "200":
+          description: Successfully created context with session ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodeContext"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /code:
+    post:
+      summary: Execute code in context
+      description: |
+        Executes code using Jupyter kernel in a specified execution context and streams
+        the output in real-time using SSE (Server-Sent Events). Supports multiple programming
+        languages (Python, JavaScript, etc.) and maintains execution state within the session.
+        Returns execution results, output streams, execution count, and any errors.
+      operationId: runCode
+      tags:
+        - CodeInterpreting
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunCodeRequest"
+            examples:
+              python:
+                summary: Execute Python code
+                value:
+                  context:
+                    id: session-123
+                    language: python
+                  code: |
+                    print("Hello, World!")
+                    result = 2 + 2
+                    result
+              stateless:
+                summary: Stateless execution
+                value:
+                  code: echo "Hello from shell"
+      responses:
+        "200":
+          description: Stream of code execution events
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/ServerStreamEvent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    delete:
+      summary: Interrupt code execution
+      description: |
+        Interrupts the currently running code execution in the specified context.
+        This sends a signal to terminate the execution process and releases associated resources.
+      operationId: interruptCode
+      tags:
+        - CodeInterpreting
+      parameters:
+        - name: id
+          in: query
+          required: true
+          description: |
+            Execution session ID of the running code execution to interrupt
+            (the `init` event's id for the current run). Passing an unknown
+            id fails loudly with a 500 "no such session" error; it is not
+            silently ignored.
+          schema:
+            type: string
+          example: exec-123
+      responses:
+        "200":
+          description: Code execution successfully interrupted
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /session:
+    post:
+      summary: Create bash session (create_session)
+      description: |
+        Creates a new bash session and returns a session ID for subsequent run_in_session requests.
+        The session maintains shell state (e.g. working directory, environment) across multiple
+        code executions. Request body is optional; an empty body uses default options (no cwd override).
+      operationId: createSession
+      tags:
+        - Command
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSessionRequest"
+            examples:
+              default:
+                summary: Default (empty body allowed)
+                value: {}
+              with_cwd:
+                summary: With working directory
+                value:
+                  cwd: /workspace
+      responses:
+        "200":
+          description: Session created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateSessionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /session/{sessionId}/run:
+    post:
+      summary: Run command in bash session (run_in_session)
+      description: |
+        Executes a shell command in an existing bash session and streams the output in real-time via SSE
+        (Server-Sent Events). The session must have been created by create_session. Supports
+        optional working directory override and timeout (milliseconds).
+        The run streams a single merged `stdout` event stream (session stderr is merged into it).
+        Stdout event text preserves the original line endings (`\n`, `\r`, or `\r\n`). Concatenate
+        text from the stdout events to recover the run's output; blank lines appear as events
+        containing only the line ending, and the final event may be an unterminated fragment.
+        A line longer than 16 MiB is split across several events, and only the last of them
+        ends with the line ending.
+      operationId: runInSession
+      tags:
+        - Command
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          description: Session ID returned by create_session
+          schema:
+            type: string
+          example: session-abc123
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunInSessionRequest"
+            examples:
+              simple:
+                summary: Run shell command
+                value:
+                  command: echo "Hello from session"
+              with_options:
+                summary: With cwd and timeout
+                value:
+                  command: ls -la
+                  cwd: /workspace
+                  timeout: 30000
+      responses:
+        "200":
+          description: Stream of execution events
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/ServerStreamEvent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /session/{sessionId}:
+    delete:
+      summary: Delete bash session (delete_session)
+      description: |
+        Deletes an existing bash session by ID. Terminates the underlying shell process
+        and releases resources. The session ID must have been returned by create_session.
+      operationId: deleteSession
+      tags:
+        - Command
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          description: Session ID to delete
+          schema:
+            type: string
+          example: session-abc123
+      responses:
+        "200":
+          description: Session deleted successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /command:
+    post:
+      summary: Execute shell command or native argv
+      description: |
+        Executes shell text (`command`) or native arguments (`argv`) and streams output using SSE; supply exactly one input mode.
+        The command can run in foreground or background mode. The response includes stdout, stderr,
+        execution status, and completion events.
+        In foreground mode, stdout and stderr event text preserves the original line endings
+        (`\n`, `\r`, or `\r\n`). Concatenate text from each stream's events to recover its output;
+        the final event may contain an unterminated fragment.
+        A line longer than 16 MiB is split across several events, and only the last of them
+        ends with the line ending.
+        Optionally specify `timeout` (milliseconds) to enforce a maximum runtime; the server will
+        terminate the process when the timeout is reached. You can also pass `uid`/`gid` to run
+        with specific user/group IDs, and `envs` to inject environment variables.
+      operationId: runCommand
+      tags:
+        - Command
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunCommandRequest"
+            examples:
+              foreground:
+                summary: Foreground command
+                value:
+                  command: ls -la /workspace
+                  cwd: /workspace
+                  background: false
+                  timeout: 30000
+                  uid: 1000
+                  gid: 1000
+                  envs:
+                    PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+                    PYTHONUNBUFFERED: "1"
+              background:
+                summary: Background command
+                value:
+                  command: python server.py
+                  cwd: /app
+                  background: true
+                  timeout: 120000
+                  uid: 1000
+                  envs:
+                    APP_ENV: production
+                    LOG_LEVEL: info
+      responses:
+        "200":
+          description: Stream of command execution events
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/ServerStreamEvent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    delete:
+      summary: Interrupt command execution
+      description: |
+        Interrupts the currently running command execution in the specified context.
+        This sends a signal to terminate the execution process and releases associated resources.
+      operationId: interruptCommand
+      tags:
+        - Command
+      parameters:
+        - name: id
+          in: query
+          required: true
+          description: Session ID of the execution context to interrupt
+          schema:
+            type: string
+          example: session-456
+      responses:
+        "200":
+          description: Command execution successfully interrupted
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /command/status/{id}:
+    get:
+      summary: Get command running status
+      description: |
+        Returns the current status of a command (foreground or background) by command ID.
+        Includes running flag, exit code, error (if any), and start/finish timestamps.
+        Completed command metadata is retained for at least 24 hours and then removed
+        by an hourly cleanup. Running commands are never removed by retention cleanup.
+      operationId: getCommandStatus
+      tags:
+        - Command
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Command ID returned by RunCommand
+          schema:
+            type: string
+          example: cmd-abc123
+      responses:
+        "200":
+          description: Command status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandStatusResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /command/{id}/logs:
+    get:
+      summary: Get background command stdout/stderr (non-streamed)
+      description: |
+        Returns stdout and stderr for a background (detached) command by command ID.
+        Foreground commands should be consumed via SSE; this endpoint is intended for
+        polling logs of background commands. Supports incremental reads similar to a file seek:
+        pass a byte offset via the `cursor` query parameter to fetch output after that position
+        and receive the offset after the returned bytes via the `EXECD-COMMANDS-TAIL-CURSOR`
+        response header for the next poll. When no cursor is provided, the log is returned from the start.
+        At most 16 MiB are returned per request; use the returned cursor to fetch the remainder.
+        Response body is plain text so it can be rendered directly in browsers.
+        Completed background command output is retained for at least 24 hours and then
+        removed by an hourly cleanup. Running command output is never removed by retention cleanup.
+      operationId: getBackgroundCommandLogs
+      tags:
+        - Command
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Command ID returned by RunCommand
+          schema:
+            type: string
+          example: cmd-abc123
+        - name: cursor
+          in: query
+          required: false
+          description: |
+            Optional byte offset into the combined stdout/stderr output (behaves like a
+            file seek). When provided, only bytes after this offset are returned. The
+            response includes the offset after the returned bytes
+            (`EXECD-COMMANDS-TAIL-CURSOR`) so the client can request incremental output
+            on subsequent calls. At most 16 MiB are returned per request. If omitted,
+            the log is returned from the start.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+          example: 120
+      responses:
+        "200":
+          description: Command output (plain text) and status metadata via headers
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                line1
+                line2
+                warn: something on stderr
+          headers:
+            EXECD-COMMANDS-TAIL-CURSOR:
+              description: Byte offset immediately after the bytes returned in this response; pass it as the next request's cursor to continue reading from there
+              schema:
+                type: integer
+                format: int64
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /files/info:
+    get:
+      summary: Get file metadata
+      description: |
+        Retrieves detailed metadata for one or multiple files including permissions, owner,
+        group, size, and modification time. Returns a map of file paths to their corresponding
+        FileInfo objects.
+      operationId: getFilesInfo
+      tags:
+        - Filesystem
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: File path(s) to get info for (can be specified multiple times)
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+          examples:
+            single:
+              summary: Single file
+              value: ["/workspace/file.txt"]
+            multiple:
+              summary: Multiple files
+              value: ["/workspace/file1.txt", "/workspace/file2.py"]
+      responses:
+        "200":
+          description: Map of file paths to FileInfo objects
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  $ref: "#/components/schemas/FileInfo"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /files:
+    delete:
+      summary: Delete files
+      description: |
+        Deletes one or multiple files from the sandbox. Only removes files, not directories.
+        Use RemoveDirs for directory removal.
+      operationId: removeFiles
+      tags:
+        - Filesystem
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: File path(s) to delete (can be specified multiple times)
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+          example: ["/workspace/temp.txt"]
+      responses:
+        "200":
+          description: Files deleted successfully
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /files/permissions:
+    post:
+      summary: Change file permissions
+      description: |
+        Changes permissions (mode), owner, and group for one or multiple files.
+        Accepts a map of file paths to permission settings including octal mode,
+        owner username, and group name.
+      operationId: chmodFiles
+      tags:
+        - Filesystem
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                $ref: "#/components/schemas/Permission"
+            example:
+              "/workspace/script.sh":
+                owner: admin
+                group: admin
+                mode: 755
+              "/workspace/config.json":
+                owner: admin
+                group: admin
+                mode: 755
+      responses:
+        "200":
+          description: Permissions changed successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /files/mv:
+    post:
+      summary: Rename or move files
+      description: |
+        Renames or moves one or multiple files to new paths. Can be used for both
+        renaming within the same directory and moving to different directories.
+        Target directory must exist.
+      operationId: renameFiles
+      tags:
+        - Filesystem
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/RenameFileItem"
+            example:
+              - src: /workspace/old_name.txt
+                dest: /workspace/new_name.txt
+              - src: /workspace/file.py
+                dest: /archive/file.py
+      responses:
+        "200":
+          description: Files renamed/moved successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /files/search:
+    get:
+      summary: Search for files
+      description: |
+        Searches for files matching a glob pattern within a specified directory and
+        its subdirectories. Returns file metadata including path, permissions, owner,
+        and group. Supports glob patterns like **, *.txt, etc. Default pattern is ** (all files).
+      operationId: searchFiles
+      tags:
+        - Filesystem
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: Root directory path to search in
+          schema:
+            type: string
+        - name: pattern
+          in: query
+          required: false
+          description: Glob pattern to match files (default is **)
+          schema:
+            type: string
+            default: "**"
+      responses:
+        "200":
+          description: Array of matching files with metadata
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FileInfo"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /files/replace:
+    post:
+      summary: Replace file content
+      description: |
+        Performs text replacement in one or multiple files. Replaces all occurrences
+        of the old string with the new string (similar to strings.ReplaceAll).
+        Preserves file permissions. Useful for batch text substitution across files.
+
+        When `verbose=true` is set, the response includes per-file replacement counts.
+        Without this parameter, the response body is empty (backward-compatible behavior).
+      operationId: replaceContent
+      tags:
+        - Filesystem
+      parameters:
+        - name: verbose
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: When true, return per-file replacement counts in the response body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                $ref: "#/components/schemas/ReplaceFileContentItem"
+            example:
+              "/workspace/config.yaml":
+                old: "localhost:8080"
+                new: "0.0.0.0:9090"
+              "/workspace/app.py":
+                old: "DEBUG = True"
+                new: "DEBUG = False"
+      responses:
+        "200":
+          description: |
+            Content replaced successfully. When `verbose=true`, returns per-file
+            replacement counts. Otherwise, the response body is empty.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  $ref: "#/components/schemas/ReplaceFileContentResult"
+              example:
+                "/workspace/config.yaml":
+                  replacedCount: 1
+                "/workspace/app.py":
+                  replacedCount: 0
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /files/upload:
+    post:
+      summary: Upload files to sandbox
+      description: |
+        Uploads one or multiple files to specified paths within the sandbox.
+        Reads metadata and file content from multipart form parts in sequence.
+        Each file upload consists of two parts: a metadata part (JSON) followed
+        by the actual file part.
+      operationId: uploadFile
+      tags:
+        - Filesystem
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                metadata:
+                  type: string
+                  description: JSON-encoded file metadata (FileMetadata object)
+                  example: '{"path":"/workspace/file.txt","owner":"admin","group":"admin","mode":755}'
+                file:
+                  type: string
+                  format: binary
+                  description: File to upload
+            encoding:
+              metadata:
+                contentType: application/json
+              file:
+                contentType: application/octet-stream
+      responses:
+        "200":
+          description: Files uploaded successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /files/download:
+    get:
+      summary: Download file from sandbox
+      description: |
+        Downloads a file from the specified path within the sandbox. Supports HTTP
+        range requests for resumable downloads and partial content retrieval.
+        Returns file as octet-stream with appropriate headers.
+
+        When offset/limit query parameters are provided, the endpoint performs
+        line-based reading and returns text/plain content instead. Line-based
+        parameters are mutually exclusive with the Range header.
+      operationId: downloadFile
+      tags:
+        - Filesystem
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: Absolute or relative path of the file to download
+          schema:
+            type: string
+          example: /workspace/data.csv
+        - name: offset
+          in: query
+          required: false
+          description: >
+            Starting line number (1-based) for line-based reading.
+            Mutually exclusive with the Range header.
+          schema:
+            type: integer
+            minimum: 1
+          example: 100
+        - name: limit
+          in: query
+          required: false
+          description: >
+            Number of lines to return for line-based reading.
+            Mutually exclusive with the Range header.
+          schema:
+            type: integer
+            minimum: 1
+          example: 20
+        - name: Range
+          in: header
+          required: false
+          description: HTTP Range header for partial content requests. Mutually exclusive with offset/limit.
+          schema:
+            type: string
+          example: "bytes=0-1023"
+      responses:
+        "200":
+          description: |
+            File content. Returns application/octet-stream for full or byte-range
+            downloads, or text/plain for line-based reads (when offset/limit are provided).
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+            text/plain:
+              schema:
+                type: string
+                description: Line-based content returned when offset/limit parameters are used
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              description: Attachment header with filename (byte-range mode only)
+            Content-Length:
+              schema:
+                type: integer
+              description: File size in bytes (byte-range mode only)
+        "206":
+          description: Partial file content (when Range header is provided)
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+          headers:
+            Content-Range:
+              schema:
+                type: string
+              description: Range of bytes being returned
+            Content-Length:
+              schema:
+                type: integer
+              description: Length of the returned range
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "416":
+          description: Requested range not satisfiable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /directories/list:
+    get:
+      summary: List directory contents
+      description: |
+        Lists entries under a directory with optional depth control. By default,
+        only immediate children are returned (`depth=1`). Set `depth` to a larger
+        value to include descendants up to that many levels below `path`. The
+        root directory itself is not included in the response.
+
+        Symbolic links are reported with `type=symlink` and are not traversed:
+        the listing never descends into a link target, even when `depth` would
+        otherwise allow it. For the same reason, when `path` itself resolves to
+        a symbolic link the request is rejected with `400`; callers must pass
+        the real directory path they want listed.
+
+        Entries are returned in lexical order by entry name within each
+        directory. Descendants reported via `depth>1` follow their parent in
+        the same lexical order, so a depth-2 listing yields stable, predictable
+        output for file-browser style clients.
+      operationId: listDirectory
+      tags:
+        - Filesystem
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: Directory path to list
+          schema:
+            type: string
+          example: /workspace/project
+        - name: depth
+          in: query
+          required: false
+          description: Maximum child depth to include. `1` lists immediate children only.
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            default: 1
+          example: 2
+      responses:
+        "200":
+          description: Array of directory entries with metadata
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FileInfo"
+              example:
+                - path: /workspace/project/src
+                  type: directory
+                  size: 0
+                  modified_at: 2025-11-16T14:30:45Z
+                  created_at: 2025-11-16T14:30:45Z
+                  owner: admin
+                  group: admin
+                  mode: 755
+                - path: /workspace/project/README.md
+                  type: file
+                  size: 2048
+                  modified_at: 2025-11-16T14:30:45Z
+                  created_at: 2025-11-16T14:30:45Z
+                  owner: admin
+                  group: admin
+                  mode: 644
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /directories:
+    post:
+      summary: Create directories
+      description: |
+        Creates one or multiple directories with specified permissions. Creates parent
+        directories as needed (similar to mkdir -p). Accepts a map of directory paths
+        to permission objects.
+      operationId: makeDirs
+      tags:
+        - Filesystem
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                $ref: "#/components/schemas/Permission"
+            example:
+              "/workspace/project":
+                owner: admin
+                group: admin
+                mode: 755
+              "/workspace/logs":
+                owner: admin
+                group: admin
+                mode: 755
+      responses:
+        "200":
+          description: Directories created successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    delete:
+      summary: Delete directories
+      description: |
+        Recursively deletes one or multiple directories and all their contents.
+        Similar to rm -rf. Use with caution as this operation cannot be undone.
+      operationId: removeDirs
+      tags:
+        - Filesystem
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: Directory path(s) to delete (can be specified multiple times)
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+          example: ["/workspace/temp"]
+      responses:
+        "200":
+          description: Directories deleted successfully
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /v1/filesystem/{uid}/{gid}/files/info:
+    description: |
+      Runs this filesystem operation in a separate process as the selected UID/GID.
+      Supplementary groups are resolved from the selected system account; an unknown
+      UID receives no supplementary groups. Lookup and credential setup errors fail
+      closed. Target owner/group/mode metadata never changes the execution identity.
+      Keep API credentials in a trusted backend that selects identities. Unsupported
+      servers return an unknown route; callers must not retry an unprefixed route.
+    parameters:
+      - $ref: '#/components/parameters/FilesystemUid'
+      - $ref: '#/components/parameters/FilesystemGid'
+    get:
+      summary: Get file metadata
+      description: |
+        Retrieves detailed metadata for one or multiple files including permissions, owner,
+        group, size, and modification time. Returns a map of file paths to their corresponding
+        FileInfo objects.
+      operationId: identityGetFilesInfo
+      tags:
+        - FilesystemIdentity
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: File path(s) to get info for (can be specified multiple times)
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+          examples:
+            single:
+              summary: Single file
+              value: ["/workspace/file.txt"]
+            multiple:
+              summary: Multiple files
+              value: ["/workspace/file1.txt", "/workspace/file2.py"]
+      responses:
+        "501":
+          description: Filesystem execution identity requires Linux.
+        "503":
+          description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
+        "200":
+          description: Map of file paths to FileInfo objects
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  $ref: "#/components/schemas/FileInfo"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /v1/filesystem/{uid}/{gid}/files:
+    description: |
+      Runs this filesystem operation in a separate process as the selected UID/GID.
+      Supplementary groups are resolved from the selected system account; an unknown
+      UID receives no supplementary groups. Lookup and credential setup errors fail
+      closed. Target owner/group/mode metadata never changes the execution identity.
+      Keep API credentials in a trusted backend that selects identities. Unsupported
+      servers return an unknown route; callers must not retry an unprefixed route.
+    parameters:
+      - $ref: '#/components/parameters/FilesystemUid'
+      - $ref: '#/components/parameters/FilesystemGid'
+    delete:
+      summary: Delete files
+      description: |
+        Deletes one or multiple files from the sandbox. Only removes files, not directories.
+        Use RemoveDirs for directory removal.
+      operationId: identityRemoveFiles
+      tags:
+        - FilesystemIdentity
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: File path(s) to delete (can be specified multiple times)
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+          example: ["/workspace/temp.txt"]
+      responses:
+        "501":
+          description: Filesystem execution identity requires Linux.
+        "503":
+          description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
+        "200":
+          description: Files deleted successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /v1/filesystem/{uid}/{gid}/files/permissions:
+    description: |
+      Runs this filesystem operation in a separate process as the selected UID/GID.
+      Supplementary groups are resolved from the selected system account; an unknown
+      UID receives no supplementary groups. Lookup and credential setup errors fail
+      closed. Target owner/group/mode metadata never changes the execution identity.
+      Keep API credentials in a trusted backend that selects identities. Unsupported
+      servers return an unknown route; callers must not retry an unprefixed route.
+    parameters:
+      - $ref: '#/components/parameters/FilesystemUid'
+      - $ref: '#/components/parameters/FilesystemGid'
+    post:
+      summary: Change file permissions
+      description: |
+        Changes permissions (mode), owner, and group for one or multiple files.
+        Accepts a map of file paths to permission settings including octal mode,
+        owner username, and group name.
+      operationId: identityChmodFiles
+      tags:
+        - FilesystemIdentity
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                $ref: "#/components/schemas/Permission"
+            example:
+              "/workspace/script.sh":
+                owner: admin
+                group: admin
+                mode: 755
+              "/workspace/config.json":
+                owner: admin
+                group: admin
+                mode: 755
+      responses:
+        "501":
+          description: Filesystem execution identity requires Linux.
+        "503":
+          description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
+        "200":
+          description: Permissions changed successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /v1/filesystem/{uid}/{gid}/files/mv:
+    description: |
+      Runs this filesystem operation in a separate process as the selected UID/GID.
+      Supplementary groups are resolved from the selected system account; an unknown
+      UID receives no supplementary groups. Lookup and credential setup errors fail
+      closed. Target owner/group/mode metadata never changes the execution identity.
+      Keep API credentials in a trusted backend that selects identities. Unsupported
+      servers return an unknown route; callers must not retry an unprefixed route.
+    parameters:
+      - $ref: '#/components/parameters/FilesystemUid'
+      - $ref: '#/components/parameters/FilesystemGid'
+    post:
+      summary: Rename or move files
+      description: |
+        Renames or moves one or multiple files to new paths. Can be used for both
+        renaming within the same directory and moving to different directories.
+        Target directory must exist.
+      operationId: identityRenameFiles
+      tags:
+        - FilesystemIdentity
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/RenameFileItem"
+            example:
+              - src: /workspace/old_name.txt
+                dest: /workspace/new_name.txt
+              - src: /workspace/file.py
+                dest: /archive/file.py
+      responses:
+        "501":
+          description: Filesystem execution identity requires Linux.
+        "503":
+          description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
+        "200":
+          description: Files renamed/moved successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /v1/filesystem/{uid}/{gid}/files/search:
+    description: |
+      Runs this filesystem operation in a separate process as the selected UID/GID.
+      Supplementary groups are resolved from the selected system account; an unknown
+      UID receives no supplementary groups. Lookup and credential setup errors fail
+      closed. Target owner/group/mode metadata never changes the execution identity.
+      Keep API credentials in a trusted backend that selects identities. Unsupported
+      servers return an unknown route; callers must not retry an unprefixed route.
+    parameters:
+      - $ref: '#/components/parameters/FilesystemUid'
+      - $ref: '#/components/parameters/FilesystemGid'
+    get:
+      summary: Search for files
+      description: |
+        Searches for files matching a glob pattern within a specified directory and
+        its subdirectories. Returns file metadata including path, permissions, owner,
+        and group. Supports glob patterns like **, *.txt, etc. Default pattern is ** (all files).
+      operationId: identitySearchFiles
+      tags:
+        - FilesystemIdentity
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: Root directory path to search in
+          schema:
+            type: string
+        - name: pattern
+          in: query
+          required: false
+          description: Glob pattern to match files (default is **)
+          schema:
+            type: string
+            default: "**"
+      responses:
+        "501":
+          description: Filesystem execution identity requires Linux.
+        "503":
+          description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
+        "200":
+          description: Array of matching files with metadata
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FileInfo"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /v1/filesystem/{uid}/{gid}/files/replace:
+    description: |
+      Runs this filesystem operation in a separate process as the selected UID/GID.
+      Supplementary groups are resolved from the selected system account; an unknown
+      UID receives no supplementary groups. Lookup and credential setup errors fail
+      closed. Target owner/group/mode metadata never changes the execution identity.
+      Keep API credentials in a trusted backend that selects identities. Unsupported
+      servers return an unknown route; callers must not retry an unprefixed route.
+    parameters:
+      - $ref: '#/components/parameters/FilesystemUid'
+      - $ref: '#/components/parameters/FilesystemGid'
+    post:
+      summary: Replace file content
+      description: |
+        Performs text replacement in one or multiple files. Replaces all occurrences
+        of the old string with the new string (similar to strings.ReplaceAll).
+        Preserves file permissions. Useful for batch text substitution across files.
+
+        When `verbose=true` is set, the response includes per-file replacement counts.
+        Without this parameter, the response body is empty (backward-compatible behavior).
+      operationId: identityReplaceContent
+      tags:
+        - FilesystemIdentity
+      parameters:
+        - name: verbose
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: When true, return per-file replacement counts in the response body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                $ref: "#/components/schemas/ReplaceFileContentItem"
+            example:
+              "/workspace/config.yaml":
+                old: "localhost:8080"
+                new: "0.0.0.0:9090"
+              "/workspace/app.py":
+                old: "DEBUG = True"
+                new: "DEBUG = False"
+      responses:
+        "501":
+          description: Filesystem execution identity requires Linux.
+        "503":
+          description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
+        "200":
+          description: |
+            Content replaced successfully. When `verbose=true`, returns per-file
+            replacement counts. Otherwise, the response body is empty.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  $ref: "#/components/schemas/ReplaceFileContentResult"
+              example:
+                "/workspace/config.yaml":
+                  replacedCount: 1
+                "/workspace/app.py":
+                  replacedCount: 0
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /v1/filesystem/{uid}/{gid}/files/upload:
+    description: |
+      Runs this filesystem operation in a separate process as the selected UID/GID.
+      Supplementary groups are resolved from the selected system account; an unknown
+      UID receives no supplementary groups. Lookup and credential setup errors fail
+      closed. Target owner/group/mode metadata never changes the execution identity.
+      Keep API credentials in a trusted backend that selects identities. Unsupported
+      servers return an unknown route; callers must not retry an unprefixed route.
+    parameters:
+      - $ref: '#/components/parameters/FilesystemUid'
+      - $ref: '#/components/parameters/FilesystemGid'
+    post:
+      summary: Upload files to sandbox
+      description: |
+        Uploads one or multiple files to specified paths within the sandbox.
+        Reads metadata and file content from multipart form parts in sequence.
+        Each file upload consists of two parts: a metadata part (JSON) followed
+        by the actual file part.
+      operationId: identityUploadFile
+      tags:
+        - FilesystemIdentity
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                metadata:
+                  type: string
+                  description: JSON-encoded file metadata (FileMetadata object)
+                  example: '{"path":"/workspace/file.txt","owner":"admin","group":"admin","mode":755}'
+                file:
+                  type: string
+                  format: binary
+                  description: File to upload
+            encoding:
+              metadata:
+                contentType: application/json
+              file:
+                contentType: application/octet-stream
+      responses:
+        "501":
+          description: Filesystem execution identity requires Linux.
+        "503":
+          description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
+        "200":
+          description: Files uploaded successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /v1/filesystem/{uid}/{gid}/files/download:
+    description: |
+      Runs this filesystem operation in a separate process as the selected UID/GID.
+      Supplementary groups are resolved from the selected system account; an unknown
+      UID receives no supplementary groups. Lookup and credential setup errors fail
+      closed. Target owner/group/mode metadata never changes the execution identity.
+      Keep API credentials in a trusted backend that selects identities. Unsupported
+      servers return an unknown route; callers must not retry an unprefixed route.
+    parameters:
+      - $ref: '#/components/parameters/FilesystemUid'
+      - $ref: '#/components/parameters/FilesystemGid'
+    get:
+      summary: Download file from sandbox
+      description: |
+        Downloads a file from the specified path within the sandbox. Supports HTTP
+        range requests for resumable downloads and partial content retrieval.
+        Returns file as octet-stream with appropriate headers.
+
+        When offset/limit query parameters are provided, the endpoint performs
+        line-based reading and returns text/plain content instead. Line-based
+        parameters are mutually exclusive with the Range header.
+      operationId: identityDownloadFile
+      tags:
+        - FilesystemIdentity
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: Absolute or relative path of the file to download
+          schema:
+            type: string
+          example: /workspace/data.csv
+        - name: offset
+          in: query
+          required: false
+          description: >
+            Starting line number (1-based) for line-based reading.
+            Mutually exclusive with the Range header.
+          schema:
+            type: integer
+            minimum: 1
+          example: 100
+        - name: limit
+          in: query
+          required: false
+          description: >
+            Number of lines to return for line-based reading.
+            Mutually exclusive with the Range header.
+          schema:
+            type: integer
+            minimum: 1
+          example: 20
+        - name: Range
+          in: header
+          required: false
+          description: HTTP Range header for partial content requests. Mutually exclusive with offset/limit.
+          schema:
+            type: string
+          example: "bytes=0-1023"
+      responses:
+        "501":
+          description: Filesystem execution identity requires Linux.
+        "503":
+          description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
+        "200":
+          description: |
+            File content. Returns application/octet-stream for full or byte-range
+            downloads, or text/plain for line-based reads (when offset/limit are provided).
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+            text/plain:
+              schema:
+                type: string
+                description: Line-based content returned when offset/limit parameters are used
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              description: Attachment header with filename (byte-range mode only)
+            Content-Length:
+              schema:
+                type: integer
+              description: File size in bytes (byte-range mode only)
+        "206":
+          description: Partial file content (when Range header is provided)
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+          headers:
+            Content-Range:
+              schema:
+                type: string
+              description: Range of bytes being returned
+            Content-Length:
+              schema:
+                type: integer
+              description: Length of the returned range
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "416":
+          description: Requested range not satisfiable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /v1/filesystem/{uid}/{gid}/directories/list:
+    description: |
+      Runs this filesystem operation in a separate process as the selected UID/GID.
+      Supplementary groups are resolved from the selected system account; an unknown
+      UID receives no supplementary groups. Lookup and credential setup errors fail
+      closed. Target owner/group/mode metadata never changes the execution identity.
+      Keep API credentials in a trusted backend that selects identities. Unsupported
+      servers return an unknown route; callers must not retry an unprefixed route.
+    parameters:
+      - $ref: '#/components/parameters/FilesystemUid'
+      - $ref: '#/components/parameters/FilesystemGid'
+    get:
+      summary: List directory contents
+      description: |
+        Lists entries under a directory with optional depth control. By default,
+        only immediate children are returned (`depth=1`). Set `depth` to a larger
+        value to include descendants up to that many levels below `path`. The
+        root directory itself is not included in the response.
+
+        Symbolic links are reported with `type=symlink` and are not traversed:
+        the listing never descends into a link target, even when `depth` would
+        otherwise allow it. For the same reason, when `path` itself resolves to
+        a symbolic link the request is rejected with `400`; callers must pass
+        the real directory path they want listed.
+
+        Entries are returned in lexical order by entry name within each
+        directory. Descendants reported via `depth>1` follow their parent in
+        the same lexical order, so a depth-2 listing yields stable, predictable
+        output for file-browser style clients.
+      operationId: identityListDirectory
+      tags:
+        - FilesystemIdentity
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: Directory path to list
+          schema:
+            type: string
+          example: /workspace/project
+        - name: depth
+          in: query
+          required: false
+          description: Maximum child depth to include. `1` lists immediate children only.
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            default: 1
+          example: 2
+      responses:
+        "501":
+          description: Filesystem execution identity requires Linux.
+        "503":
+          description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
+        "200":
+          description: Array of directory entries with metadata
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FileInfo"
+              example:
+                - path: /workspace/project/src
+                  type: directory
+                  size: 0
+                  modified_at: 2025-11-16T14:30:45Z
+                  created_at: 2025-11-16T14:30:45Z
+                  owner: admin
+                  group: admin
+                  mode: 755
+                - path: /workspace/project/README.md
+                  type: file
+                  size: 2048
+                  modified_at: 2025-11-16T14:30:45Z
+                  created_at: 2025-11-16T14:30:45Z
+                  owner: admin
+                  group: admin
+                  mode: 644
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /v1/filesystem/{uid}/{gid}/directories:
+    description: |
+      Runs this filesystem operation in a separate process as the selected UID/GID.
+      Supplementary groups are resolved from the selected system account; an unknown
+      UID receives no supplementary groups. Lookup and credential setup errors fail
+      closed. Target owner/group/mode metadata never changes the execution identity.
+      Keep API credentials in a trusted backend that selects identities. Unsupported
+      servers return an unknown route; callers must not retry an unprefixed route.
+    parameters:
+      - $ref: '#/components/parameters/FilesystemUid'
+      - $ref: '#/components/parameters/FilesystemGid'
+    post:
+      summary: Create directories
+      description: |
+        Creates one or multiple directories with specified permissions. Creates parent
+        directories as needed (similar to mkdir -p). Accepts a map of directory paths
+        to permission objects.
+      operationId: identityMakeDirs
+      tags:
+        - FilesystemIdentity
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                $ref: "#/components/schemas/Permission"
+            example:
+              "/workspace/project":
+                owner: admin
+                group: admin
+                mode: 755
+              "/workspace/logs":
+                owner: admin
+                group: admin
+                mode: 755
+      responses:
+        "501":
+          description: Filesystem execution identity requires Linux.
+        "503":
+          description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
+        "200":
+          description: Directories created successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    delete:
+      summary: Delete directories
+      description: |
+        Recursively deletes one or multiple directories and all their contents.
+        Similar to rm -rf. Use with caution as this operation cannot be undone.
+      operationId: identityRemoveDirs
+      tags:
+        - FilesystemIdentity
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: Directory path(s) to delete (can be specified multiple times)
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+          example: ["/workspace/temp"]
+      responses:
+        "501":
+          description: Filesystem execution identity requires Linux.
+        "503":
+          description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
+        "200":
+          description: Directories deleted successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /metrics:
+    get:
+      summary: Get system metrics
+      description: |
+        Retrieves current system resource metrics including CPU usage percentage,
+        CPU core count, total memory, used memory, and timestamp. Provides a snapshot
+        of system resource utilization at the time of request.
+      operationId: getMetrics
+      tags:
+        - Metric
+      responses:
+        "200":
+          description: Current system metrics including CPU and memory usage
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Metrics"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /metrics/watch:
+    get:
+      summary: Watch system metrics in real-time
+      description: |
+        Streams system resource metrics in real-time using Server-Sent Events (SSE).
+        Updates are sent every second, providing continuous monitoring of CPU usage,
+        memory usage, and other system metrics. The connection remains open until
+        the client disconnects.
+      operationId: watchMetrics
+      tags:
+        - Metric
+      responses:
+        "200":
+          description: Stream of system metrics updated every second
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/Metrics"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /v1/isolated/session:
+    post:
+      summary: Create an isolated bash session
+      operationId: createIsolatedSession
+      tags:
+        - IsolatedExecution
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateIsolatedSessionRequest"
+            examples:
+              workspace:
+                summary: Single workspace (legacy field)
+                value:
+                  workspace:
+                    path: /workspace
+                    mode: overlay
+              overlays:
+                summary: Root overlay plus separate workspace overlay
+                value:
+                  overlays:
+                    - path: /
+                      mode: overlay
+                    - path: /workspace
+                      mode: overlay
+                      persist: true
+              ephemeral_overlay:
+                summary: Workspace with a discarded ephemeral upper
+                value:
+                  overlays:
+                    - path: /workspace
+                      mode: overlay
+                      persist: false
+      responses:
+        "201":
+          description: Session created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IsolatedCreateSessionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/sessions:
+    get:
+      summary: List isolated sessions
+      operationId: listIsolatedSessions
+      tags:
+        - IsolatedExecution
+      responses:
+        "200":
+          description: List of active isolated sessions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListIsolatedSessionsResponse"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/capabilities:
+    get:
+      summary: Get isolator capabilities
+      operationId: isolatedCapabilities
+      tags:
+        - IsolatedExecution
+      responses:
+        "200":
+          description: Isolator capabilities
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CapabilitiesResponse"
+
+  /v1/isolated/session/{sessionId}:
+    get:
+      summary: Get isolated session state
+      description: >-
+        Returns runtime status plus the creation parameters of the session.
+        A stateless client that only has a session ID (e.g. after a restart)
+        can call this endpoint to rebuild a session handle without needing
+        to have retained the original create request.
+      operationId: getIsolatedSession
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Session state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionState"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+    delete:
+      summary: Delete an isolated session
+      operationId: deleteIsolatedSession
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Session deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/run:
+    post:
+      summary: Run code in an isolated session
+      description: >-
+        Runs code inside an existing isolated session. Foreground mode
+        (default) streams output via SSE (200). Background mode
+        (`background: true`) starts the command detached and returns a JSON
+        run handle with 202 Accepted for polling status and logs via
+        `/v1/isolated/session/{sessionId}/runs/{runId}` and
+        `.../runs/{runId}/logs`. `timeout_seconds` applies to foreground
+        runs only; background runs are not time-limited (idle GC is suspended
+        while one is active) and are bounded by the session lifetime.
+        Foreground streams emit periodic `ping` keepalive events so idle
+        gateway timeouts do not reap the connection while the command
+        produces no output; clients must ignore unrecognized event types.
+      operationId: runInIsolatedSession
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IsolatedRunRequest"
+      responses:
+        "200":
+          description: SSE stream of execution events (foreground runs only)
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/ServerStreamEvent"
+        "202":
+          description: >-
+            JSON run handle for background runs (background: true). The run
+            was accepted and started detached; poll status and logs via
+            `/v1/isolated/session/{sessionId}/runs/{runId}`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IsolatedBackgroundRunResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/runs/{runId}:
+    get:
+      summary: Get isolated background run status
+      description: |
+        Returns the lifecycle state of a background run started with
+        `background: true` on the run endpoint. Includes the running flag,
+        exit code (when finished), error (if any), and start/finish timestamps.
+        Run records live as long as their session; they are removed when the
+        session is deleted or garbage-collected.
+      operationId: getIsolatedRunStatus
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: runId
+          in: path
+          required: true
+          description: Run ID returned by the background run endpoint
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Background run status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IsolatedRunStatus"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/runs/{runId}/logs:
+    get:
+      summary: Get isolated background run logs (non-streamed)
+      description: |
+        Returns the combined stdout/stderr of a background run as plain text.
+        Supports incremental reads similar to a file seek: pass a byte offset
+        via the `cursor` query parameter to fetch output after that position
+        and receive the offset after the returned bytes via the
+        `EXECD-ISOLATED-TAIL-CURSOR` response header for the next poll.
+        When no cursor is provided, the log is returned from the start. At
+        most 16 MiB are returned per request; use the returned cursor to
+        fetch the remainder.
+        Per-run log retention is capped at 16 MiB: output beyond the cap is
+        discarded when the run completes, so clients that need more than the
+        first page should drain incrementally while the run is active.
+        Response body is plain text so it can be rendered directly in browsers.
+      operationId: getIsolatedRunLogs
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: runId
+          in: path
+          required: true
+          description: Run ID returned by the background run endpoint
+          schema:
+            type: string
+            format: uuid
+        - name: cursor
+          in: query
+          required: false
+          description: |
+            Optional byte offset (behaves like a file seek). When provided,
+            only log bytes after this offset are returned. The response
+            includes the offset after the returned bytes
+            (`EXECD-ISOLATED-TAIL-CURSOR`) so the client can request
+            incremental output on subsequent calls.
+            At most 16 MiB are returned per request.
+            If omitted, the log is returned from the start.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+          example: 120
+      responses:
+        "200":
+          description: Background run log (plain text) and tail cursor via header
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                line1
+                line2
+                warn: something on stderr
+          headers:
+            EXECD-ISOLATED-TAIL-CURSOR:
+              description: Byte offset immediately after the bytes returned in this response; pass it as the next request's cursor to continue reading from there
+              schema:
+                type: integer
+                format: int64
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/diff:
+    get:
+      summary: Download upper directory diff (stub)
+      operationId: isolatedSessionDiff
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/commit:
+    post:
+      summary: Commit upper changes to workspace (stub)
+      operationId: isolatedSessionCommit
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/files/info:
+    get:
+      summary: Get file information
+      operationId: isolatedGetFilesInfo
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: path
+          in: query
+          required: true
+          description: File path(s) to get info for (can be specified multiple times)
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+      responses:
+        "200":
+          description: File metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  $ref: "#/components/schemas/FileInfo"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/files/download:
+    get:
+      summary: Download a file
+      operationId: isolatedDownloadFile
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: path
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: offset
+          in: query
+          required: false
+          description: Starting line number (1-based) for line-based reading. Mutually exclusive with Range header.
+          schema:
+            type: integer
+            minimum: 1
+        - name: limit
+          in: query
+          required: false
+          description: Number of lines to return for line-based reading. Mutually exclusive with Range header.
+          schema:
+            type: integer
+            minimum: 1
+        - name: Range
+          in: header
+          required: false
+          description: HTTP Range header for partial content requests. Mutually exclusive with offset/limit.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: File content
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+            text/plain:
+              schema:
+                type: string
+                description: Line-based content returned when offset/limit parameters are used
+        "206":
+          description: Partial file content (when Range header is provided)
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/files/upload:
+    post:
+      summary: Upload a file
+      operationId: isolatedUploadFile
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                metadata:
+                  type: string
+                  description: JSON-encoded file metadata
+                file:
+                  type: string
+                  format: binary
+                  description: File to upload
+      responses:
+        "200":
+          description: File uploaded
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/files:
+    delete:
+      summary: Remove files
+      operationId: isolatedRemoveFiles
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: path
+          in: query
+          required: true
+          description: File path(s) to delete (can be specified multiple times)
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+      responses:
+        "200":
+          description: Files removed
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/files/mv:
+    post:
+      summary: Rename or move files
+      operationId: isolatedRenameFiles
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/RenameFileItem"
+      responses:
+        "200":
+          description: Files renamed
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/files/permissions:
+    post:
+      summary: Change file permissions
+      operationId: isolatedChmodFiles
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                $ref: "#/components/schemas/Permission"
+      responses:
+        "200":
+          description: Permissions changed
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/files/replace:
+    post:
+      summary: Replace file content
+      operationId: isolatedReplaceContent
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: verbose
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: When true, return per-file replacement counts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                $ref: "#/components/schemas/ReplaceFileContentItem"
+      responses:
+        "200":
+          description: Content replaced
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  $ref: "#/components/schemas/ReplaceFileContentResult"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/files/search:
+    get:
+      summary: Search files
+      operationId: isolatedSearchFiles
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: path
+          in: query
+          required: true
+          description: Root directory path to search in
+          schema:
+            type: string
+        - name: pattern
+          in: query
+          required: false
+          description: Glob pattern to match files (default is **)
+          schema:
+            type: string
+            default: "**"
+      responses:
+        "200":
+          description: Matched files
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FileInfo"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/directories/list:
+    get:
+      summary: List directory contents
+      operationId: isolatedListDirectory
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: path
+          in: query
+          required: true
+          description: Directory path to list
+          schema:
+            type: string
+        - name: depth
+          in: query
+          required: false
+          description: Maximum depth to traverse (default 1)
+          schema:
+            type: integer
+            minimum: 0
+            default: 1
+      responses:
+        "200":
+          description: Directory entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FileInfo"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/isolated/session/{sessionId}/directories:
+    post:
+      summary: Create directories
+      operationId: isolatedMakeDirs
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                $ref: "#/components/schemas/Permission"
+      responses:
+        "200":
+          description: Directories created
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+    delete:
+      summary: Remove directories
+      operationId: isolatedRemoveDirs
+      tags:
+        - IsolatedExecution
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: path
+          in: query
+          required: true
+          description: Directory path(s) to delete (can be specified multiple times)
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+      responses:
+        "200":
+          description: Directories removed
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+components:
+  parameters:
+    FilesystemUid:
+      name: uid
+      in: path
+      required: true
+      description: Linux UID performing the operation, separate from target-file ownership.
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+        maximum: 4294967294
+    FilesystemGid:
+      name: gid
+      in: path
+      required: true
+      description: Primary Linux GID performing the operation.
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+        maximum: 4294967294
+  securitySchemes:
+    AccessToken:
+      type: apiKey
+      in: header
+      name: X-EXECD-ACCESS-TOKEN
+      description: |
+        Access token for API authentication. All requests must include this header
+        with a valid token. The token is configured during server initialization.
+
+  schemas:
+    CreateSessionRequest:
+      type: object
+      description: Request to create a bash session (optional body; empty treated as defaults)
+      properties:
+        cwd:
+          type: string
+          description: Working directory for the session (optional)
+          example: /workspace
+
+    CreateSessionResponse:
+      type: object
+      description: Response for create_session
+      properties:
+        session_id:
+          type: string
+          description: Unique session ID for run_in_session and delete_session
+          example: session-abc123
+      required:
+        - session_id
+
+    RunInSessionRequest:
+      type: object
+      description: Request to run a command in an existing bash session
+      required:
+        - command
+      properties:
+        command:
+          type: string
+          description: Shell command to execute in the session
+          example: echo "Hello"
+        cwd:
+          type: string
+          description: Working directory override for this run (optional)
+          example: /workspace
+        timeout:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Maximum execution time in milliseconds (optional; server may not enforce if omitted)
+          example: 30000
+
+    CodeContextRequest:
+      type: object
+      description: Request to create a code execution context
+      properties:
+        language:
+          type: string
+          description: Execution runtime (python, bash, java, etc.)
+          example: python
+
+    CodeContext:
+      type: object
+      description: Code execution context with session identifier
+      properties:
+        id:
+          type: string
+          description: Unique session identifier returned by CreateContext
+          example: session-abc123
+        language:
+          type: string
+          description: Execution runtime
+          example: python
+      required:
+        - language
+
+    RunCodeRequest:
+      type: object
+      required:
+        - code
+      description: Request to execute code in a context
+      properties:
+        context:
+          $ref: "#/components/schemas/CodeContext"
+        code:
+          type: string
+          description: Source code to execute
+          example: |
+            import numpy as np
+            result = np.array([1, 2, 3])
+            print(result)
+
+    RunCommandRequest:
+      type: object
+      # Nest oneOf under allOf so openapi-python-client preserves RunCommandRequest.
+      allOf:
+        - oneOf:
+            - required: [command]
+            - required: [argv]
+      description: Execute exactly one of command (shell text) or argv (native arguments).
+      properties:
+        command:
+          type: string
+          minLength: 1
+          description: Shell command to execute. Mutually exclusive with argv.
+          example: ls -la /workspace
+        argv:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          description: |
+            Executable and literal arguments, mutually exclusive with command. argv[0] must be non-empty; NUL is invalid and arguments are not shell-expanded. Relative paths use cwd; bare names search absolute entries in the child PATH. Windows uses standard argument encoding and adds .exe to extensionless names; batch files require a shell.
+          example: [python3, -c, "print('hello')"]
+        cwd:
+          type: string
+          description: |
+            Working directory, defaulting to the daemon directory. Expands $NAME and ${NAME} using the command environment, and leading ~ using the daemon user's home. Undefined variables fail validation.
+          example: /workspace
+        background:
+          type: boolean
+          description: Whether to run command in detached mode
+          default: false
+          example: false
+        timeout:
+          type: integer
+          format: int64
+          description: Maximum allowed execution time in milliseconds before the command is forcefully terminated by the server. If omitted, the server will not enforce any timeout.
+          example: 60000
+        uid:
+          type: integer
+          format: int32
+          minimum: 0
+          description: |
+            Unix user ID used to run the command. If `gid` is provided, `uid` is required.
+          example: 1000
+        gid:
+          type: integer
+          format: int32
+          minimum: 0
+          description: |
+            Unix group ID used to run the command. Requires `uid` to be provided.
+          example: 1000
+        envs:
+          type: object
+          description: |
+            Literal request values overriding EXECD_ENVS and daemon variables, in that order. Names are case-insensitive on Windows.
+          additionalProperties:
+            type: string
+          example:
+            PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+            PYTHONUNBUFFERED: "1"
+
+    CommandStatusResponse:
+      type: object
+      description: Command execution status (foreground or background)
+      properties:
+        id:
+          type: string
+          description: Command ID returned by RunCommand
+          example: cmd-abc123
+        content:
+          type: string
+          description: Original command content
+          example: ls -la
+        running:
+          type: boolean
+          description: Whether the command is still running
+          example: false
+        exit_code:
+          type: integer
+          format: int32
+          nullable: true
+          description: Exit code if the command has finished
+          example: 0
+        error:
+          type: string
+          description: Error message if the command failed
+          example: permission denied
+        started_at:
+          type: string
+          format: date-time
+          description: Start time in RFC3339 format
+          example: "2025-12-22T09:08:05Z"
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Finish time in RFC3339 format (null if still running)
+          example: "2025-12-22T09:08:09Z"
+
+    ServerStreamEvent:
+      type: object
+      description: Server-sent event for streaming execution output
+      properties:
+        type:
+          type: string
+          enum:
+            - init
+            - status
+            - error
+            - stdout
+            - stderr
+            - result
+            - execution_complete
+            - execution_count
+            - ping
+          description: Event type for client-side handling
+          example: stdout
+        text:
+          type: string
+          description: Textual data for status, init, and stream events
+          example: "Hello, World!\n"
+        execution_count:
+          type: integer
+          description: Cell execution number in the session
+          example: 1
+        exit_code:
+          type: integer
+          description: "Successful foreground POST /command process exit status (0), present only on its execution_complete event after the process has exited. Omitted for background startup acknowledgements, code execution, and other events. Absence does not imply success; older servers omit this field. Non-zero command exits use error.exit_code instead."
+          example: 0
+        execution_time:
+          type: integer
+          format: int64
+          description: Execution duration in milliseconds
+          example: 150
+        timestamp:
+          type: integer
+          format: int64
+          description: When the event was generated (Unix milliseconds)
+          example: 1700000000000
+        results:
+          type: object
+          additionalProperties: true
+          description: Execution output in various MIME types (e.g., "text/plain", "text/html")
+          example:
+            text/plain: "4"
+        error:
+          type: object
+          description: Execution error details if an error occurred
+          properties:
+            ename:
+              type: string
+              description: 'Error name/type. Foreground commands that fail after their execution deadline use `CommandTimeout`; other command failures use `CommandExecError`.'
+              example: "NameError"
+            evalue:
+              type: string
+              description: "Error value/message. For `CommandExecError` and `CommandTimeout` this is the stringified exit status when the command ran and exited non-zero, and a free-form message when no exit status is available; use `exit_code` to tell the two apart."
+              example: "name 'undefined_var' is not defined"
+            traceback:
+              type: array
+              items:
+                type: string
+              description: Stack trace lines
+              example:
+                - "Traceback (most recent call last):"
+                - '  File "<stdin>", line 1, in <module>'
+                - "NameError: name 'undefined_var' is not defined"
+            exit_code:
+              type: integer
+              description: "Exit status of a command that ran and finished with a non-zero status (-1 when it was terminated by a signal). Present only on `CommandExecError` and `CommandTimeout` events emitted after the process ran; omitted when the process failed to start, no exit status was observed, or the error is not from a command."
+              example: 3
+
+    FileInfo:
+      type: object
+      description: File metadata including path and permissions
+      properties:
+        path:
+          type: string
+          description: Absolute file path
+          example: /workspace/file.txt
+        type:
+          type: string
+          description: Entry type
+          enum: [file, directory, symlink, other]
+          example: file
+        size:
+          type: integer
+          format: int64
+          description: File size in bytes
+          example: 2048
+        modified_at:
+          type: string
+          format: date-time
+          description: Last modification time
+          example: 2025-11-16T14:30:45Z
+        created_at:
+          type: string
+          format: date-time
+          description: File creation time
+          example: 2025-11-16T14:30:45Z
+        owner:
+          type: string
+          description: File owner username
+          example: admin
+        group:
+          type: string
+          description: File group name
+          example: admin
+        mode:
+          type: integer
+          description: File permissions in octal format
+          example: 755
+      required: [path, size, modified_at, created_at, owner, group, mode]
+
+    Permission:
+      type: object
+      description: File ownership and mode settings
+      properties:
+        owner:
+          type: string
+          description: Owner username
+          example: root
+        group:
+          type: string
+          description: Group name
+          example: root
+        mode:
+          type: integer
+          description: Permission mode in octal format (e.g., 644, 755)
+          default: 755
+          example: 755
+      required: [mode]
+
+    FileMetadata:
+      type: object
+      description: File metadata for upload operations
+      properties:
+        path:
+          type: string
+          description: Target file path
+          example: /workspace/upload.txt
+        owner:
+          type: string
+          description: File owner
+          example: admin
+        group:
+          type: string
+          description: File group
+          example: admin
+        mode:
+          type: integer
+          description: File permissions in octal
+          example: 755
+
+    RenameFileItem:
+      type: object
+      description: >-
+        File rename/move operation. Both src and dest must be non-empty.
+        On ordinary filesystem routes, including execution-identity routes, paths must also remain non-empty after environment-variable and home-directory expansion; isolated-session paths are literal.
+        Missing or empty paths, or empty expansions on ordinary routes, return 400 INVALID_REQUEST_BODY before any rename in the batch.
+        Other path-expansion and filesystem errors retain their existing handling and can leave earlier renames applied.
+      properties:
+        src:
+          type: string
+          minLength: 1
+          description: Source file path
+          example: /workspace/old.txt
+        dest:
+          type: string
+          minLength: 1
+          description: Destination file path
+          example: /workspace/new.txt
+      required: [src, dest]
+
+    ReplaceFileContentItem:
+      type: object
+      description: Content replacement operation
+      properties:
+        old:
+          type: string
+          description: String to be replaced (must not be empty)
+          minLength: 1
+          example: "localhost"
+        new:
+          type: string
+          description: Replacement string
+          example: "0.0.0.0"
+      required: [old, new]
+
+    ReplaceFileContentResult:
+      type: object
+      description: Result of a content replacement operation on a single file
+      properties:
+        replacedCount:
+          type: integer
+          description: Number of occurrences replaced. 0 means oldContent was not found in the file.
+          example: 1
+      required: [replacedCount]
+
+    Metrics:
+      type: object
+      description: System resource usage metrics
+      properties:
+        cpu_count:
+          type: number
+          format: float
+          description: Number of CPU cores
+          example: 4.0
+        cpu_used_pct:
+          type: number
+          format: float
+          description: CPU usage percentage
+          example: 45.5
+        mem_total_mib:
+          type: number
+          format: float
+          description: Total memory in MiB
+          example: 8192.0
+        mem_used_mib:
+          type: number
+          format: float
+          description: Used memory in MiB
+          example: 4096.0
+        timestamp:
+          type: integer
+          format: int64
+          description: Timestamp when metrics were collected (Unix milliseconds)
+          example: 1700000000000
+      required:
+        [cpu_count, cpu_used_pct, mem_total_mib, mem_used_mib, timestamp]
+
+    ErrorResponse:
+      type: object
+      description: Standard error response format
+      properties:
+        code:
+          type: string
+          description: Error code for programmatic handling
+          example: INVALID_REQUEST_BODY
+        message:
+          type: string
+          description: Human-readable error message
+          example: "error parsing request, MAYBE invalid body format"
+      required: [code, message]
+
+    CreateIsolatedSessionRequest:
+      type: object
+      description: >-
+        Creates an isolated session with one or more overlay mounts. The
+        legacy `workspace` field is kept as sugar for a single-element
+        `overlays` list: at least one of `workspace` or `overlays` must be
+        provided, and when both are present `workspace` is prepended to
+        `overlays`. The session files API serves exactly the overlay and
+        bind mounts: paths under each mount resolve as the namespace sees
+        them, and absolute paths outside every overlay or bind are
+        rejected instead of resolving against the workspace (unlike
+        binds, extra_writable paths are not served by the files API
+        unless an overlay covers them). The strict profile's private
+        `/tmp` is a session-owned bind under the upper root and is part
+        of that view; a caller bind or overlay on `/tmp` shadows it as
+        inside the namespace.
+      properties:
+        profile:
+          type: string
+          enum: ["strict", "balanced"]
+          description: >-
+            Isolation profile. `strict` (default) gives the session a private
+            `/tmp` backed by a host directory that the session files API also
+            serves; `balanced` shares the sandbox's own `/tmp`, which the
+            files API does not serve.
+        workspace:
+          $ref: "#/components/schemas/IsolatedWorkspaceSpec"
+        overlays:
+          type: array
+          maxItems: 16
+          description: >-
+            Independent overlay mounts inside one namespace. Each entry gets
+            its own copy-on-write upper (or a direct/ro bind for rw/ro
+            modes). bubblewrap applies mounts shallow-first, so a nested
+            overlay (for example `/workspace` on top of a `/` root overlay)
+            shadows its ancestors within its own subtree. Paths must be
+            absolute, unique, and clean (no trailing slash, `.` or `..`
+            segments); at most 16 mounts per session (including the legacy
+            `workspace`).
+          items:
+            $ref: "#/components/schemas/IsolatedOverlaySpec"
+        extra_writable:
+          type: array
+          items:
+            type: string
+        binds:
+          type: array
+          description: >-
+            Additional host paths bind-mounted into the namespace with an
+            explicit source-to-destination mapping. Unlike extra_writable
+            (which mounts source==destination read-write), each entry may map
+            a distinct destination path and be mounted read-only. The source
+            path of every entry must fall within the configured writable
+            allowlist. The session files API also serves paths under each
+            dest from the host source directory: reads and writes are live
+            in both directions, symlinked entries are followed like the
+            namespace view, and writes are rejected for readonly binds.
+            Destinations must be unique across entries and must not be a
+            strict ancestor of another mount destination (binds, overlays,
+            extra_writable) or fall under /run, /dev, or /proc; such
+            overlapping configurations are rejected at session creation.
+          items:
+            $ref: "#/components/schemas/BindMount"
+        share_net:
+          type: boolean
+        env_passthrough:
+          $ref: "#/components/schemas/EnvPassthroughSpec"
+        uid:
+          type: integer
+          format: uint32
+        gid:
+          type: integer
+          format: uint32
+        uid_mode:
+          type: string
+          enum: ["setpriv", "userns"]
+          description: >-
+            Controls how user identity is established inside the namespace.
+            "setpriv" (default) uses real setuid via setpriv(1).
+            "userns" creates a user namespace via --unshare-user --disable-userns.
+        idle_timeout_seconds:
+          type: integer
+
+    IsolatedWorkspaceSpec:
+      type: object
+      required:
+        - path
+      properties:
+        path:
+          type: string
+        mode:
+          type: string
+          enum: ["rw", "overlay", "ro"]
+
+    IsolatedOverlaySpec:
+      type: object
+      description: >-
+        One overlay mount inside the isolated namespace. `mode=overlay`
+        mounts a copy-on-write view: with `persist=true` (default) writes
+        land in a host upper directory tracked and usage-accounted by execd
+        (the substrate for the diff/commit endpoints); with
+        `persist=false` the upper is an ephemeral tmpfs whose writes are
+        discarded when the session ends. `rw` and `ro` bind the host path
+        directly; `persist` applies to overlay mode only and must be
+        omitted for them (execd rejects the request otherwise). Overlay
+        mode is one-directional for the session files API: while the
+        session runs, files-API writes land in the host upper directory
+        and are not visible to runs inside the namespace (the kernel
+        caches overlayfs directory entries at mount time), while the
+        run-to-files direction works; use `rw` or `binds` for
+        bidirectional file exchange.
+      required:
+        - path
+      properties:
+        path:
+          type: string
+          description: Mount destination inside the namespace (absolute).
+          example: /workspace
+        mode:
+          type: string
+          enum: ["rw", "overlay", "ro"]
+          description: Mount mode. Defaults to `overlay`.
+        persist:
+          type: boolean
+          description: >-
+            Overlay mode only. When true (default; execd treats an omitted
+            value as true) the copy-on-write upper is a host directory
+            allocated per session; when false it is an ephemeral tmpfs whose
+            writes are discarded when the session ends. Must be omitted for
+            `rw` and `ro` modes (execd rejects the request otherwise).
+            Because an ephemeral upper lives inside the namespace only, the
+            filesystem API serves `persist=false` overlays from their
+            host-side (lower) content: in-session writes under such an
+            overlay are not observable through the files API and files-API
+            writes into the overlay are rejected. Overlay mounts with
+            `persist=false` also cannot host background-run logs, so
+            background runs are rejected unless the first overlay is `rw`
+            or `overlay` with `persist=true`.
+
+    BindMount:
+      type: object
+      required:
+        - source
+      properties:
+        source:
+          type: string
+          description: Host path to bind-mount into the namespace.
+        dest:
+          type: string
+          description: >-
+            Mount destination inside the namespace. Defaults to source when
+            omitted.
+        readonly:
+          type: boolean
+          default: false
+          description: >-
+            When true the mount is read-only (--ro-bind); otherwise it is
+            read-write (--bind).
+
+    EnvPassthroughSpec:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: ["allow", "deny"]
+        keys:
+          type: array
+          items:
+            type: string
+
+    IsolatedCreateSessionResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+
+    IsolatedRunRequest:
+      type: object
+      required:
+        - code
+      properties:
+        code:
+          type: string
+          description: Shell code to execute inside the session. Its standard input is /dev/null; pass input through a file or a here-document.
+          example: echo hello
+        envs:
+          type: object
+          additionalProperties:
+            type: string
+          description: Environment variables exported into the shell before the code runs
+        timeout_seconds:
+          type: integer
+          minimum: 0
+          description: |
+            Foreground-only timeout. The run is interrupted after this many
+            seconds. Ignored for background runs: a background run is not
+            time-limited, and idle GC is suspended while it is active, so a
+            long-running background command keeps the session alive until it
+            finishes (then the normal idle window applies) or the session is
+            deleted.
+          example: 60
+        background:
+          type: boolean
+          description: |
+            When true (default false), start the code detached inside the
+            session and return a 202 run handle instead of streaming output.
+            The run's combined stdout/stderr is captured to a log file that
+            can be polled via the run logs endpoint; its lifecycle is tracked
+            via the run status endpoint.
+            Background runs share the session's process group, so session-
+            level signals (for example the SIGINT sent when a foreground run
+            times out or is cancelled) also reach them; execd cannot signal
+            individual in-namespace processes.
+            Background runs require a writable log location under the first
+            overlay, so sessions whose first overlay is read-only (`ro`) or
+            an ephemeral overlay (`persist: false`) reject them with 400.
+            rw overlays and persistent (`persist: true`) overlays are
+            supported.
+          example: false
+
+    IsolatedBackgroundRunResponse:
+      type: object
+      description: "Handle returned when a run is started with background: true"
+      required:
+        - session_id
+        - run_id
+        - started_at
+      properties:
+        session_id:
+          type: string
+          format: uuid
+          description: Session the run was started in
+        run_id:
+          type: string
+          format: uuid
+          description: Run ID for status and logs polling
+        started_at:
+          type: string
+          format: date-time
+          description: Run start time in RFC3339 format
+
+    IsolatedRunStatus:
+      type: object
+      description: Lifecycle state of an isolated background run
+      required:
+        - session_id
+        - run_id
+        - running
+        - started_at
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        run_id:
+          type: string
+          format: uuid
+        running:
+          type: boolean
+          description: Whether the run is still executing
+          example: false
+        exit_code:
+          type: integer
+          format: int32
+          nullable: true
+          description: Exit code of the code if the run has finished
+          example: 0
+        error:
+          type: string
+          description: Error message if the run failed (e.g. session terminated)
+          example: session terminated
+        started_at:
+          type: string
+          format: date-time
+          description: Run start time in RFC3339 format
+          example: "2025-12-22T09:08:05Z"
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Run finish time in RFC3339 format (null if still running)
+          example: "2025-12-22T09:08:09Z"
+
+    SessionState:
+      type: object
+      description: >-
+        State of an isolated session. Runtime status fields (status,
+        created_at, last_run_at, idle_remaining_seconds) are always present.
+        Creation-parameter fields (profile, workspace, overlays, binds,
+        share_net, env_passthrough, uid, gid, uid_mode, extra_writable,
+        idle_timeout_seconds) echo the parameters used to create the session
+        and let a stateless client rebuild a session handle from just a
+        session ID (e.g. after a client restart or in serverless workers).
+        `overlays` lists the effective mounts; for sessions created via the
+        legacy `workspace` field it repeats that workspace as a single
+        element, and `workspace` itself is only echoed for such
+        single-overlay sessions. Older execd builds may omit the
+        creation-parameter fields; clients must tolerate them being absent.
+      properties:
+        status:
+          type: string
+          enum: ["active", "dead", "destroyed"]
+        created_at:
+          type: string
+          format: date-time
+        last_run_at:
+          type: string
+          format: date-time
+        idle_remaining_seconds:
+          type: integer
+          nullable: true
+        profile:
+          type: string
+          enum: ["strict", "balanced"]
+          description: Profile the session was created with.
+        workspace:
+          $ref: "#/components/schemas/IsolatedWorkspaceSpec"
+        overlays:
+          type: array
+          description: Effective overlay mounts of the session.
+          items:
+            $ref: "#/components/schemas/IsolatedOverlaySpec"
+        extra_writable:
+          type: array
+          items:
+            type: string
+        binds:
+          type: array
+          items:
+            $ref: "#/components/schemas/BindMount"
+        share_net:
+          type: boolean
+        env_passthrough:
+          $ref: "#/components/schemas/EnvPassthroughSpec"
+        uid:
+          type: integer
+          format: uint32
+        gid:
+          type: integer
+          format: uint32
+        uid_mode:
+          type: string
+          enum: ["setpriv", "userns"]
+        idle_timeout_seconds:
+          type: integer
+
+    IsolatedSessionSummary:
+      type: object
+      required:
+        - session_id
+        - status
+        - created_at
+        - last_run_at
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: ["active", "dead", "destroyed"]
+        created_at:
+          type: string
+          format: date-time
+        last_run_at:
+          type: string
+          format: date-time
+        idle_remaining_seconds:
+          type: integer
+          nullable: true
+
+    ListIsolatedSessionsResponse:
+      type: object
+      required:
+        - sessions
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/IsolatedSessionSummary"
+
+    CapabilitiesResponse:
+      type: object
+      properties:
+        available:
+          type: boolean
+        isolator:
+          type: string
+        version:
+          type: string
+        message:
+          type: string
+          description: >-
+            Diagnostic message when isolation is unavailable or degraded (for
+            example, share_net=true sessions work but no uid mode can create
+            the private network namespace required by share_net=false)
+        setpriv_available:
+          type: boolean
+          description: >-
+            Whether sessions using uid_mode setpriv can be created with execd's
+            default UID/GID. Requests that select different UID/GID values may
+            still return 503 NOT_SUPPORTED when identity switching is
+            unavailable.
+        userns_available:
+          type: boolean
+          description: Whether sessions using uid_mode userns can be created
+        setpriv_net_available:
+          type: boolean
+          description: >-
+            Whether sessions using uid_mode setpriv can also create the private
+            network namespace required by share_net=false (bwrap --unshare-net;
+            its loopback setup needs CAP_NET_ADMIN in the execd container).
+            Create rejects share_net=false requests with 503 NOT_SUPPORTED when
+            the requested mode's flag is false.
+        userns_net_available:
+          type: boolean
+          description: >-
+            Whether sessions using uid_mode userns can also create the private
+            network namespace required by share_net=false.
+        commit_supported:
+          type: boolean
+        diff_supported:
+          type: boolean
+        hardening:
+          type: object
+          description: >-
+            execd init-mode and workload-hardening state (OSEP-0018): whether
+            execd is the sandbox init and which of its controls are in effect.
+            Not an isolation capability; reported here so operators see
+            enforcement state in one place.
+          properties:
+            init_mode:
+              type: string
+              enum: [pid1, subreaper, none]
+              description: >-
+                How execd supervises the sandbox process tree. pid1: execd is
+                the kernel init of the container. subreaper: execd reaps
+                orphans but lacks the PID 1 kernel signal shield. none: init
+                mode is off (default).
+            signal_shield:
+              type: boolean
+              description: >-
+                Whether the kernel PID 1 signal shield protects execd from
+                in-namespace signals (true only in init_mode pid1).
+            cap_drop:
+              $ref: "#/components/schemas/HardeningLayerState"
+              description: Capability/bounding-set reduction on user code.
+            seccomp:
+              $ref: "#/components/schemas/HardeningLayerState"
+              description: Seccomp floor installed on user code.
+            landlock:
+              $ref: "#/components/schemas/HardeningLayerState"
+              description: Landlock filesystem confinement on user code.
+            ebpf:
+              $ref: "#/components/schemas/HardeningLayerState"
+              description: eBPF exec/connect/privilege observation.
+
+    HardeningLayerState:
+      type: object
+      description: >-
+        Whether one hardening layer is actually enforced. state is "active" |
+        "disabled" (not configured) | "degraded" (configured but a
+        prerequisite is missing) | "unsupported" (kernel/build cannot provide
+        it). message gives the concrete reason whenever state is not active.
+      properties:
+        state:
+          type: string
+          enum: [active, disabled, degraded, unsupported]
+        message:
+          type: string
+
+  responses:
+    ServiceUnavailable:
+      description: Isolation subsystem is not available
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    BadRequest:
+      description: Invalid request body format or missing required fields
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: INVALID_REQUEST_BODY
+            message: "error parsing request, MAYBE invalid body format"
+
+    NotFound:
+      description: File or resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: FILE_NOT_FOUND
+            message: "file not found"
+
+    InternalServerError:
+      description: Runtime server error during operation
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: RUNTIME_ERROR
+            message: "error running code execution"

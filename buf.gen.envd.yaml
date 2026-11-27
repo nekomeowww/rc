@@ -1,0 +1,18 @@
+# Generates the Go + ConnectRPC SDK from the E2B envd protos in apis/proto/envd.
+version: v2
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/nekomeowww/rc/apis/sdk/go
+inputs:
+  - directory: apis/proto
+    paths:
+      - apis/proto/envd
+plugins:
+  - local: protoc-gen-go
+    out: apis/sdk/go
+    opt: paths=source_relative
+  - local: protoc-gen-connect-go
+    out: apis/sdk/go
+    opt: paths=source_relative

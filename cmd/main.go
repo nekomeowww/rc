@@ -68,6 +68,13 @@ func init() {
 
 // nolint:gocyclo
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "data-plane-gateway" {
+		if err := runDataPlaneGateway(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "data-plane-gateway: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string

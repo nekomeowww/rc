@@ -108,13 +108,13 @@ func (r *WorkspaceReconciler) ensureDataPlaneAccessToken(ctx context.Context, wo
 
 	secretName := dataPlaneTokenSecretName(workspace.Name)
 	existing := &corev1.Secret{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: secretName}, existing)
-	if err == nil {
+	getErr := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: secretName}, existing)
+	if getErr == nil {
 		if len(existing.Data[gateway.DefaultAccessTokenSecretKey]) >= minDataPlaneAccessTokenSize {
 			return secretName, "", "", nil
 		}
-	} else if !apierrors.IsNotFound(err) {
-		return "", "", "", err
+	} else if !apierrors.IsNotFound(getErr) {
+		return "", "", "", getErr
 	}
 
 	token, err := xo.RandomBase64Token(32)
@@ -135,7 +135,7 @@ func (r *WorkspaceReconciler) ensureDataPlaneAccessToken(ctx context.Context, wo
 	if err := controllerutil.SetControllerReference(workspace, secret, r.Scheme); err != nil {
 		return "", "", "", err
 	}
-	if apierrors.IsNotFound(err) {
+	if apierrors.IsNotFound(getErr) {
 		if createErr := r.Create(ctx, secret); createErr != nil && !apierrors.IsAlreadyExists(createErr) {
 			return "", "", "", createErr
 		}
@@ -193,12 +193,12 @@ func (r *WorkspaceReconciler) ensureDataPlaneCA(ctx context.Context, fallbackNam
 func (r *WorkspaceReconciler) ensureDataPlaneServerCert(ctx context.Context, workspace *workspacesv1alpha1.Workspace) (string, error) {
 	secretName := dataPlaneServerCertSecretName(workspace.Name)
 	existing := &corev1.Secret{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: secretName}, existing)
-	if err == nil && len(existing.Data["ca.crt"]) > 0 && len(existing.Data["tls.crt"]) > 0 && len(existing.Data["tls.key"]) > 0 {
+	getErr := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: secretName}, existing)
+	if getErr == nil && len(existing.Data["ca.crt"]) > 0 && len(existing.Data["tls.crt"]) > 0 && len(existing.Data["tls.key"]) > 0 {
 		return secretName, nil
 	}
-	if err != nil && !apierrors.IsNotFound(err) {
-		return "", err
+	if getErr != nil && !apierrors.IsNotFound(getErr) {
+		return "", getErr
 	}
 
 	caCert, caKey, err := r.ensureDataPlaneCA(ctx, workspace.Namespace)
@@ -226,7 +226,7 @@ func (r *WorkspaceReconciler) ensureDataPlaneServerCert(ctx context.Context, wor
 	if err := controllerutil.SetControllerReference(workspace, secret, r.Scheme); err != nil {
 		return "", err
 	}
-	if apierrors.IsNotFound(err) {
+	if apierrors.IsNotFound(getErr) {
 		if createErr := r.Create(ctx, secret); createErr != nil && !apierrors.IsAlreadyExists(createErr) {
 			return "", createErr
 		}

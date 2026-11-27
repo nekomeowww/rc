@@ -157,7 +157,7 @@ func (s *Server) ServeListener(ctx context.Context, listener net.Listener, cfg C
 		if cfg.CAFile == "" || cfg.CertFile == "" || cfg.KeyFile == "" {
 			return errors.New("execd mTLS requires ca-file, cert-file, and key-file")
 		}
-		tlsConfig, err := pki.ReloadingServerTLSConfig(cfg.CAFile, cfg.CertFile, cfg.KeyFile)
+		tlsConfig, err := pki.ReloadingServerTLSConfig(ctx, cfg.CAFile, cfg.CertFile, cfg.KeyFile)
 		if err != nil {
 			return err
 		}

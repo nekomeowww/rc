@@ -15,22 +15,26 @@ limitations under the License.
 */
 
 // Package pki manages the internal mTLS certificate authority and leaf
-// certificates used between the Data Plane Gateway and Workspace runtimes.
+// certificates used between the Data Plane Gateway and Workspace runtimes,
+// built on go.step.sm/crypto and controller-runtime's certwatcher.
 package pki
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
+	"context"
+	"crypto"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"math/big"
 	"os"
 	"time"
+
+	"go.step.sm/crypto/keyutil"
+	"go.step.sm/crypto/minica"
+	"go.step.sm/crypto/pemutil"
+	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 )
 
 const (
@@ -44,6 +48,11 @@ const (
 	DefaultLeafValidity = 30 * 24 * time.Hour
 )
 
+var defaultALPNProtos = []string{
+	"h2",
+	"http/1.1",
+}
+
 // Bundle holds PEM-encoded certificate, private key, and CA certificate material.
 type Bundle struct {
 	CertPEM []byte
@@ -56,41 +65,22 @@ func WorkspaceServerName(namespace, name string) string {
 	return fmt.Sprintf("%s.%s.%s", name, namespace, WorkspaceServerDomain)
 }
 
-// GenerateCA creates a new self-signed ECDSA P-256 certificate authority.
-func GenerateCA(validity time.Duration) (Bundle, error) {
-	if validity <= 0 {
-		validity = DefaultCAValidity
-	}
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+// GenerateCA creates a new self-signed certificate authority using go.step.sm/crypto/minica.
+func GenerateCA(_ time.Duration) (Bundle, error) {
+	ca, err := minica.New(minica.WithName("rc-data-plane-ca"))
 	if err != nil {
-		return Bundle{}, fmt.Errorf("generate CA key: %w", err)
+		return Bundle{}, fmt.Errorf("generate CA: %w", err)
 	}
-	serial, err := randomSerial()
+	certBlock, err := pemutil.Serialize(ca.Root)
 	if err != nil {
-		return Bundle{}, err
+		return Bundle{}, fmt.Errorf("serialize CA certificate: %w", err)
 	}
-	now := time.Now().UTC()
-	template := &x509.Certificate{
-		SerialNumber: serial,
-		Subject: pkix.Name{
-			CommonName: "rc-data-plane-ca",
-		},
-		NotBefore:             now.Add(-5 * time.Minute),
-		NotAfter:              now.Add(validity),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	keyBlock, err := pemutil.Serialize(ca.RootSigner)
 	if err != nil {
-		return Bundle{}, fmt.Errorf("create CA certificate: %w", err)
+		return Bundle{}, fmt.Errorf("serialize CA key: %w", err)
 	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		return Bundle{}, fmt.Errorf("marshal CA key: %w", err)
-	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	certPEM := pem.EncodeToMemory(certBlock)
+	keyPEM := pem.EncodeToMemory(keyBlock)
 
 	return Bundle{
 		CertPEM: certPEM,
@@ -112,79 +102,93 @@ func IssueClientCert(caCertPEM, caKeyPEM []byte, commonName string, validity tim
 	return issueLeaf(caCertPEM, caKeyPEM, commonName, nil, x509.ExtKeyUsageClientAuth, validity)
 }
 
-func issueLeaf(caCertPEM, caKeyPEM []byte, commonName string, dnsNames []string, extUsage x509.ExtKeyUsage, validity time.Duration) (Bundle, error) {
+func issueLeaf(
+	caCertPEM, caKeyPEM []byte,
+	commonName string,
+	dnsNames []string,
+	extUsage x509.ExtKeyUsage,
+	validity time.Duration,
+) (Bundle, error) {
 	if validity <= 0 {
 		validity = DefaultLeafValidity
 	}
-	caPair, err := tls.X509KeyPair(caCertPEM, caKeyPEM)
-	if err != nil {
-		return Bundle{}, fmt.Errorf("parse CA keypair: %w", err)
-	}
-	caCert, err := x509.ParseCertificate(caPair.Certificate[0])
+	caCert, err := pemutil.ParseCertificate(caCertPEM)
 	if err != nil {
 		return Bundle{}, fmt.Errorf("parse CA certificate: %w", err)
 	}
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	rawKey, err := pemutil.Parse(caKeyPEM)
+	if err != nil {
+		return Bundle{}, fmt.Errorf("parse CA key: %w", err)
+	}
+	caSigner, ok := rawKey.(crypto.Signer)
+	if !ok {
+		return Bundle{}, errors.New("CA private key does not implement crypto.Signer")
+	}
+
+	leafSigner, err := keyutil.GenerateDefaultSigner()
 	if err != nil {
 		return Bundle{}, fmt.Errorf("generate leaf key: %w", err)
 	}
-	serial, err := randomSerial()
-	if err != nil {
-		return Bundle{}, err
-	}
 	now := time.Now().UTC()
-	template := &x509.Certificate{
-		SerialNumber: serial,
-		Subject: pkix.Name{
-			CommonName: commonName,
-		},
+	ca := &minica.CA{
+		Intermediate: caCert,
+		Signer:       caSigner,
+	}
+	cert, err := ca.Sign(&x509.Certificate{
+		Subject:     pkix.Name{CommonName: commonName},
 		DNSNames:    dnsNames,
+		PublicKey:   leafSigner.Public(),
 		NotBefore:   now.Add(-5 * time.Minute),
 		NotAfter:    now.Add(validity),
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage: []x509.ExtKeyUsage{extUsage},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caPair.PrivateKey)
+	})
 	if err != nil {
-		return Bundle{}, fmt.Errorf("create leaf certificate: %w", err)
+		return Bundle{}, fmt.Errorf("sign leaf certificate: %w", err)
 	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyDER, err := x509.MarshalECPrivateKey(key)
+
+	certBlock, err := pemutil.Serialize(cert)
 	if err != nil {
-		return Bundle{}, fmt.Errorf("marshal leaf key: %w", err)
+		return Bundle{}, fmt.Errorf("serialize leaf certificate: %w", err)
 	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	keyBlock, err := pemutil.Serialize(leafSigner)
+	if err != nil {
+		return Bundle{}, fmt.Errorf("serialize leaf key: %w", err)
+	}
 
 	return Bundle{
-		CertPEM: certPEM,
-		KeyPEM:  keyPEM,
+		CertPEM: pem.EncodeToMemory(certBlock),
+		KeyPEM:  pem.EncodeToMemory(keyBlock),
 		CAPEM:   caCertPEM,
 	}, nil
 }
 
-var defaultALPNProtos = []string{
-	"h2",
-	"http/1.1",
-}
-
-// ReloadingServerTLSConfig builds a server tls.Config that reloads the server
-// certificate and client CA pool from disk on every handshake, so Secret
-// rotation takes effect without restarting the Pod.
-func ReloadingServerTLSConfig(caFile, certFile, keyFile string) (*tls.Config, error) {
-	if _, err := loadServerTLS(caFile, certFile, keyFile); err != nil {
+// ReloadingServerTLSConfig builds a server tls.Config backed by controller-runtime's
+// CertWatcher (watching certFile and keyFile for rotation) and verifying client
+// certificates against caFile.
+func ReloadingServerTLSConfig(ctx context.Context, caFile, certFile, keyFile string) (*tls.Config, error) {
+	caPool, err := loadCAPool(caFile)
+	if err != nil {
 		return nil, err
 	}
+	watcher, err := certwatcher.New(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("create certificate watcher: %w", err)
+	}
+	go func() {
+		_ = watcher.Start(ctx)
+	}()
+
 	return &tls.Config{
-		MinVersion: tls.VersionTLS13,
-		ClientAuth: tls.RequireAndVerifyClientCert,
-		NextProtos: defaultALPNProtos,
-		GetConfigForClient: func(_ *tls.ClientHelloInfo) (*tls.Config, error) {
-			return loadServerTLS(caFile, certFile, keyFile)
-		},
+		MinVersion:     tls.VersionTLS13,
+		ClientAuth:     tls.RequireAndVerifyClientCert,
+		ClientCAs:      caPool,
+		GetCertificate: watcher.GetCertificate,
+		NextProtos:     defaultALPNProtos,
 	}, nil
 }
 
-func loadServerTLS(caFile, certFile, keyFile string) (*tls.Config, error) {
+func loadCAPool(caFile string) (*x509.CertPool, error) {
 	caPEM, err := os.ReadFile(caFile)
 	if err != nil {
 		return nil, fmt.Errorf("read data plane CA: %w", err)
@@ -193,17 +197,7 @@ func loadServerTLS(caFile, certFile, keyFile string) (*tls.Config, error) {
 	if !pool.AppendCertsFromPEM(caPEM) {
 		return nil, errors.New("parse data plane CA PEM: no certificates found")
 	}
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return nil, fmt.Errorf("load data plane server certificate: %w", err)
-	}
-	return &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		ClientCAs:    pool,
-		Certificates: []tls.Certificate{cert},
-		NextProtos:   defaultALPNProtos,
-	}, nil
+	return pool, nil
 }
 
 // ClientTLSConfig builds an mTLS client tls.Config for dialing a Workspace
@@ -224,13 +218,4 @@ func ClientTLSConfig(caPEM, certPEM, keyPEM []byte, serverName string) (*tls.Con
 		ServerName:   serverName,
 		NextProtos:   defaultALPNProtos,
 	}, nil
-}
-
-func randomSerial() (*big.Int, error) {
-	limit := new(big.Int).Lsh(big.NewInt(1), 128)
-	serial, err := rand.Int(rand.Reader, limit)
-	if err != nil {
-		return nil, fmt.Errorf("generate certificate serial: %w", err)
-	}
-	return serial, nil
 }

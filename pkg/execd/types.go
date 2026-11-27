@@ -23,10 +23,10 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
-	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
+
+	"github.com/bmatcuk/doublestar/v4"
 )
 
 const (
@@ -175,17 +175,15 @@ func ParseOctalMode(raw int, fallback fs.FileMode) (fs.FileMode, error) {
 	return fs.FileMode(parsed), nil
 }
 
-// MatchGlob checks whether relSlash or baseName matches an execd glob pattern.
+// MatchGlob checks whether relSlash or baseName matches an execd glob pattern
+// using doublestar (supporting full ** recursive globs).
 func MatchGlob(pattern, relSlash, baseName string) bool {
 	if pattern == "**" || pattern == "*" {
 		return true
 	}
-	if strings.Contains(pattern, "/") {
-		cleaned := strings.TrimPrefix(pattern, "**/")
-		if ok, _ := filepath.Match(cleaned, relSlash); ok {
-			return true
-		}
+	if ok, _ := doublestar.Match(pattern, relSlash); ok {
+		return true
 	}
-	ok, _ := filepath.Match(pattern, baseName)
+	ok, _ := doublestar.Match(pattern, baseName)
 	return ok
 }

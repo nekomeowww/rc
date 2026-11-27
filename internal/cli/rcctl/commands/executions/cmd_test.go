@@ -29,8 +29,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
-	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	configsv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/v1alpha1"
+	workspacesv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/workspaces/v1alpha1"
 	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	workspaceservice "github.com/nekomeowww/rc/internal/workspaces"

@@ -10,8 +10,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	repositories "github.com/nekomeowww/rc/api/repositories/v1alpha1"
-	workspaces "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	repositories "github.com/nekomeowww/rc/apis/kubernetes/repositories/v1alpha1"
+	workspaces "github.com/nekomeowww/rc/apis/kubernetes/workspaces/v1alpha1"
 )
 
 func condition(kind string, status metav1.ConditionStatus, reason, message string, age time.Duration) metav1.Condition {

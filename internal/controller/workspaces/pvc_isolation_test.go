@@ -15,8 +15,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	repositories "github.com/nekomeowww/rc/api/repositories/v1alpha1"
-	workspaces "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	repositories "github.com/nekomeowww/rc/apis/kubernetes/repositories/v1alpha1"
+	workspaces "github.com/nekomeowww/rc/apis/kubernetes/workspaces/v1alpha1"
 	repositorycontrollers "github.com/nekomeowww/rc/internal/controller/repositories"
 )
 

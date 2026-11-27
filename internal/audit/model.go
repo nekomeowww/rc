@@ -7,10 +7,10 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	repositories "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	repositories "github.com/nekomeowww/rc/apis/kubernetes/repositories/v1alpha1"
 	"k8s.io/apimachinery/pkg/types"
 
-	workspaces "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	workspaces "github.com/nekomeowww/rc/apis/kubernetes/workspaces/v1alpha1"
 )
 
 // Policy defines conservative diagnostic age and capacity thresholds. CLI

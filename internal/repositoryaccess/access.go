@@ -10,7 +10,7 @@ import (
 	"slices"
 	"strings"
 
-	repositories "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	repositories "github.com/nekomeowww/rc/apis/kubernetes/repositories/v1alpha1"
 	"github.com/nekomeowww/rc/internal/holdset"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"

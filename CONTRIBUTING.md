@@ -288,16 +288,16 @@ rc uses Kubebuilder's multi-group layout for Repository and Workspace APIs,
 while configuration APIs remain in the original API package:
 
 ```text
-cmd/                         manager, rcctl, and rc-kube entry points
-api/v1alpha1/                Credential and AgentCredential APIs
-api/repositories/v1alpha1/   Repository, Worktree, and RepositoryExec APIs
-api/workspaces/v1alpha1/     Environment, Workspace, and WorkspaceExec APIs
-internal/controller/         reconciliation logic by API group
-internal/cli/rcctl/          rcctl command implementation
-internal/rckube/             in-Pod process supervisor
-config/                      generated and hand-written Kubernetes manifests
-docs/                        architecture decisions and runtime design
-test/e2e/                    isolated Kind e2e suite
+cmd/                                    manager, rcctl, and rc-kube entry points
+apis/kubernetes/v1alpha1/               Credential and AgentCredential APIs
+apis/kubernetes/repositories/v1alpha1/  Repository, Worktree, and RepositoryExec APIs
+apis/kubernetes/workspaces/v1alpha1/    Environment, Workspace, and WorkspaceExec APIs
+internal/controller/                    reconciliation logic by API group
+internal/cli/rcctl/                     rcctl command implementation
+internal/rckube/                        in-Pod process supervisor
+config/                                 generated and hand-written Kubernetes manifests
+docs/                                   architecture decisions and runtime design
+test/e2e/                               isolated Kind e2e suite
 ```
 
 Read [`docs/design/workspace-runtime.md`](docs/design/workspace-runtime.md)

@@ -5,7 +5,7 @@ import (
 	"io"
 	"testing"
 
-	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	repositoriesv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/repositories/v1alpha1"
 	"github.com/nekomeowww/rc/internal/kubeconfig"
 	clioutput "github.com/nekomeowww/rc/pkg/output"
 	"github.com/stretchr/testify/assert"
@@ -16,7 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	workspacesv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/holdset"
 	"github.com/nekomeowww/rc/internal/worktreeownership"
 )

@@ -13,7 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	workspaces "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	workspaces "github.com/nekomeowww/rc/apis/kubernetes/workspaces/v1alpha1"
 )
 
 func admissionObjects(t *testing.T) (*runtime.Scheme, *workspaces.Workspace, *workspaces.WorkspaceExec) {

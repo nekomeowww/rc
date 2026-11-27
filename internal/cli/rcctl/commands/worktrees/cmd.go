@@ -14,7 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	repositoriesv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/repositories/v1alpha1"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/cluster"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/command"
 	"github.com/nekomeowww/rc/internal/holdset"

@@ -35,7 +35,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
+	configsv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 

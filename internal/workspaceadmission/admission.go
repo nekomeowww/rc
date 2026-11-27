@@ -10,7 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspaces "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	workspaces "github.com/nekomeowww/rc/apis/kubernetes/workspaces/v1alpha1"
 )
 
 var (

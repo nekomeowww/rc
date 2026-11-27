@@ -25,7 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	workspacesv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/workspaces/v1alpha1"
 )
 
 var _ = Describe("WorkspaceExec API validation", func() {

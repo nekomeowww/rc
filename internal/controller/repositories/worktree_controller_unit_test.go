@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	repositoriesv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/repositories/v1alpha1"
 )
 
 const (

@@ -33,7 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	workspacesv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/rcplatform"
 )
 

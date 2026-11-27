@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	repositories "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	repositories "github.com/nekomeowww/rc/apis/kubernetes/repositories/v1alpha1"
 	"github.com/nekomeowww/rc/internal/holdset"
 	"github.com/stretchr/testify/require"
 	coordinationv1 "k8s.io/api/coordination/v1"

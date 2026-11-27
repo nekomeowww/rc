@@ -29,7 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	workspacesv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/workspaces/v1alpha1"
 )
 
 // NetworkPolicy names in a namespace that runs needy.

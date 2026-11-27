@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	repositoriesv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/repositories/v1alpha1"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"

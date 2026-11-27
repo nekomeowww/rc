@@ -11,7 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/util/validation"
 
-	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
+	configsv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/v1alpha1"
 	"github.com/nekomeowww/rc/internal/cli/rcctl/cluster"
 	credentialservice "github.com/nekomeowww/rc/internal/credentials"
 	"github.com/nekomeowww/rc/internal/kubeconfig"

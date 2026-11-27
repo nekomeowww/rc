@@ -46,7 +46,7 @@ linters:
     rules:
       - linters:
           - lll
-        path: api/*
+        path: apis/kubernetes/*
       - linters:
           - dupl
           - lll

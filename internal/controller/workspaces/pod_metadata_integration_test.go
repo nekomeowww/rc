@@ -9,7 +9,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	workspacesv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/workspaces/v1alpha1"
 )
 
 var _ = Describe("Workspace runtime Pod metadata API", func() {

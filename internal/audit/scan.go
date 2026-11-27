@@ -15,8 +15,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	repositories "github.com/nekomeowww/rc/api/repositories/v1alpha1"
-	workspaces "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	repositories "github.com/nekomeowww/rc/apis/kubernetes/repositories/v1alpha1"
+	workspaces "github.com/nekomeowww/rc/apis/kubernetes/workspaces/v1alpha1"
 )
 
 const (

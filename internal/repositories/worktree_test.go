@@ -13,7 +13,7 @@ import (
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	repositoriesv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/repositories/v1alpha1"
 	"github.com/nekomeowww/rc/internal/worktreestorage"
 )
 

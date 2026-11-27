@@ -9,7 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 
-	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	workspacesv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/workspaces/v1alpha1"
 )
 
 const (

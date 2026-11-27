@@ -22,7 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	repositories "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	repositories "github.com/nekomeowww/rc/apis/kubernetes/repositories/v1alpha1"
 )
 
 func TestFailure(t *testing.T) {

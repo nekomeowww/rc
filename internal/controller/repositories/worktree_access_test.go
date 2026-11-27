@@ -17,8 +17,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
-	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	repositoriesv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/repositories/v1alpha1"
+	workspacesv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/workspaces/v1alpha1"
 	workspacecontroller "github.com/nekomeowww/rc/internal/controller/workspaces"
 	"github.com/nekomeowww/rc/internal/worktreeownership"
 )

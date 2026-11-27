@@ -17,7 +17,7 @@ resources:
   domain: rc.ayaka.io
   group: configs
   kind: AgentCredential
-  path: github.com/nekomeowww/rc/api/v1alpha1
+  path: github.com/nekomeowww/rc/apis/kubernetes/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -26,7 +26,7 @@ resources:
   domain: rc.ayaka.io
   group: configs
   kind: Credential
-  path: github.com/nekomeowww/rc/api/v1alpha1
+  path: github.com/nekomeowww/rc/apis/kubernetes/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -35,7 +35,7 @@ resources:
   domain: rc.ayaka.io
   group: repositories
   kind: Repository
-  path: github.com/nekomeowww/rc/api/repositories/v1alpha1
+  path: github.com/nekomeowww/rc/apis/kubernetes/repositories/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -44,7 +44,7 @@ resources:
   domain: rc.ayaka.io
   group: repositories
   kind: RepositoryExec
-  path: github.com/nekomeowww/rc/api/repositories/v1alpha1
+  path: github.com/nekomeowww/rc/apis/kubernetes/repositories/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -53,7 +53,7 @@ resources:
   domain: rc.ayaka.io
   group: repositories
   kind: Worktree
-  path: github.com/nekomeowww/rc/api/repositories/v1alpha1
+  path: github.com/nekomeowww/rc/apis/kubernetes/repositories/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -62,7 +62,7 @@ resources:
   domain: rc.ayaka.io
   group: workspaces
   kind: WorkspaceEnvironment
-  path: github.com/nekomeowww/rc/api/workspaces/v1alpha1
+  path: github.com/nekomeowww/rc/apis/kubernetes/workspaces/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -71,7 +71,7 @@ resources:
   domain: rc.ayaka.io
   group: workspaces
   kind: Workspace
-  path: github.com/nekomeowww/rc/api/workspaces/v1alpha1
+  path: github.com/nekomeowww/rc/apis/kubernetes/workspaces/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -80,7 +80,7 @@ resources:
   domain: rc.ayaka.io
   group: workspaces
   kind: WorkspaceExec
-  path: github.com/nekomeowww/rc/api/workspaces/v1alpha1
+  path: github.com/nekomeowww/rc/apis/kubernetes/workspaces/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -89,7 +89,7 @@ resources:
   domain: rc.ayaka.io
   group: repositories
   kind: WorktreeExec
-  path: github.com/nekomeowww/rc/api/repositories/v1alpha1
+  path: github.com/nekomeowww/rc/apis/kubernetes/repositories/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -98,7 +98,7 @@ resources:
   domain: rc.ayaka.io
   group: repositories
   kind: RepositorySync
-  path: github.com/nekomeowww/rc/api/repositories/v1alpha1
+  path: github.com/nekomeowww/rc/apis/kubernetes/repositories/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -107,6 +107,6 @@ resources:
   domain: rc.ayaka.io
   group: workspaces
   kind: Actor
-  path: github.com/nekomeowww/rc/api/workspaces/v1alpha1
+  path: github.com/nekomeowww/rc/apis/kubernetes/workspaces/v1alpha1
   version: v1alpha1
 version: "3"

@@ -41,9 +41,9 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
-	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
-	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	repositoriesv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/repositories/v1alpha1"
+	configsv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/v1alpha1"
+	workspacesv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/controller"
 	repositoriescontroller "github.com/nekomeowww/rc/internal/controller/repositories"
 	workspacescontroller "github.com/nekomeowww/rc/internal/controller/workspaces"

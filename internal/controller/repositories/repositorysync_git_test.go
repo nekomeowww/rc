@@ -10,7 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
+	repositoriesv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/repositories/v1alpha1"
 )
 
 func TestSyncAdvancesParentAndPreservesDirtyChild(t *testing.T) {

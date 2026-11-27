@@ -8,9 +8,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	repositoriesv1alpha1 "github.com/nekomeowww/rc/api/repositories/v1alpha1"
-	configsv1alpha1 "github.com/nekomeowww/rc/api/v1alpha1"
-	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	repositoriesv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/repositories/v1alpha1"
+	configsv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/v1alpha1"
+	workspacesv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/workspaces/v1alpha1"
 	"github.com/nekomeowww/rc/internal/holdset"
 	"github.com/nekomeowww/rc/internal/repositoryaccess"
 	"github.com/nekomeowww/rc/internal/worktreestorage"

@@ -9,7 +9,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	workspacesv1alpha1 "github.com/nekomeowww/rc/api/workspaces/v1alpha1"
+	workspacesv1alpha1 "github.com/nekomeowww/rc/apis/kubernetes/workspaces/v1alpha1"
 )
 
 // imageChangePending reports whether the runtime uses an image other than the

@@ -4,8 +4,11 @@ ARG RUNNER_IMAGE=ghcr.io/nekomeowww/rc/runner:latest
 
 FROM node:26.13.1-bookworm-slim AS codex
 
+# renovate: datasource=npm depName=bun
 ARG BUN_VERSION=1.4.5
+# renovate: datasource=npm depName=@openai/codex
 ARG CODEX_VERSION=0.172.0
+# renovate: datasource=npm depName=pnpm
 ARG PNPM_VERSION=12.23.0
 
 RUN npm install --global --prefix /opt/openai \
@@ -19,6 +22,7 @@ RUN npm install --global --prefix /opt/openai \
 
 FROM ${RUNNER_IMAGE}
 
+# renovate: datasource=npm depName=@openai/codex
 ARG CODEX_VERSION=0.172.0
 
 LABEL org.opencontainers.image.source="https://github.com/nekomeowww/rc" \

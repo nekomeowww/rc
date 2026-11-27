@@ -1,0 +1,59 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "prConcurrentLimit": 5,
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track pinned runner tool ARG *_VERSION declarations in Dockerfiles",
+      "managerFilePatterns": [
+        "/^Dockerfile\\.runner$/",
+        "/^images/.+/Dockerfile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[^\\s]+) depName=(?<depName>[^\\s]+)(?: versioning=(?<versioning>[^\\s]+))?(?: extractVersion=(?<extractVersion>[^\\s]+))?\\nARG [A-Z0-9_]+_VERSION=(?<currentValue>[^\\s]+)"
+      ]
+    },
+    {
+      "customType": "regex",
+      "description": "Track pinned Windows runner tool versions in prepare-ci-assets.ps1",
+      "managerFilePatterns": [
+        "/^images/runner-windows/prepare-ci-assets\\.ps1$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[^\\s]+) depName=(?<depName>[^\\s]+)(?: versioning=(?<versioning>[^\\s]+))?(?: extractVersion=(?<extractVersion>[^\\s]+))?\\n\\s*\\[string\\]\\$[A-Za-z0-9_]+Version\\s*=\\s*'(?<currentValue>[^']+)'"
+      ]
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Group all runner image dependency updates into a single PR",
+      "matchFileNames": [
+        "Dockerfile.runner",
+        "images/**"
+      ],
+      "groupName": "runner image dependencies",
+      "commitMessagePrefix": "chore(images):",
+      "labels": [
+        "dependencies",
+        "images"
+      ]
+    },
+    {
+      "description": "Stay on Node 26 LTS/stable line across Linux and Windows runners",
+      "matchPackageNames": [
+        "node"
+      ],
+      "allowedVersions": "/^26\\./"
+    },
+    {
+      "description": "Stay on Python 3.14 line for Windows node-gyp compatibility",
+      "matchDatasources": [
+        "python-version"
+      ],
+      "allowedVersions": "/^3\\.14\\./"
+    }
+  ]
+}

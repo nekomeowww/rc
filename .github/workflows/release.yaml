@@ -5,6 +5,19 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      bump:
+        description: Semver component to bump when version is not specified
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+      version:
+        description: Optional explicit semantic version without leading v (for example 0.28.0)
+        type: string
+        required: false
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
@@ -16,24 +29,65 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     permissions:
       contents: write
     steps:
-      - name: Require a version tag
-        id: version
-        shell: bash
-        run: |
-          if [[ ! "${GITHUB_REF}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Release must run against a stable v-prefixed semantic version tag." >&2
-            exit 1
-          fi
-          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
       - name: Clone the code
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          persist-credentials: false
+
+      - name: Resolve or cut release version tag
+        id: version
+        shell: bash
+        env:
+          INPUT_BUMP: ${{ inputs.bump }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+              echo "Manual release dispatch must run from main." >&2
+              exit 1
+            fi
+            if [[ -n "${INPUT_VERSION}" ]]; then
+              if [[ ! "${INPUT_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "version must be a semantic version without a leading v (e.g. 0.28.0)." >&2
+                exit 1
+              fi
+              next_version="${INPUT_VERSION}"
+            else
+              latest_tag="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)"
+              if [[ -z "${latest_tag}" ]]; then
+                latest_tag="v0.0.0"
+              fi
+              IFS='.' read -r major minor patch <<< "${latest_tag#v}"
+              case "${INPUT_BUMP:-patch}" in
+                major) major=$((major + 1)); minor=0; patch=0 ;;
+                minor) minor=$((minor + 1)); patch=0 ;;
+                patch) patch=$((patch + 1)) ;;
+                *) echo "Unsupported bump: ${INPUT_BUMP}" >&2; exit 1 ;;
+              esac
+              next_version="${major}.${minor}.${patch}"
+            fi
+            next_tag="v${next_version}"
+            if git rev-parse -q --verify "refs/tags/${next_tag}" >/dev/null; then
+              echo "Tag ${next_tag} already exists." >&2
+              exit 1
+            fi
+            git tag "${next_tag}" HEAD
+            git push origin "refs/tags/${next_tag}"
+            echo "version=${next_version}" >> "$GITHUB_OUTPUT"
+            echo "tag=${next_tag}" >> "$GITHUB_OUTPUT"
+          else
+            if [[ ! "${GITHUB_REF}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Release must run against a stable v-prefixed semantic version tag." >&2
+              exit 1
+            fi
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Require macOS signing credentials
         shell: bash
@@ -116,6 +170,7 @@ jobs:
       - name: Clone the code
         uses: actions/checkout@v6
         with:
+          ref: ${{ needs.publish.outputs.tag }}
           persist-credentials: false
 
       - name: Generate image metadata
@@ -126,9 +181,9 @@ jobs:
           flavor: |
             latest=true
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
+            type=semver,value=${{ needs.publish.outputs.tag }},pattern={{version}}
+            type=semver,value=${{ needs.publish.outputs.tag }},pattern={{major}}.{{minor}}
+            type=semver,value=${{ needs.publish.outputs.tag }},pattern={{major}},enable=${{ !startsWith(needs.publish.outputs.tag, 'v0.') }}
 
       - name: Setup QEMU
         uses: docker/setup-qemu-action@v3
@@ -178,6 +233,7 @@ jobs:
       - name: Clone the code
         uses: actions/checkout@v6
         with:
+          ref: ${{ needs.publish.outputs.tag }}
           persist-credentials: false
 
       - name: Setup Go
@@ -315,13 +371,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.publish.outputs.tag }}
         run: gh release edit "$RELEASE_TAG" --draft=false --latest
 
       - name: Update the Homebrew tap
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.publish.outputs.tag }}
         run: |
           gh auth setup-git
           git clone https://github.com/nekomeowww/homebrew-rc.git homebrew-rc

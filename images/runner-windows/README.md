@@ -50,22 +50,16 @@ base-image family. The staging script runs `node.exe --version` to verify that
 it executes and report the supplied version; it does not require a specific
 patch release. The versions and hashes below match the CI staging defaults.
 
-The fixed build assets have these SHA-256 hashes:
-
-```text
-e2edda75bfb089654705cf65a13b58933bfd5f57148e8ebda916f58a2474f1f7  node-v26.13.1-win-x64.zip
-92480239264744fe0386a1bd8275786fefa126e3129e56a68e22b52c73329965  python-3.14.10-amd64.exe
-0041a25845bc8c399b42d20f836616cb0b7020a8605348c089563bbc0c023356  cmake-4.5.1-windows-x86_64.msi
-```
-
-The staging script verifies these three fixed-version assets before copying
-them into the build context. Microsoft distributes the Visual Studio and VC
-Redistributable bootstrappers through mutable official release URLs, so their
-exact servicing build is not reproducible across dates. The script verifies
-their Microsoft Authenticode signatures instead. They use unattended
-installation and accept success with either exit code `0` or the
-reboot-required code `3010`. The image removes the staged installers and
-Package Cache after setup, and Build Tools uses `--nocache`.
+The staging script verifies Node, Python, and CMake downloads against their
+official upstream SHA-256 manifests (`SHASUMS256.txt`, Python's `.spdx.json`,
+and Kitware's `SHA-256.txt`) before copying them into the build context.
+Microsoft distributes the Visual Studio and VC Redistributable bootstrappers
+through mutable official release URLs, so their exact servicing build is not
+reproducible across dates. The script verifies their Microsoft Authenticode
+signatures instead. They use unattended installation and accept success with
+either exit code `0` or the reboot-required code `3010`. The image removes the
+staged installers and Package Cache after setup, and Build Tools uses
+`--nocache`.
 
 Install the npm tools with the pinned Node on PATH, into a new dedicated prefix:
 

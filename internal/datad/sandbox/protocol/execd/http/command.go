@@ -48,37 +48,15 @@ func (s *Server) handleRunCommand(c echo.Context) error {
 		execd.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST_BODY", fmt.Sprintf("decode request: %v", err))
 		return nil
 	}
-	hasCommand := strings.TrimSpace(req.Command) != ""
-	hasArgv := len(req.Argv) > 0
-	if hasCommand == hasArgv {
-		execd.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST_BODY", "supply exactly one of command or argv")
-		return nil
-	}
 	if req.GID != nil && req.UID == nil {
 		execd.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST_BODY", "gid requires uid")
 		return nil
 	}
 
-	var cmd string
-	var args []string
-	var content string
-	if hasArgv {
-		if req.Argv[0] == "" {
-			execd.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST_BODY", "argv[0] must be non-empty")
-			return nil
-		}
-		cmd = req.Argv[0]
-		args = req.Argv[1:]
-		content = strings.Join(req.Argv, " ")
-	} else {
-		if runtime.GOOS == "windows" {
-			cmd = "cmd.exe"
-			args = []string{"/C", req.Command}
-		} else {
-			cmd = "/bin/sh"
-			args = []string{"-c", req.Command}
-		}
-		content = req.Command
+	cmd, args, content, err := resolveCommand(req)
+	if err != nil {
+		execd.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST_BODY", err.Error())
+		return nil
 	}
 
 	cwd := s.workspaceDir
@@ -359,6 +337,24 @@ func (s *Server) handleCommandLogs(c echo.Context) error {
 
 	c.Response().Header().Set(execd.TailCursorHeader, strconv.FormatInt(nextCursor, 10))
 	return c.Blob(http.StatusOK, "text/plain; charset=utf-8", slice)
+}
+
+func resolveCommand(req execd.RunCommandRequest) (string, []string, string, error) {
+	hasCommand := strings.TrimSpace(req.Command) != ""
+	hasArgv := len(req.Argv) > 0
+	if hasCommand == hasArgv {
+		return "", nil, "", errors.New("supply exactly one of command or argv")
+	}
+	if hasArgv {
+		if req.Argv[0] == "" {
+			return "", nil, "", errors.New("argv[0] must be non-empty")
+		}
+		return req.Argv[0], req.Argv[1:], strings.Join(req.Argv, " "), nil
+	}
+	if runtime.GOOS == "windows" {
+		return "cmd.exe", []string{"/C", req.Command}, req.Command, nil
+	}
+	return "/bin/sh", []string{"-c", req.Command}, req.Command, nil
 }
 
 func writeChunkSSE(w http.ResponseWriter, flusher http.Flusher, chunk rckube.DataPlaneChunk) {

@@ -14,6 +14,7 @@ require (
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/jedib0t/go-pretty/v6 v6.8.3
 	github.com/labstack/echo/v4 v4.16.6
+	github.com/nekomeowww/bo v1.1.1
 	github.com/nekomeowww/xo v1.18.1
 	github.com/onsi/ginkgo/v2 v2.27.4
 	github.com/onsi/gomega v1.39.0

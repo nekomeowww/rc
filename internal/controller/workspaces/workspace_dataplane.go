@@ -18,10 +18,9 @@ package workspaces
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"fmt"
 
+	"github.com/nekomeowww/xo"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -118,11 +117,10 @@ func (r *WorkspaceReconciler) ensureDataPlaneAccessToken(ctx context.Context, wo
 		return "", "", "", err
 	}
 
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
+	token, err := xo.RandomBase64Token(32)
+	if err != nil {
 		return "", "", "", fmt.Errorf("generate Data Plane access token: %w", err)
 	}
-	token := base64.RawURLEncoding.EncodeToString(raw)
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{

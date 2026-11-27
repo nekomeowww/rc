@@ -23,8 +23,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
+	"github.com/nekomeowww/bo"
 	"github.com/spf13/cobra"
 
 	envdconnectrpc "github.com/nekomeowww/rc/internal/datad/sandbox/protocol/envd/connectrpc"
@@ -205,13 +207,48 @@ func newServeCommand() *cobra.Command {
 			if err := supervisor.RecoverHistory(time.Now()); err != nil {
 				return fmt.Errorf("recover process history: %w", err)
 			}
-			serveCtx, cancel := context.WithCancel(command.Context())
-			defer cancel()
+			app := bo.New()
+			var (
+				serveErrMu sync.Mutex
+				serveErr   error
+			)
+			recordErr := func(err error) error {
+				if err != nil {
+					serveErrMu.Lock()
+					if serveErr == nil {
+						serveErr = err
+					}
+					serveErrMu.Unlock()
+				}
+				return err
+			}
+			addServer := func(serve func(context.Context) error) {
+				app.Add(func(_ context.Context, lc bo.LifeCycle) error {
+					srvCtx, srvCancel := context.WithCancel(command.Context())
+					done := make(chan struct{})
+					lc.Append(bo.Hook{
+						OnStart: func(_ context.Context) error {
+							defer close(done)
+							return recordErr(serve(srvCtx))
+						},
+						OnStop: func(stopCtx context.Context) error {
+							srvCancel()
+							select {
+							case <-done:
+								return nil
+							case <-stopCtx.Done():
+								return stopCtx.Err()
+							}
+						},
+					})
+					return nil
+				})
+			}
 
-			var errChs []chan error
+			addServer(func(ctx context.Context) error {
+				return runtime.NewServer(supervisor).Serve(ctx, socketPath)
+			})
 			if execdListen != "" {
-				ch := make(chan error, 1)
-				errChs = append(errChs, ch)
 				execdServer := execdhttp.NewServer(supervisor, native.Home, native.Workspace, "")
 				execdCfg := execdhttp.Config{
 					ListenAddr:   execdListen,
@@ -222,17 +259,11 @@ func newServeCommand() *cobra.Command {
 					HomeDir:      native.Home,
 					WorkspaceDir: native.Workspace,
 				}
-				go func() {
-					err := execdServer.Serve(serveCtx, execdCfg)
-					if err != nil {
-						cancel()
-					}
-					ch <- err
-				}()
+				addServer(func(ctx context.Context) error {
+					return execdServer.Serve(ctx, execdCfg)
+				})
 			}
 			if dataPlaneListen != "" {
-				ch := make(chan error, 1)
-				errChs = append(errChs, ch)
 				dpServer := envdconnectrpc.NewServer(supervisor, native.Home, "")
 				dpCfg := envdconnectrpc.Config{
 					ListenAddr: dataPlaneListen,
@@ -242,23 +273,13 @@ func newServeCommand() *cobra.Command {
 					Insecure:   dataPlaneInsecure,
 					HomeDir:    native.Home,
 				}
-				go func() {
-					err := dpServer.Serve(serveCtx, dpCfg)
-					if err != nil {
-						cancel()
-					}
-					ch <- err
-				}()
+				addServer(func(ctx context.Context) error {
+					return dpServer.Serve(ctx, dpCfg)
+				})
 			}
 
-			localErr := runtime.NewServer(supervisor).Serve(serveCtx, socketPath)
-			cancel()
-			for _, ch := range errChs {
-				if dpErr := <-ch; dpErr != nil && localErr == nil {
-					localErr = dpErr
-				}
-			}
-			return localErr
+			app.Start()
+			return serveErr
 		},
 	}
 	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")

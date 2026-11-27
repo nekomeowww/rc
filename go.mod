@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	al.essio.dev/pkg/shellescape v1.6.1
 	connectrpc.com/connect v1.21.1
-	github.com/Microsoft/go-winio v0.6.2
+	github.com/Microsoft/go-winio v0.6.4
 	github.com/bmatcuk/doublestar/v4 v4.10.7
 	github.com/briandowns/spinner v1.23.2
 	github.com/charmbracelet/x/conpty v0.2.0

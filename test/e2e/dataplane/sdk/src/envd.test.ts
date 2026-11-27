@@ -95,4 +95,28 @@ describe('E2B envd SDK conformance & cross-protocol interop (over mTLS Gateway)'
     }
     expect(ptyOut).toContain('E2B_PTY_OK')
   })
+
+  it('seeds .env, service script, and .agents/skills SKILL.md in one batch upload then runs the script', async () => {
+    const sandbox = createSandbox()
+    const envPath = `${emulator.workspaceDir}/.env.e2b`
+    const scriptPath = `${emulator.workspaceDir}/bin/service-entry.sh`
+    const skillPath = `${emulator.workspaceDir}/.agents/skills/e2b-skill/SKILL.md`
+
+    await sandbox.files.write([
+      { path: envPath, data: 'E2B_MODE=active\nE2B_TOKEN_HINT=loaded\n' },
+      {
+        path: scriptPath,
+        data: '#!/bin/sh\nset -eu\n. "$1"\necho "e2b-svc mode=$E2B_MODE hint=$E2B_TOKEN_HINT"\n',
+      },
+      { path: skillPath, data: '---\nname: e2b-skill\n---\n\n# E2B Seeded Skill\n' },
+    ])
+
+    expect(await sandbox.files.read(skillPath)).toContain('name: e2b-skill')
+
+    const res = await sandbox.commands.run(`chmod +x "${scriptPath}" && "${scriptPath}" "${envPath}"`, {
+      cwd: emulator.workspaceDir,
+    })
+    expect(res.exitCode).toBe(0)
+    expect(res.stdout.trim()).toBe('e2b-svc mode=active hint=loaded')
+  })
 })

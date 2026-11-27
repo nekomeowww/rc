@@ -159,4 +159,75 @@ describe('OpenSandbox execd SDK conformance (over mTLS Gateway)', () => {
 
     expect(output).toContain('EXECD_WS_PTY_OK')
   })
+
+  it('seeds .env, executable service script (mode 755), and nested .agents/skills SKILL.md then runs the service', async () => {
+    const stack = createStack()
+    const envPath = `${emulator.workspaceDir}/.env`
+    const scriptPath = `${emulator.workspaceDir}/scripts/run-worker.sh`
+    const skillPath = `${emulator.workspaceDir}/.agents/skills/demo-skill/SKILL.md`
+
+    await stack.files.writeFiles([
+      {
+        path: envPath,
+        data: 'APP_ENV=staging\nSERVICE_GREETING=hello-from-dotenv\n',
+        mode: 600,
+      },
+      {
+        path: scriptPath,
+        data: [
+          '#!/bin/sh',
+          'set -eu',
+          '. "$1"',
+          'echo "worker started env=$APP_ENV greeting=$SERVICE_GREETING"',
+          'sleep 30',
+          '',
+        ].join('\n'),
+        mode: 755,
+      },
+      {
+        path: skillPath,
+        data: '---\nname: demo-skill\ndescription: Seeded skill\n---\n\n# Demo Skill\n',
+        mode: 644,
+      },
+    ])
+
+    // Verify permissions and dotfile visibility
+    const infos = await stack.files.getFileInfo([envPath, scriptPath, skillPath])
+    expect(infos[envPath]?.mode).toBe(600)
+    expect(infos[scriptPath]?.mode).toBe(755)
+    expect(infos[skillPath]?.mode).toBe(644)
+
+    const skillContent = await stack.files.readFile(skillPath)
+    expect(skillContent).toContain('name: demo-skill')
+
+    const foundSkills = await stack.files.search({
+      path: `${emulator.workspaceDir}/.agents`,
+      pattern: 'SKILL.md',
+    })
+    expect(foundSkills.map(f => f.path)).toContain(skillPath)
+
+    // Launch the seeded executable script directly via argv as a background service
+    const svc = await stack.commands.run(`${scriptPath} ${envPath}`, {
+      background: true,
+      workingDirectory: emulator.workspaceDir,
+    })
+    expect(svc.id).toBeTruthy()
+    const svcId = svc.id!
+
+    let svcLogs = ''
+    let cursor = 0
+    for (let i = 0; i < 20; i++) {
+      const res = await stack.commands.getBackgroundCommandLogs(svcId, cursor)
+      svcLogs += res.content
+      cursor = res.cursor ?? cursor
+      if (svcLogs.includes('worker started env=staging greeting=hello-from-dotenv'))
+        break
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+
+    expect(svcLogs).toContain('worker started env=staging greeting=hello-from-dotenv')
+    expect((await stack.commands.getCommandStatus(svcId)).running).toBe(true)
+
+    await stack.commands.interrupt(svcId)
+  })
 })

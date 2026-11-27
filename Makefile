@@ -246,7 +246,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: docker-build-rc-kube ## Build docker images with the manager and the rc-kube it injects.
-	$(CONTAINER_TOOL) build --build-arg VERSION="$(VERSION)" -t ${IMG} .
+	$(CONTAINER_TOOL) build --build-arg VERSION="$(VERSION)" -f images/controller/Dockerfile -t ${IMG} .
 
 .PHONY: docker-push
 docker-push: docker-push-rc-kube ## Push docker images with the manager and the rc-kube it injects.
@@ -254,7 +254,7 @@ docker-push: docker-push-rc-kube ## Push docker images with the manager and the 
 
 .PHONY: docker-build-rc-kube
 docker-build-rc-kube: ## Build the rc-kube image that the manager injects into Linux runtime Pods.
-	$(CONTAINER_TOOL) build --build-arg VERSION="$(VERSION)" -f Dockerfile.rc-kube -t ${RC_KUBE_IMG} .
+	$(CONTAINER_TOOL) build --build-arg VERSION="$(VERSION)" -f images/rc-kube/Dockerfile -t ${RC_KUBE_IMG} .
 
 .PHONY: docker-push-rc-kube
 docker-push-rc-kube: ## Push the rc-kube image.
@@ -262,7 +262,7 @@ docker-push-rc-kube: ## Push the rc-kube image.
 
 .PHONY: docker-build-runner
 docker-build-runner: ## Build the shared Repository, Worktree, and Workspace runner image.
-	$(CONTAINER_TOOL) build -f Dockerfile.runner -t ${RUNNER_IMG} .
+	$(CONTAINER_TOOL) build -f images/runner/Dockerfile -t ${RUNNER_IMG} .
 
 .PHONY: docker-build-e2e-runner
 docker-build-e2e-runner: ## Build the minimal Workspace runtime image used by the Kind e2e suite.
@@ -285,21 +285,21 @@ RUNNER_PLATFORMS ?= linux/arm64,linux/amd64
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
 	- $(CONTAINER_TOOL) buildx create --name rc-builder
 	$(CONTAINER_TOOL) buildx use rc-builder
-	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile .
+	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f images/controller/Dockerfile .
 	- $(CONTAINER_TOOL) buildx rm rc-builder
 
 .PHONY: docker-buildx-rc-kube
 docker-buildx-rc-kube: ## Build and push the rc-kube image for cross-platform support
 	- $(CONTAINER_TOOL) buildx create --name rc-builder
 	$(CONTAINER_TOOL) buildx use rc-builder
-	$(CONTAINER_TOOL) buildx build --push --platform=$(RUNNER_PLATFORMS) --build-arg VERSION="$(VERSION)" --tag ${RC_KUBE_IMG} -f Dockerfile.rc-kube .
+	$(CONTAINER_TOOL) buildx build --push --platform=$(RUNNER_PLATFORMS) --build-arg VERSION="$(VERSION)" --tag ${RC_KUBE_IMG} -f images/rc-kube/Dockerfile .
 	- $(CONTAINER_TOOL) buildx rm rc-builder
 
 .PHONY: docker-buildx-runner
 docker-buildx-runner: ## Build and push the shared runner image for cross-platform support
 	- $(CONTAINER_TOOL) buildx create --name rc-builder
 	$(CONTAINER_TOOL) buildx use rc-builder
-	$(CONTAINER_TOOL) buildx build --push --platform=$(RUNNER_PLATFORMS) --tag ${RUNNER_IMG} -f Dockerfile.runner .
+	$(CONTAINER_TOOL) buildx build --push --platform=$(RUNNER_PLATFORMS) --tag ${RUNNER_IMG} -f images/runner/Dockerfile .
 	- $(CONTAINER_TOOL) buildx rm rc-builder
 
 .PHONY: build-installer

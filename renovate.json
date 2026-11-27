@@ -9,7 +9,6 @@
       "customType": "regex",
       "description": "Track pinned runner tool ARG *_VERSION declarations in Dockerfiles",
       "managerFilePatterns": [
-        "/^Dockerfile\\.runner$/",
         "/^images/.+/Dockerfile$/"
       ],
       "matchStrings": [
@@ -31,7 +30,6 @@
     {
       "description": "Group all runner image dependency updates into a single PR",
       "matchFileNames": [
-        "Dockerfile.runner",
         "images/**"
       ],
       "groupName": "runner image dependencies",

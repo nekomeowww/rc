@@ -252,6 +252,31 @@ func TestNeedyRunnerNamesAreDNSLabels(t *testing.T) {
 	assert.NotEqual(t, long, needyWorkspaceRunnerName(strings.Repeat("a", 79)))
 }
 
+func TestNeedyExternalRunnerNamesAreDNSLabels(t *testing.T) {
+	assert.Equal(t, "ext-0123abcd89ab-mac", needyExternalRunnerName(testActorUID, "mac"))
+	assert.Equal(t, needyExternalRunnerName(testActorUID, "mac"), needyExternalRunnerName(testActorUID, "mac"), "the name is stable")
+	assert.NotEqual(t, needyExternalRunnerName(testActorUID, "mac"), needyExternalRunnerName("fedcba98-89ab-cdef-0123-456789abcdef", "mac"), "every Actor has its own name")
+
+	// Executor names may hold uppercase letters and underscores, which a DNS
+	// label may not; names spelled alike stay apart.
+	for _, executor := range []string{
+		"My_Mac",
+		"my-mac",
+		"my_mac",
+		"___",
+		strings.Repeat("A", 63),
+		strings.Repeat("a", 63),
+	} {
+		name := needyExternalRunnerName(testActorUID, executor)
+		assert.Empty(t, validation.IsDNS1123Label(name), executor)
+		assert.True(t, strings.HasPrefix(name, "ext-0123abcd89ab-"), executor)
+	}
+	assert.Equal(t, "ext-0123abcd89ab-my-mac", needyExternalRunnerName(testActorUID, "my-mac"))
+	assert.NotEqual(t, needyExternalRunnerName(testActorUID, "my-mac"), needyExternalRunnerName(testActorUID, "my_mac"))
+	assert.NotEqual(t, needyExternalRunnerName(testActorUID, "My_Mac"), needyExternalRunnerName(testActorUID, "my_mac"))
+	assert.True(t, strings.HasPrefix(needyExternalRunnerName(testActorUID, "My_Mac"), "ext-0123abcd89ab-my-mac-"))
+}
+
 func TestNeedyReplacesPrefixedSecrets(t *testing.T) {
 	prefixed := "needy-runner.ws-" + testExecutorName + "." + strings.Repeat("a", 64)
 	old := &corev1.Secret{

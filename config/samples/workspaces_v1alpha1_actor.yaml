@@ -34,3 +34,8 @@ spec:
   - name: dev
     workspaceRef:
       name: workspace-sample
+  # An external executor runs on a machine outside the cluster. rc mints its
+  # runner's credential and lists the runner name and the credential Secret
+  # in status.executors; route commands to it with `to: laptop`.
+  # - name: laptop
+  #   external: {}

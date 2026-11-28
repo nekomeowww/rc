@@ -74,7 +74,12 @@ type Daemon interface {
 	// connects, so placement is checked after that. A freshly minted runner
 	// already reads as online, so the status alone does not tell.
 	IsActorRunnerConnected(ctx context.Context, name string) (bool, error)
-	MintRunnerCredential(ctx context.Context, name string, ttl time.Duration) (string, error)
+	// IsExecutorRunnerConnected reports whether a runner has connected and
+	// offers at least one executor driver.
+	IsExecutorRunnerConnected(ctx context.Context, name string) (bool, error)
+	// MintRunnerCredential mints a credential that lets a runner named name
+	// declare only role.
+	MintRunnerCredential(ctx context.Context, name string, role Role, ttl time.Duration) (string, error)
 	RevokeRunnerCredential(ctx context.Context, name string) error
 	CreateRun(ctx context.Context, spec RunSpec) (Run, error)
 	GetRun(ctx context.Context, id string) (Run, error)
@@ -161,6 +166,24 @@ func (daemon *grpcDaemon) CheckPlacement(ctx context.Context, profileYAML string
 }
 
 func (daemon *grpcDaemon) IsActorRunnerConnected(ctx context.Context, name string) (bool, error) {
+	return daemon.isConnected(ctx, name, func(capabilities *needyv1.RunnerCapabilities) bool {
+		return slices.Contains(capabilities.GetActor(), needyv1.ActorDriver_ACTOR_DRIVER_LINUX_FIRECRACKER)
+	})
+}
+
+func (daemon *grpcDaemon) IsExecutorRunnerConnected(ctx context.Context, name string) (bool, error) {
+	return daemon.isConnected(ctx, name, func(capabilities *needyv1.RunnerCapabilities) bool {
+		return len(capabilities.GetExecutor()) > 0
+	})
+}
+
+// isConnected reports whether the runner is online and its capabilities,
+// which needy learns only when the runner connects, satisfy offers.
+func (daemon *grpcDaemon) isConnected(
+	ctx context.Context,
+	name string,
+	offers func(*needyv1.RunnerCapabilities) bool,
+) (bool, error) {
 	response, err := daemon.runners.ListRunners(ctx, &needyv1.ListRunnersRequest{})
 	if err != nil {
 		return false, fmt.Errorf("list runners: %w", classify(err))
@@ -170,17 +193,31 @@ func (daemon *grpcDaemon) IsActorRunnerConnected(ctx context.Context, name strin
 			continue
 		}
 
-		return slices.Contains(runner.GetCapabilities().GetActor(), needyv1.ActorDriver_ACTOR_DRIVER_LINUX_FIRECRACKER), nil
+		return offers(runner.GetCapabilities()), nil
 	}
 
 	return false, nil
 }
 
-func (daemon *grpcDaemon) MintRunnerCredential(ctx context.Context, name string, ttl time.Duration) (string, error) {
+func (daemon *grpcDaemon) MintRunnerCredential(
+	ctx context.Context,
+	name string,
+	role Role,
+	ttl time.Duration,
+) (string, error) {
+	roles := map[Role]needyv1.RunnerRole{
+		RoleActor:    needyv1.RunnerRole_RUNNER_ROLE_ACTOR,
+		RoleExecutor: needyv1.RunnerRole_RUNNER_ROLE_EXECUTOR,
+	}
+	wire, known := roles[role]
+	if !known {
+		// An empty roles list would allow every role.
+		return "", fmt.Errorf("mint runner credential %s: unknown role %q", name, role)
+	}
 	response, err := daemon.runners.MintRunnerCredential(ctx, &needyv1.MintRunnerCredentialRequest{
 		Name:  name,
 		TtlMs: ttl.Milliseconds(),
-		Roles: []needyv1.RunnerRole{needyv1.RunnerRole_RUNNER_ROLE_ACTOR},
+		Roles: []needyv1.RunnerRole{wire},
 	})
 	if err != nil {
 		return "", fmt.Errorf("mint runner credential %s: %w", name, classify(err))

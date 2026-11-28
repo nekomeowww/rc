@@ -32,7 +32,8 @@ spec:
       openAPIV3Schema:
         description: |-
           Actor is one needy run whose actor runs in a Firecracker VM in its own Pod.
-          Its commands go to Workspaces that serve as needy executors.
+          Its commands go to Workspaces that serve as needy executors, or to external
+          executor runners.
         properties:
           apiVersion:
             description: |-
@@ -242,13 +243,24 @@ spec:
                     || has(v.valueFrom.configMapKeyRef))
               executors:
                 description: |-
-                  executors binds the profile's executors to Workspaces. Every executor of
-                  the resolved profile must be bound; rc never places one on the daemon.
+                  executors binds the profile's executors to Workspaces or to external
+                  runners. Every executor of the resolved profile must be bound; rc never
+                  places one on the daemon.
                 items:
                   description: |-
-                    ActorExecutor binds one executor of the profile to a Workspace that serves
-                    as a needy executor (spec.needy.executor).
+                    ActorExecutor binds one executor of the profile to a runner: a Workspace
+                    that serves as a needy executor (spec.needy.executor), or an external
+                    runner on a machine outside the cluster.
                   properties:
+                    external:
+                      description: |-
+                        external binds the executor to a runner outside the cluster, such as a
+                        user's machine that runs `needy runner serve --roles executor` and
+                        dials the namespace's daemon. rc mints the runner's credential when the
+                        run starts and lists it in status.executors; whatever starts the runner
+                        reads the credential from that Secret. The run waits for the runner to
+                        connect for as long as it waits for the actor runner to start.
+                      type: object
                     name:
                       description: name is the executor's name in the profile's executors
                         map.
@@ -271,8 +283,11 @@ spec:
                       x-kubernetes-map-type: atomic
                   required:
                   - name
-                  - workspaceRef
                   type: object
+                  x-kubernetes-validations:
+                  - message: exactly one of workspaceRef and external must be set
+                    rule: '(has(self.workspaceRef) ? 1 : 0) + (has(self.external)
+                      ? 1 : 0) == 1'
                 maxItems: 16
                 type: array
                 x-kubernetes-list-map-keys:
@@ -1606,6 +1621,42 @@ spec:
                 type: array
                 x-kubernetes-list-map-keys:
                 - type
+                x-kubernetes-list-type: map
+              executors:
+                description: |-
+                  executors lists the runners of the external executors and the Secrets
+                  that hold their credentials, once rc has minted them. Workspace
+                  executors are not listed: rc runs their runners itself.
+                items:
+                  description: |-
+                    ActorExecutorStatus is the runner of an external executor. An outside
+                    system that starts the runner on the user's machine, such as a server that
+                    brokers the executor's attach to a user's device, reads the credential from
+                    credentialSecretName and hands it to the runner.
+                  properties:
+                    credentialSecretName:
+                      description: |-
+                        credentialSecretName is a Secret in the Actor's namespace that the
+                        Actor owns. Its key credential holds the runner's credential, which
+                        expires with the actor runner's and is revoked when the run ends.
+                      type: string
+                    name:
+                      description: name is the executor's name in spec.executors.
+                      type: string
+                    runnerName:
+                      description: |-
+                        runnerName is the needy runner name that the credential is minted for.
+                        The runner serves under this name.
+                      type: string
+                  required:
+                  - credentialSecretName
+                  - name
+                  - runnerName
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
                 x-kubernetes-list-type: map
               exitCode:
                 description: exitCode is the driving program's exit code once it exited.

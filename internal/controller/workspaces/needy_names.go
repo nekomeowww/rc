@@ -93,6 +93,41 @@ func needyActorRunnerName(uid string) string {
 	return "actor-" + strings.ReplaceAll(uid, "-", "")[:12]
 }
 
+// needyExternalRunnerName is the runner name of an Actor's external executor.
+// Like the actor runner's, it carries the Actor's UID, so it is fresh for
+// every Actor.
+func needyExternalRunnerName(uid, executor string) string {
+	return needyRunnerName("ext-"+strings.ReplaceAll(uid, "-", "")[:12]+"-", needyExecutorLabel(executor))
+}
+
+// needyExecutorLabel spells a profile's executor name, which may hold
+// uppercase letters and underscores, as part of a DNS label. A name that is
+// not one already is lowercased, its other characters become '-', and a hash
+// of the name keeps apart two names that would be spelled alike.
+func needyExecutorLabel(executor string) string {
+	if len(validation.IsDNS1123Label(executor)) == 0 {
+		return executor
+	}
+	spelled := strings.Trim(strings.Map(func(character rune) rune {
+		if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') {
+			return character
+		}
+		if character >= 'A' && character <= 'Z' {
+			return character - 'A' + 'a'
+		}
+
+		return '-'
+	}, executor), "-")
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(executor))
+	hash := rand.SafeEncodeString(fmt.Sprint(hasher.Sum32()))
+	if spelled == "" {
+		return hash
+	}
+
+	return spelled + "-" + hash
+}
+
 // needyRunnerName joins prefix and name into a runner name, which needy
 // requires to be a DNS label. A name that does not fit keeps its start and
 // gets a hash of the whole name, as Kubernetes names generated objects.

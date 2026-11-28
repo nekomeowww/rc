@@ -111,6 +111,14 @@ func needyActorPolicy(config NeedyConfig, namespace string) *networkingv1.Networ
 // needyDaemonPolicy admits the namespace's actor runners and executor
 // Workspaces, and the manager, to the daemon's control port. The daemon
 // itself dials only the internet: the base VM image and image layers.
+//
+// TODO(external-executor-ingress): the runner of an Actor's external
+// executor, outside the cluster, is not admitted, so with these policies it
+// cannot connect and the Actor fails with ExecutorRunnerOffline. There is no
+// ingress for it yet: external runners are meant to arrive through a cluster
+// byte-stream router that carries their gRPC to the namespace's daemon (the
+// needy Phase 3 data-plane design), which is not built. Admit that router's
+// Pods here when it lands, rather than opening the control port.
 func needyDaemonPolicy(config NeedyConfig, namespace string) *networkingv1.NetworkPolicy {
 	sources := []networkingv1.NetworkPolicyPeer{
 		{PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{workspacesv1alpha1.NeedyComponentLabel: needyComponentActor}}},

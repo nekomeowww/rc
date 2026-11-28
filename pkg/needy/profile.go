@@ -63,7 +63,7 @@ func ComposeProfile(text, actorRunner string, executorRunners, actorEnv map[stri
 			return "", fmt.Errorf("profile executor %s sets runner; rc chooses executor runners", name)
 		}
 		if _, bound := executorRunners[name]; !bound {
-			return "", fmt.Errorf("profile executor %s is not bound to a Workspace", name)
+			return "", fmt.Errorf("profile executor %s is not bound to a runner", name)
 		}
 	}
 	if decoded.Executors == nil && len(executorRunners) > 0 {

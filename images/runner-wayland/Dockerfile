@@ -91,9 +91,9 @@ ARG TARGETARCH
 # renovate: datasource=npm depName=corepack
 ARG COREPACK_VERSION=0.36.0
 # renovate: datasource=npm depName=@lobehub/cli
-ARG LOBEHUB_CLI_VERSION=0.0.271
+ARG LOBEHUB_CLI_VERSION=0.0.278
 # renovate: datasource=github-releases depName=moeru-ai/auv extractVersion=^v(?<version>.*)$
-ARG AUV_VERSION=0.0.43
+ARG AUV_VERSION=0.0.44
 # renovate: datasource=github-releases depName=just-containers/s6-overlay versioning=loose extractVersion=^v(?<version>.*)$
 ARG S6_OVERLAY_VERSION=3.2.3.2
 

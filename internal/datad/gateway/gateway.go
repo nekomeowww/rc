@@ -49,15 +49,18 @@ const (
 
 // Target describes the resolved runtime endpoints and authentication token for a Workspace.
 type Target struct {
-	Namespace    string
-	Name         string
-	Ready        bool
-	State        string
-	ExecdAddress string // host:port of the primary OpenSandbox execd listener (44772)
-	Address      string // host:port of the E2B envd-compatible listener (49983)
-	ServerName   string // expected mTLS ServerName (<name>.<namespace>.workspace.rc.ayaka.io)
-	AccessToken  string
-	Insecure     bool
+	Namespace         string
+	Name              string
+	Ready             bool
+	State             string
+	ExecdAddress      string   // host:port of the primary OpenSandbox execd listener (44772)
+	Address           string   // host:port of the E2B envd-compatible listener (49983)
+	SSHAddress        string   // host:port of the in-Pod mTLS SSH listener (2222)
+	SSHEnabled        bool     // true when spec.dataPlane.ssh.enabled is true
+	SSHAuthorizedKeys []string // OpenSSH authorized_keys entries allowed for this Workspace
+	ServerName        string   // expected mTLS ServerName (<name>.<namespace>.workspace.rc.ayaka.io)
+	AccessToken       string
+	Insecure          bool
 }
 
 // Resolver looks up the live routing target and current access token for a Workspace.

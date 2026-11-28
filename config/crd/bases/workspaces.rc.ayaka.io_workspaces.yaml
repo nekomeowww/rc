@@ -1063,6 +1063,50 @@ spec:
                     description: enabled turns on the in-Pod envd listener and Data
                       Plane Gateway routing.
                     type: boolean
+                  ssh:
+                    description: ssh configures optional SSH access through the Data
+                      Plane Gateway.
+                    properties:
+                      authorizedKeys:
+                        description: |-
+                          authorizedKeys lists OpenSSH public keys (for example ssh-ed25519 ...)
+                          allowed to authenticate to this Workspace over SSH.
+                        items:
+                          type: string
+                        maxItems: 64
+                        type: array
+                      authorizedKeysSecretRef:
+                        description: |-
+                          authorizedKeysSecretRef references a Secret key containing
+                          newline-separated OpenSSH authorized_keys entries.
+                        properties:
+                          key:
+                            description: The key of the secret to select from.  Must
+                              be a valid secret key.
+                            type: string
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                          optional:
+                            description: Specify whether the Secret or its key must
+                              be defined
+                            type: boolean
+                        required:
+                        - key
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      enabled:
+                        default: true
+                        description: enabled turns on the in-Pod mTLS SSH listener
+                          and Gateway SSH routing.
+                        type: boolean
+                    type: object
                 type: object
               defaultWorkingDirectory:
                 description: defaultWorkingDirectory is used when a process does not

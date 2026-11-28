@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package rc.datad.ssh.v1alpha1;
+
+// SSHAuthMethod identifies how the SSH client is authenticating.
+enum SSHAuthMethod {
+  SSH_AUTH_METHOD_UNSPECIFIED = 0;
+  SSH_AUTH_METHOD_PUBLIC_KEY = 1;
+  SSH_AUTH_METHOD_PASSWORD = 2;
+}
+
+// AuthenticateRequest carries the client's SSH handshake metadata and
+// credential to an external gRPC auth/routing plugin (such as lobe-iaas or an
+// enterprise identity/routing adapter).
+message AuthenticateRequest {
+  // username is the raw SSH username sent by the client (for example "neko").
+  string username = 1;
+  // authority is the optional target hostname (for example "ws-abc.lobe.sh")
+  // extracted from TLS SNI or a front-door proxy.
+  string authority = 2;
+  // remote_addr is the client's remote TCP address ("ip:port").
+  string remote_addr = 3;
+  // method is the SSH authentication method being attempted.
+  SSHAuthMethod method = 4;
+  // public_key is the OpenSSH authorized_keys wire representation of the
+  // client's offered public key when method is SSH_AUTH_METHOD_PUBLIC_KEY.
+  string public_key = 5;
+  // public_key_fingerprint is the SHA-256 fingerprint (for example
+  // "SHA256:...") of public_key when method is SSH_AUTH_METHOD_PUBLIC_KEY.
+  string public_key_fingerprint = 6;
+  // password is the plaintext password when method is SSH_AUTH_METHOD_PASSWORD.
+  string password = 7;
+}
+
+// AuthenticateResponse instructs the Data Plane Gateway whether to accept the
+// SSH connection and which local-cluster Workspace to route it to.
+message AuthenticateResponse {
+  // allowed must be true for the SSH authentication attempt to succeed.
+  bool allowed = 1;
+  // namespace is the target Kubernetes namespace in this cluster.
+  string namespace = 2;
+  // workspace is the target Workspace name in this cluster.
+  string workspace = 3;
+  // user_id is an optional external identity recorded for audit/logging.
+  string user_id = 4;
+  // deny_reason is an optional human-readable reason for server-side logging
+  // (never echoed verbatim to unauthenticated clients).
+  string deny_reason = 5;
+}
+
+// SSHAuthService is implemented by external authentication and routing plugins
+// called by the rc Data Plane Gateway.
+service SSHAuthService {
+  rpc Authenticate(AuthenticateRequest) returns (AuthenticateResponse);
+}

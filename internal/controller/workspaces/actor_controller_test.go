@@ -168,8 +168,14 @@ type actorHarness struct {
 
 func newActorHarness(t *testing.T, objects ...client.Object) *actorHarness {
 	t.Helper()
+
+	return newActorHarnessFor(t, testActor(), objects...)
+}
+
+func newActorHarnessFor(t *testing.T, actor *workspacesv1alpha1.Actor, objects ...client.Object) *actorHarness {
+	t.Helper()
 	scheme := needyTestScheme(t)
-	objects = append(objects, testActor())
+	objects = append(objects, actor)
 	kube := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&workspacesv1alpha1.Actor{}, &corev1.Pod{}, &appsv1.Deployment{}).
 		WithObjects(objects...).Build()
@@ -279,6 +285,187 @@ func TestActorStartsARunOnItsOwnRunner(t *testing.T) {
 	command := strings.Join(container.Command, " ")
 	assert.Contains(t, command, "--roles actor --ephemeral")
 	assert.Contains(t, command, "--gateway tcp://needy-daemon."+testNamespace+".svc:7401")
+}
+
+const (
+	testEnvSource     = "service"
+	testEnvGatewayURL = "https://gateway.example.com"
+	testEnvGatewayKey = "gateway-url"
+)
+
+func envActor() *workspacesv1alpha1.Actor {
+	actor := testActor()
+	actor.Spec.Profile.Inline = "extends: builtin:opencode\nactor:\n  env:\n    KEPT: profile\n    SERVICE_URL: https://profile.example.com\ncommands:\n  - { match: \"**\", to: ws }\n"
+	actor.Spec.Env = []corev1.EnvVar{
+		{
+			Name:  "SERVICE_URL",
+			Value: "https://service.example.com",
+		},
+		{
+			Name: "SERVICE_API_KEY",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: testEnvSource},
+					Key:                  "api-key",
+				},
+			},
+		},
+		{
+			Name: "SERVICE_GATEWAY_URL",
+			ValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: testEnvSource},
+					Key:                  testEnvGatewayKey,
+				},
+			},
+		},
+		{
+			Name: "OPTIONAL",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "absent"},
+					Key:                  "absent-key",
+					Optional:             new(true),
+				},
+			},
+		},
+	}
+
+	return actor
+}
+
+func TestActorPassesItsEnvToTheRun(t *testing.T) {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: testEnvSource, Namespace: testNamespace},
+		Data:       map[string][]byte{"api-key": []byte("key")},
+	}
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: testEnvSource, Namespace: testNamespace},
+		Data:       map[string]string{testEnvGatewayKey: testEnvGatewayURL},
+	}
+	harness := newActorHarnessFor(t, envActor(), executorWorkspace(), daemonClientSecret(), availableDaemon(), secret, configMap)
+	harness.reconcile()
+
+	require.Len(t, harness.daemon.created, 1)
+	var profile map[string]any
+	require.NoError(t, yaml.Unmarshal([]byte(harness.daemon.created[0].ProfileYAML), &profile))
+	assert.Equal(t, map[string]any{
+		"KEPT":                "profile",
+		"SERVICE_URL":         "https://service.example.com",
+		"SERVICE_API_KEY":     "key",
+		"SERVICE_GATEWAY_URL": testEnvGatewayURL,
+	}, profile["actor"].(map[string]any)["env"])
+	for _, container := range harness.pod().Spec.Containers {
+		for _, variable := range container.Env {
+			assert.NotEqual(t, "SERVICE_API_KEY", variable.Name, "the runner Pod does not get the actor's env")
+		}
+	}
+}
+
+func TestActorWaitsForItsEnvSecret(t *testing.T) {
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: testEnvSource, Namespace: testNamespace},
+		Data:       map[string]string{testEnvGatewayKey: testEnvGatewayURL},
+	}
+	harness := newActorHarnessFor(t, envActor(), executorWorkspace(), daemonClientSecret(), availableDaemon(), configMap)
+	result := harness.reconcile()
+
+	actor := harness.actor()
+	assert.Equal(t, workspacesv1alpha1.ActorPhasePending, actor.Status.Phase)
+	assert.Equal(t, workspacesv1alpha1.ActorReasonEnvNotReady, actor.Status.Conditions[0].Reason)
+	assert.Contains(t, actor.Status.Conditions[0].Message, "Secret service of env SERVICE_API_KEY does not exist")
+	assert.Positive(t, result.RequeueAfter)
+	assert.Empty(t, harness.daemon.minted, "nothing starts before the env is readable")
+	assert.Empty(t, harness.daemon.created)
+}
+
+func TestActorWaitsForAMissingEnvKey(t *testing.T) {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: testEnvSource, Namespace: testNamespace},
+		Data:       map[string][]byte{"unrelated": []byte("unused")},
+	}
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: testEnvSource, Namespace: testNamespace},
+		Data:       map[string]string{testEnvGatewayKey: testEnvGatewayURL},
+	}
+	harness := newActorHarnessFor(t, envActor(), executorWorkspace(), daemonClientSecret(), availableDaemon(), secret, configMap)
+	harness.reconcile()
+
+	actor := harness.actor()
+	assert.Equal(t, workspacesv1alpha1.ActorReasonEnvNotReady, actor.Status.Conditions[0].Reason)
+	assert.Contains(t, actor.Status.Conditions[0].Message, "Secret service has no key api-key")
+	assert.Empty(t, harness.daemon.created)
+}
+
+func TestActorShapesItsRunnerPod(t *testing.T) {
+	actor := testActor()
+	actor.Spec.Pod = &workspacesv1alpha1.ActorPod{
+		Metadata: &workspacesv1alpha1.WorkspacePodMetadata{
+			Labels: map[string]string{
+				"tenant.example.com/id": "t1",
+				appNameLabel:            "not-needy",
+			},
+			Annotations: map[string]string{
+				"example.com/cost": "actors",
+				testDoNotDisrupt:   "false",
+			},
+		},
+		NodeSelector: map[string]string{
+			corev1.LabelTopologyZone: "zone-a",
+			testKVMResource:          "false",
+		},
+		Tolerations: []corev1.Toleration{
+			{
+				Key:      "example.com/tenant",
+				Operator: corev1.TolerationOpExists,
+			},
+		},
+		Affinity: &corev1.Affinity{
+			PodAntiAffinity: &corev1.PodAntiAffinity{},
+		},
+		PriorityClassName: "actors",
+		ImagePullSecrets: []corev1.LocalObjectReference{
+			{Name: "registry"},
+		},
+	}
+	harness := newActorHarnessFor(t, actor, executorWorkspace(), daemonClientSecret(), availableDaemon())
+	harness.reconcile()
+
+	pod := harness.pod()
+	assert.Equal(t, "t1", pod.Labels["tenant.example.com/id"])
+	assert.Equal(t, needyAppName, pod.Labels[appNameLabel], "rc's labels win")
+	assert.Equal(t, needyComponentActor, pod.Labels[workspacesv1alpha1.NeedyComponentLabel])
+	assert.Equal(t, "actors", pod.Annotations["example.com/cost"])
+	assert.Equal(t, annotationTrue, pod.Annotations[testDoNotDisrupt], "rc's annotations win")
+	assert.Equal(t, map[string]string{
+		corev1.LabelTopologyZone: "zone-a",
+		testKVMResource:          testTrueValue,
+	}, pod.Spec.NodeSelector, "the manager's KVM selector wins")
+	require.Len(t, pod.Spec.Tolerations, 2)
+	assert.Equal(t, testKVMResource, pod.Spec.Tolerations[0].Key)
+	assert.Equal(t, "example.com/tenant", pod.Spec.Tolerations[1].Key)
+	assert.NotNil(t, pod.Spec.Affinity.PodAntiAffinity)
+	assert.Equal(t, "actors", pod.Spec.PriorityClassName)
+	assert.Equal(t, []corev1.LocalObjectReference{{Name: "registry"}}, pod.Spec.ImagePullSecrets)
+	assert.False(t, *pod.Spec.AutomountServiceAccountToken)
+	assert.Equal(t, map[string]string{testKVMResource: testTrueValue}, map[string]string(harness.reconciler.Config.KVMNodeSelector), "the manager's selector is not changed")
+}
+
+func TestActorRefusesInvalidPodMetadata(t *testing.T) {
+	actor := testActor()
+	actor.Spec.Pod = &workspacesv1alpha1.ActorPod{
+		Metadata: &workspacesv1alpha1.WorkspacePodMetadata{
+			Labels: map[string]string{"bad key!": "value"},
+		},
+	}
+	harness := newActorHarnessFor(t, actor, executorWorkspace(), daemonClientSecret(), availableDaemon())
+	harness.reconcile()
+
+	status := harness.actor().Status
+	assert.Equal(t, workspacesv1alpha1.ActorPhaseFailed, status.Phase)
+	assert.Equal(t, workspacesv1alpha1.ActorReasonInvalidPod, status.Conditions[0].Reason)
+	assert.Contains(t, status.Conditions[0].Message, "spec.pod.metadata.labels")
+	assert.Empty(t, harness.daemon.minted, "no credential is minted for a Pod that cannot be created")
 }
 
 func TestActorWaitsForItsRunnerBeforeCheckingPlacement(t *testing.T) {

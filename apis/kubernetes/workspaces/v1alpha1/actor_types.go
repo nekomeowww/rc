@@ -43,6 +43,8 @@ const (
 	ActorReasonNeedyNotConfigured = "NeedyNotConfigured"
 	ActorReasonInvalidProfile     = "InvalidProfile"
 	ActorReasonExecutorNotReady   = "ExecutorNotReady"
+	ActorReasonEnvNotReady        = "EnvNotReady"
+	ActorReasonInvalidPod         = "InvalidPod"
 	ActorReasonWaitingForRunner   = "WaitingForRunner"
 	ActorReasonRunnerFailed       = "RunnerFailed"
 	ActorReasonCreatingRun        = "CreatingRun"
@@ -120,6 +122,47 @@ type ActorProxy struct {
 	PodSelector *metav1.LabelSelector `json:"podSelector,omitempty"`
 }
 
+// ActorPod shapes the actor runner Pod. rc owns the rest of the Pod: its
+// command, the runner credential, the KVM device and group, the security
+// context, the deadline, and the labels that the needy NetworkPolicies and
+// proxies select.
+//
+// NOTICE: this is a curated set of fields, not a Pod template. A template
+// could mount a service account token, add a host network, or replace the
+// runner, which would break the boundary rc keeps around the actor.
+// TODO(actor-pod): sidecars, extra volumes, and a runtimeClassName are left
+// out until a use for them names what they may see of the runner.
+type ActorPod struct {
+	// metadata adds labels and annotations to the Pod. Keys with an
+	// rc.ayaka.io prefix are reserved, and a key that rc sets keeps rc's value.
+	// +optional
+	Metadata *WorkspacePodMetadata `json:"metadata,omitempty"`
+
+	// nodeSelector is added to the manager's KVM node selector. A key that
+	// the manager selects on keeps the manager's value.
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// tolerations are added to the manager's KVM tolerations.
+	// +kubebuilder:validation:MaxItems=32
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// affinity places the Pod among the KVM nodes, for example in one zone.
+	// +optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
+	// priorityClassName selects a PriorityClass for the Pod.
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+
+	// imagePullSecrets pull the manager's needy image from a private registry.
+	// +kubebuilder:validation:MaxItems=8
+	// +optional
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+}
+
 // ActorSpec defines one needy run whose actor runs in a Firecracker VM on a
 // KVM node. The spec is immutable.
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Actor spec is immutable"
@@ -141,6 +184,18 @@ type ActorSpec struct {
 	// +optional
 	Args []string `json:"args,omitempty"`
 
+	// env is added to the driving program's environment, over the profile's
+	// actor.env. A variable takes a value, a Secret key, or a ConfigMap key in
+	// the Actor's namespace; rc reads the keys when it creates the run, so the
+	// run starts once they exist. A key is read once: a rotated Secret applies
+	// to the next Actor.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:XValidation:rule="self.all(v, !has(v.valueFrom) || has(v.valueFrom.secretKeyRef) || has(v.valueFrom.configMapKeyRef))",message="env valueFrom must be a secretKeyRef or a configMapKeyRef"
+	// +optional
+	Env []corev1.EnvVar `json:"env,omitempty"`
+
 	// terminal runs the driving program on a terminal, so a client can attach
 	// to it with `needy run attach`. Leave it unset for headless agents.
 	// +optional
@@ -151,6 +206,11 @@ type ActorSpec struct {
 	// no proxy of its own.
 	// +optional
 	Proxy *ActorProxy `json:"proxy,omitempty"`
+
+	// pod shapes the actor runner Pod: its placement, metadata, priority,
+	// and image pull secrets.
+	// +optional
+	Pod *ActorPod `json:"pod,omitempty"`
 
 	// resources of the actor runner Pod. They must cover the VM, Firecracker,
 	// and the runner. The manager adds the KVM device.

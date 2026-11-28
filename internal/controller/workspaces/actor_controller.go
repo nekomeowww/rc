@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -30,9 +32,12 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1validation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -164,10 +169,20 @@ func (r *ActorReconciler) start(ctx context.Context, actor *workspacesv1alpha1.A
 	if err != nil {
 		return r.fail(ctx, actor, workspacesv1alpha1.ActorReasonInvalidProfile, err.Error())
 	}
+	env, reason, message, err := r.actorEnv(ctx, actor)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if reason != "" {
+		return r.wait(ctx, actor, reason, message, actorPoll)
+	}
 	runner := needyActorRunnerName(string(actor.UID))
-	profile, err := needy.ComposeProfile(text, runner, executors)
+	profile, err := needy.ComposeProfile(text, runner, executors, env)
 	if err != nil {
 		return r.fail(ctx, actor, workspacesv1alpha1.ActorReasonInvalidProfile, err.Error())
+	}
+	if err := validateActorPod(actor.Spec.Pod); err != nil {
+		return r.fail(ctx, actor, workspacesv1alpha1.ActorReasonInvalidPod, err.Error())
 	}
 	minted, err := r.ensureRunnerCredential(ctx, actor, daemon, runner)
 	if err != nil {
@@ -502,6 +517,72 @@ func (r *ActorReconciler) executorRunners(ctx context.Context, actor *workspaces
 	return runners, "", "", nil
 }
 
+// actorEnv reads spec.env. A missing Secret, ConfigMap, or key that is not
+// optional is a reason to wait, like an executor that is not ready.
+//
+// NOTICE: the values go into the profile that the daemon keeps with the run
+// and gives the guest, so a Secret's value is stored in the namespace's
+// daemon state. needy has no reference to a value it could read later; the
+// daemon is in the same namespace and tenant as the Secret.
+func (r *ActorReconciler) actorEnv(ctx context.Context, actor *workspacesv1alpha1.Actor) (map[string]string, string, string, error) {
+	if len(actor.Spec.Env) == 0 {
+		return nil, "", "", nil
+	}
+	env := make(map[string]string, len(actor.Spec.Env))
+	for _, variable := range actor.Spec.Env {
+		source := variable.ValueFrom
+		if source == nil {
+			env[variable.Name] = variable.Value
+			continue
+		}
+		var data map[string]string
+		var kind, name, key string
+		var optional *bool
+		switch {
+		case source.SecretKeyRef != nil:
+			kind, name, key, optional = "Secret", source.SecretKeyRef.Name, source.SecretKeyRef.Key, source.SecretKeyRef.Optional
+			var secret corev1.Secret
+			err := r.Get(ctx, types.NamespacedName{Namespace: actor.Namespace, Name: name}, &secret)
+			if err != nil && !apierrors.IsNotFound(err) {
+				return nil, "", "", fmt.Errorf("get env Secret %s: %w", name, err)
+			}
+			if err == nil {
+				data = make(map[string]string, len(secret.Data))
+				for dataKey, value := range secret.Data {
+					data[dataKey] = string(value)
+				}
+			}
+		case source.ConfigMapKeyRef != nil:
+			kind, name, key, optional = "ConfigMap", source.ConfigMapKeyRef.Name, source.ConfigMapKeyRef.Key, source.ConfigMapKeyRef.Optional
+			var configMap corev1.ConfigMap
+			err := r.Get(ctx, types.NamespacedName{Namespace: actor.Namespace, Name: name}, &configMap)
+			if err != nil && !apierrors.IsNotFound(err) {
+				return nil, "", "", fmt.Errorf("get env ConfigMap %s: %w", name, err)
+			}
+			if err == nil {
+				data = configMap.Data
+			}
+		default:
+			// The CRD admits only the two sources; an older stored object may not.
+			return nil, workspacesv1alpha1.ActorReasonEnvNotReady, fmt.Sprintf("env %s must come from a value, a Secret key, or a ConfigMap key", variable.Name), nil
+		}
+		value, found := data[key]
+		if found {
+			env[variable.Name] = value
+			continue
+		}
+		if optional != nil && *optional {
+			continue
+		}
+		if data == nil {
+			return nil, workspacesv1alpha1.ActorReasonEnvNotReady, fmt.Sprintf("%s %s of env %s does not exist", kind, name, variable.Name), nil
+		}
+		return nil, workspacesv1alpha1.ActorReasonEnvNotReady, fmt.Sprintf("%s %s has no key %s for env %s", kind, name, key, variable.Name), nil
+	}
+
+	return env, "", "", nil
+}
+
 // profileText returns the profile YAML and the name needy records for it.
 func (r *ActorReconciler) profileText(ctx context.Context, actor *workspacesv1alpha1.Actor) (string, string, error) {
 	profile := actor.Spec.Profile
@@ -688,8 +769,7 @@ func actorRunnerPod(actor *workspacesv1alpha1.Actor, config NeedyConfig, proxy *
 		})
 	}
 	applyNeedyKVM(&spec, config)
-
-	return &corev1.Pod{
+	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: actor.Namespace,
 			Name:      actorPodName(actor),
@@ -703,6 +783,55 @@ func actorRunnerPod(actor *workspacesv1alpha1.Actor, config NeedyConfig, proxy *
 		},
 		Spec: spec,
 	}
+	applyActorPod(pod, actor.Spec.Pod)
+
+	return pod
+}
+
+// applyActorPod adds spec.pod to the runner Pod. What rc already set wins:
+// the manager's KVM node selector, rc's labels, and rc's annotations.
+func applyActorPod(pod *corev1.Pod, shape *workspacesv1alpha1.ActorPod) {
+	if shape == nil {
+		return
+	}
+	if shape.Metadata != nil {
+		addMissing(pod.Labels, shape.Metadata.Labels)
+		addMissing(pod.Annotations, shape.Metadata.Annotations)
+	}
+	if len(shape.NodeSelector) > 0 {
+		// The manager's selector is shared configuration; build a new map.
+		selector := maps.Clone(shape.NodeSelector)
+		maps.Copy(selector, pod.Spec.NodeSelector)
+		pod.Spec.NodeSelector = selector
+	}
+	pod.Spec.Tolerations = append(slices.Clone(pod.Spec.Tolerations), shape.Tolerations...)
+	pod.Spec.Affinity = shape.Affinity.DeepCopy()
+	pod.Spec.PriorityClassName = shape.PriorityClassName
+	pod.Spec.ImagePullSecrets = slices.Clone(shape.ImagePullSecrets)
+}
+
+// addMissing copies the keys of extra that target lacks and that rc does not
+// reserve.
+func addMissing(target, extra map[string]string) {
+	for key, value := range extra {
+		if _, set := target[key]; set || workspacesv1alpha1.IsReservedPodMetadataKey(key) {
+			continue
+		}
+		target[key] = value
+	}
+}
+
+// validateActorPod checks the label and annotation syntax that the CRD does
+// not express, so a bad key fails the Actor instead of every Pod create.
+func validateActorPod(shape *workspacesv1alpha1.ActorPod) error {
+	if shape == nil || shape.Metadata == nil {
+		return nil
+	}
+	path := field.NewPath("spec", "pod", "metadata")
+	errs := metav1validation.ValidateLabels(shape.Metadata.Labels, path.Child("labels"))
+	errs = append(errs, apivalidation.ValidateAnnotations(shape.Metadata.Annotations, path.Child("annotations"))...)
+
+	return errs.ToAggregate()
 }
 
 func proxyCredentialsReference(proxy *workspacesv1alpha1.ActorProxy) *corev1.SecretKeySelector {

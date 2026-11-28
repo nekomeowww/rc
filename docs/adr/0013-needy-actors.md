@@ -105,6 +105,18 @@ adds no policy, because one for the proxy alone would cut the Pod off from
 the daemon. The actor Pod keeps its internet egress: the runner downloads
 the base VM image when it starts.
 
+`spec.env` gives the driving program values, Secret keys, and ConfigMap
+keys, such as the credential of a program that the actor connects to a
+service. The VM sees nothing of the runner Pod's environment or volumes, so
+rc reads the keys itself when it creates the run and sets them over the
+profile's `actor.env`; a missing key keeps the Actor waiting. The values are
+part of the profile that the namespace's daemon keeps with the run. `spec.pod`
+places and labels the runner Pod with a fixed set of fields (metadata, node
+selector, tolerations, affinity, priority class, image pull secrets). It is
+not a Pod template: rc keeps the command, the runner credential, the KVM
+device, the security context, the deadline, and its own labels, which the
+policies above select.
+
 ### Configuration
 
 needy is off until the manager has `--needy-image`. A KVM pool is described by

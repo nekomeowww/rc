@@ -27,7 +27,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const testWorkspaceRunner = "ws-dev"
+const (
+	testWorkspaceRunner = "ws-dev"
+	testAPIKeyEnv       = "SERVICE_API_KEY"
+	testAPIKey          = "api-key-value"
+)
 
 func TestComposeProfilePlacesEveryPart(t *testing.T) {
 	text := `extends: builtin:opencode
@@ -44,7 +48,7 @@ commands:
 	composed, err := ComposeProfile(text, "actor-1", map[string]string{
 		"ws":    testWorkspaceRunner,
 		"build": "ws-build",
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	decoded, err := profile.Decode([]byte(composed))
@@ -62,7 +66,7 @@ commands:
 }
 
 func TestComposeProfileBuiltin(t *testing.T) {
-	composed, err := ComposeProfile(BuiltinProfile("codex"), "actor-1", nil)
+	composed, err := ComposeProfile(BuiltinProfile("codex"), "actor-1", nil, nil)
 	require.NoError(t, err)
 
 	decoded, err := profile.Decode([]byte(composed))
@@ -70,6 +74,41 @@ func TestComposeProfileBuiltin(t *testing.T) {
 	assert.Equal(t, "builtin:codex", *decoded.Extends)
 	assert.Equal(t, &profile.RunnerSelector{Name: "actor-1"}, decoded.Actor.Runner)
 	assert.Empty(t, decoded.Executors)
+}
+
+func TestComposeProfileSetsActorEnvOverTheProfile(t *testing.T) {
+	text := `extends: builtin:codex
+actor:
+  env:
+    KEPT: profile
+    SERVICE_URL: https://profile.example.com
+`
+	composed, err := ComposeProfile(text, "actor-1", nil, map[string]string{
+		"SERVICE_URL": "https://service.example.com",
+		testAPIKeyEnv: testAPIKey,
+	})
+	require.NoError(t, err)
+
+	decoded, err := profile.Decode([]byte(composed))
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{
+		"KEPT":        "profile",
+		"SERVICE_URL": "https://service.example.com",
+		testAPIKeyEnv: testAPIKey,
+	}, decoded.Actor.Env)
+}
+
+func TestComposeProfileSetsActorEnvWithoutProfileEnv(t *testing.T) {
+	composed, err := ComposeProfile(BuiltinProfile("codex"), "actor-1", nil, map[string]string{
+		testAPIKeyEnv: testAPIKey,
+	})
+	require.NoError(t, err)
+
+	decoded, err := profile.Decode([]byte(composed))
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{
+		testAPIKeyEnv: testAPIKey,
+	}, decoded.Actor.Env)
 }
 
 func TestComposeProfileRefusesUnsafeProfiles(t *testing.T) {
@@ -111,7 +150,7 @@ func TestComposeProfileRefusesUnsafeProfiles(t *testing.T) {
 	}
 	for name, test := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := ComposeProfile(test.text, "actor-1", test.bindings)
+			_, err := ComposeProfile(test.text, "actor-1", test.bindings, nil)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), test.message)
 		})

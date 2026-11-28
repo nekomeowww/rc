@@ -71,6 +71,7 @@ func (r *WorkspaceReconciler) reconcileDataPlane(ctx context.Context, workspace 
 
 	podConfig := &rcplatform.WorkspaceDataPlanePodConfig{
 		CertSecretName: certSecretName,
+		EnableSSH:      workspace.Spec.DataPlane.SSH != nil && workspace.Spec.DataPlane.SSH.Enabled,
 	}
 	status := &workspacesv1alpha1.WorkspaceDataPlaneStatus{
 		AccessTokenSecretName: tokenSecretName,

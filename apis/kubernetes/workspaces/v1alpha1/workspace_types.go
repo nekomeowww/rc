@@ -406,6 +406,30 @@ type WorkspaceDataPlaneSpec struct {
 	// into a Workspace-owned Secret and records its name in status.dataPlane.
 	// +optional
 	AccessTokenSecretRef *corev1.SecretKeySelector `json:"accessTokenSecretRef,omitempty"`
+
+	// ssh configures optional SSH access through the Data Plane Gateway.
+	// +optional
+	SSH *WorkspaceDataPlaneSSHSpec `json:"ssh,omitempty"`
+}
+
+// WorkspaceDataPlaneSSHSpec configures the in-Pod mTLS SSH listener and
+// Gateway SSH authentication for a Workspace.
+type WorkspaceDataPlaneSSHSpec struct {
+	// enabled turns on the in-Pod mTLS SSH listener and Gateway SSH routing.
+	// +kubebuilder:default=true
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// authorizedKeys lists OpenSSH public keys (for example ssh-ed25519 ...)
+	// allowed to authenticate to this Workspace over SSH.
+	// +kubebuilder:validation:MaxItems=64
+	// +optional
+	AuthorizedKeys []string `json:"authorizedKeys,omitempty"`
+
+	// authorizedKeysSecretRef references a Secret key containing
+	// newline-separated OpenSSH authorized_keys entries.
+	// +optional
+	AuthorizedKeysSecretRef *corev1.SecretKeySelector `json:"authorizedKeysSecretRef,omitempty"`
 }
 
 // WorkspaceDataPlaneStatus publishes generated Data Plane Secret names.

@@ -31,6 +31,7 @@ import (
 
 	envdconnectrpc "github.com/nekomeowww/rc/internal/datad/sandbox/protocol/envd/connectrpc"
 	execdhttp "github.com/nekomeowww/rc/internal/datad/sandbox/protocol/execd/http"
+	datadssh "github.com/nekomeowww/rc/internal/datad/sandbox/protocol/ssh"
 	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/filecopy"
 	"github.com/nekomeowww/rc/internal/lifecycle"
@@ -165,6 +166,7 @@ func newServeCommand() *cobra.Command {
 	var encodedServices string
 	var execdListen string
 	var dataPlaneListen string
+	var sshListen string
 	var dataPlaneCAFile string
 	var dataPlaneCertFile string
 	var dataPlaneKeyFile string
@@ -277,9 +279,27 @@ func newServeCommand() *cobra.Command {
 					return dpServer.Serve(ctx, dpCfg)
 				})
 			}
+			if sshListen != "" {
+				sshServer := datadssh.NewServer(supervisor, native.Home, native.Workspace)
+				sshCfg := datadssh.Config{
+					ListenAddr:   sshListen,
+					CAFile:       dataPlaneCAFile,
+					CertFile:     dataPlaneCertFile,
+					KeyFile:      dataPlaneKeyFile,
+					Insecure:     dataPlaneInsecure,
+					HomeDir:      native.Home,
+					WorkspaceDir: native.Workspace,
+				}
+				addServer(func(ctx context.Context) error {
+					return sshServer.Serve(ctx, sshCfg)
+				})
+			}
 
 			app.Start()
-			return serveErr
+			serveErrMu.Lock()
+			err = serveErr
+			serveErrMu.Unlock()
+			return err
 		},
 	}
 	command.Flags().StringVar(&socketPath, "socket", rcnative.Current().Endpoint, "Local Unix socket or Windows named pipe")
@@ -291,6 +311,7 @@ func newServeCommand() *cobra.Command {
 	command.Flags().Int64Var(&maxTranscriptBytes, "max-transcript-bytes", 64<<20, "Maximum durable bytes retained per process; zero disables")
 	command.Flags().StringVar(&execdListen, "execd-listen", "", "Optional TCP address for the OpenSandbox execd Data Plane (for example :44772)")
 	command.Flags().StringVar(&dataPlaneListen, "data-plane-listen", "", "Optional TCP address for the E2B envd-compatible Data Plane (for example :49983)")
+	command.Flags().StringVar(&sshListen, "ssh-listen", "", "Optional TCP address for the mTLS SSH Data Plane (for example :2222)")
 	command.Flags().StringVar(&dataPlaneCAFile, "data-plane-ca-file", "", "PEM CA certificate file verifying Data Plane Gateway client certificates")
 	command.Flags().StringVar(&dataPlaneCertFile, "data-plane-cert-file", "", "PEM server certificate file for the Workspace Data Plane")
 	command.Flags().StringVar(&dataPlaneKeyFile, "data-plane-key-file", "", "PEM server private key file for the Workspace Data Plane")

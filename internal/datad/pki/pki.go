@@ -46,6 +46,8 @@ const (
 	DefaultCAValidity = 365 * 24 * time.Hour
 	// DefaultLeafValidity is the lifetime of internally issued leaf certificates.
 	DefaultLeafValidity = 30 * 24 * time.Hour
+	// SSHProtocolALPN is the dedicated TLS ALPN identifier for the mTLS SSH Data Plane.
+	SSHProtocolALPN = "rc-ssh-v1"
 )
 
 var defaultALPNProtos = []string{
@@ -167,6 +169,12 @@ func issueLeaf(
 // CertWatcher (watching certFile and keyFile for rotation) and verifying client
 // certificates against caFile.
 func ReloadingServerTLSConfig(ctx context.Context, caFile, certFile, keyFile string) (*tls.Config, error) {
+	return ReloadingServerTLSConfigWithALPN(ctx, caFile, certFile, keyFile, defaultALPNProtos)
+}
+
+// ReloadingServerTLSConfigWithALPN builds a TLS 1.3 mTLS server tls.Config
+// with custom ALPN protocols for protocol separation.
+func ReloadingServerTLSConfigWithALPN(ctx context.Context, caFile, certFile, keyFile string, nextProtos []string) (*tls.Config, error) {
 	caPool, err := loadCAPool(caFile)
 	if err != nil {
 		return nil, err
@@ -184,7 +192,7 @@ func ReloadingServerTLSConfig(ctx context.Context, caFile, certFile, keyFile str
 		ClientAuth:     tls.RequireAndVerifyClientCert,
 		ClientCAs:      caPool,
 		GetCertificate: watcher.GetCertificate,
-		NextProtos:     defaultALPNProtos,
+		NextProtos:     nextProtos,
 	}, nil
 }
 
@@ -203,6 +211,12 @@ func loadCAPool(caFile string) (*x509.CertPool, error) {
 // ClientTLSConfig builds an mTLS client tls.Config for dialing a Workspace
 // runtime with the expected ServerName.
 func ClientTLSConfig(caPEM, certPEM, keyPEM []byte, serverName string) (*tls.Config, error) {
+	return ClientTLSConfigWithALPN(caPEM, certPEM, keyPEM, serverName, defaultALPNProtos)
+}
+
+// ClientTLSConfigWithALPN builds a TLS 1.3 mTLS client tls.Config with custom
+// ALPN protocols for dialing a Workspace runtime.
+func ClientTLSConfigWithALPN(caPEM, certPEM, keyPEM []byte, serverName string, nextProtos []string) (*tls.Config, error) {
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(caPEM) {
 		return nil, errors.New("parse data plane CA PEM: no certificates found")
@@ -216,6 +230,6 @@ func ClientTLSConfig(caPEM, certPEM, keyPEM []byte, serverName string) (*tls.Con
 		RootCAs:      pool,
 		Certificates: []tls.Certificate{cert},
 		ServerName:   serverName,
-		NextProtos:   defaultALPNProtos,
+		NextProtos:   nextProtos,
 	}, nil
 }

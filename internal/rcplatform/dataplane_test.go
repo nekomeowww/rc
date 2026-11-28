@@ -41,9 +41,11 @@ func TestWorkspacePodDataPlaneOptIn(t *testing.T) {
 	assert.Empty(t, withoutDP.Spec.Containers[0].Ports)
 	assert.NotContains(t, withoutDP.Spec.Containers[0].Args, "--data-plane-listen")
 
+	const testCertSecret = "demo-data-plane-tls"
+
 	withDPIntent := baseIntent
 	withDPIntent.DataPlane = &WorkspaceDataPlanePodConfig{
-		CertSecretName: "demo-data-plane-tls",
+		CertSecretName: testCertSecret,
 	}
 	withDP, err := rt.WorkspacePod(withDPIntent)
 	require.NoError(t, err)
@@ -61,9 +63,21 @@ func TestWorkspacePodDataPlaneOptIn(t *testing.T) {
 
 	foundVol := false
 	for _, vol := range withDP.Spec.Volumes {
-		if vol.Name == dataPlaneVolumeName && vol.Secret != nil && vol.Secret.SecretName == "demo-data-plane-tls" {
+		if vol.Name == dataPlaneVolumeName && vol.Secret != nil && vol.Secret.SecretName == testCertSecret {
 			foundVol = true
 		}
 	}
 	assert.True(t, foundVol, "expected data plane TLS secret volume")
+
+	withSSHIntent := withDPIntent
+	withSSHIntent.DataPlane = &WorkspaceDataPlanePodConfig{
+		CertSecretName: testCertSecret,
+		EnableSSH:      true,
+	}
+	withSSH, err := rt.WorkspacePod(withSSHIntent)
+	require.NoError(t, err)
+	require.Len(t, withSSH.Spec.Containers[0].Ports, 3)
+	assert.Equal(t, int32(2222), withSSH.Spec.Containers[0].Ports[2].ContainerPort)
+	assert.Contains(t, withSSH.Spec.Containers[0].Args, "--ssh-listen")
+	assert.Contains(t, withSSH.Spec.Containers[0].Args, ":2222")
 }

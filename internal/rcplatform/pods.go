@@ -160,12 +160,14 @@ type WorkspacePodIntent struct {
 }
 
 // WorkspaceDataPlanePodConfig configures the in-Pod mTLS Data Plane listeners
-// (OpenSandbox execd on 44772 as primary and optional E2B envd on 49983).
+// (OpenSandbox execd on 44772, E2B envd on 49983, and optional SSH on 2222).
 type WorkspaceDataPlanePodConfig struct {
 	ExecdPort      int32
 	Port           int32
+	SSHPort        int32
 	DisableExecd   bool
 	DisableEnvd    bool
+	EnableSSH      bool
 	CertSecretName string
 	Insecure       bool
 }
@@ -177,6 +179,8 @@ const (
 	execdPort           = int32(44772)
 	dataPlanePortName   = "envd"
 	dataPlanePort       = int32(49983)
+	sshPortName         = "ssh"
+	sshPort             = int32(2222)
 )
 
 // LXCFSVolumePrefix starts the name of every LXCFS volume in a Workspace Pod.
@@ -413,6 +417,18 @@ func (runtime Runtime) dataPlanePodWiring(cfg *WorkspaceDataPlanePodConfig) (
 			Protocol:      corev1.ProtocolTCP,
 		})
 		args = append(args, "--data-plane-listen", fmt.Sprintf(":%d", port))
+	}
+	if cfg.EnableSSH {
+		sp := cfg.SSHPort
+		if sp == 0 {
+			sp = sshPort
+		}
+		ports = append(ports, corev1.ContainerPort{
+			Name:          sshPortName,
+			ContainerPort: sp,
+			Protocol:      corev1.ProtocolTCP,
+		})
+		args = append(args, "--ssh-listen", fmt.Sprintf(":%d", sp))
 	}
 	if cfg.Insecure {
 		args = append(args, "--data-plane-insecure")

@@ -47,7 +47,7 @@ FROM node:26.13.1-bookworm-slim AS node-runtime
 # ------------------------------------------------------------------------------
 # Stage 4: Build patched xdg-desktop-portal-wlr (0.8.4 + shm/build patches)
 # ------------------------------------------------------------------------------
-FROM ubuntu:24.04 AS xdpw-builder
+FROM ubuntu:26.04 AS xdpw-builder
 
 ARG XDPW_VERSION=0.8.4
 ARG XDPW_SHA256=3122966d46ab108f505525bcb2498f9121b446ee8438fbfceb73a7a1fa1ad400
@@ -85,7 +85,7 @@ EOF
 # ------------------------------------------------------------------------------
 # Stage 5: Final Wayland Workspace runner image
 # ------------------------------------------------------------------------------
-FROM ubuntu:24.04 AS runner-wayland
+FROM ubuntu:26.04 AS runner-wayland
 
 ARG TARGETARCH
 # renovate: datasource=npm depName=corepack
@@ -124,7 +124,7 @@ packages=(
   libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatomic1
   libatspi2.0-0t64 libcairo2 libcups2t64 libdbus-1-3 libdrm2 libfontconfig1
   libfreetype6 libgbm1 libglib2.0-0t64 libglib2.0-bin libgtk-3-0t64
-  liblept5 libnspr4 libnss3 libpango-1.0-0 libtesseract5
+  libleptonica6 libnspr4 libnss3 libpango-1.0-0 libtesseract5
   libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3
   libxkbcommon0 libxrandr2
 )

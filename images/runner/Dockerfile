@@ -47,7 +47,7 @@ FROM node:26.13.1-bookworm-slim AS runner
 # renovate: datasource=npm depName=corepack
 ARG COREPACK_VERSION=0.36.0
 # renovate: datasource=npm depName=@lobehub/cli
-ARG LOBEHUB_CLI_VERSION=0.0.278
+ARG LOBEHUB_CLI_VERSION=0.0.281
 
 LABEL org.opencontainers.image.source="https://github.com/nekomeowww/rc" \
       org.opencontainers.image.title="rc runner"

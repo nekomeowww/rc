@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 )
 
 // The ordered bridge between YAML text and the JSON that the typed structs
@@ -24,7 +24,7 @@ import (
 // NOTICE: sigs.k8s.io/yaml converts through unordered Go maps and resolves
 // scalars as YAML 1.1 (`yes`, `on`, octal `0777`), so it can neither keep an
 // on-conflict map's order nor read scalars the way needy does; this bridge
-// uses go.yaml.in/yaml/v3 nodes, the parser sigs.k8s.io/yaml builds on.
+// uses go.yaml.in/yaml/v4 nodes.
 
 const maxDepth = 256
 

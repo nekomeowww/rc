@@ -29,11 +29,12 @@ import (
 	"syscall"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	"github.com/fsnotify/fsnotify"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	fspb "github.com/nekomeowww/rc/apis/sdk/go/envd/filesystem"
+	"github.com/nekomeowww/rc/apis/sdk/go/envd/filesystem/filesystemconnect"
 )
 
 type filesystemHandler struct {
@@ -50,28 +51,28 @@ type managedWatcher struct {
 	done         chan struct{}
 }
 
-func (h *filesystemHandler) Stat(_ context.Context, req *connect.Request[fspb.StatRequest]) (*connect.Response[fspb.StatResponse], error) {
-	if err := h.server.validateRPCUser(req.Header()); err != nil {
+func (h *filesystemHandler) Stat(ctx context.Context, req *fspb.StatRequest) (*fspb.StatResponse, error) {
+	if err := h.server.validateRPCUser(ctx); err != nil {
 		return nil, err
 	}
-	resolved := h.server.resolvePath(req.Msg.GetPath())
+	resolved := h.server.resolvePath(req.GetPath())
 	entry, err := h.server.statEntry(resolved)
 	if err != nil {
 		return nil, mapFSError(err)
 	}
-	return connect.NewResponse(&fspb.StatResponse{Entry: entry}), nil
+	return &fspb.StatResponse{Entry: entry}, nil
 }
 
-func (h *filesystemHandler) MakeDir(_ context.Context, req *connect.Request[fspb.MakeDirRequest]) (*connect.Response[fspb.MakeDirResponse], error) {
-	if err := h.server.validateRPCUser(req.Header()); err != nil {
+func (h *filesystemHandler) MakeDir(ctx context.Context, req *fspb.MakeDirRequest) (*fspb.MakeDirResponse, error) {
+	if err := h.server.validateRPCUser(ctx); err != nil {
 		return nil, err
 	}
-	resolved := h.server.resolvePath(req.Msg.GetPath())
+	resolved := h.server.resolvePath(req.GetPath())
 	if info, err := os.Stat(resolved); err == nil {
 		if info.IsDir() {
-			return nil, connect.NewError(connect.CodeAlreadyExists, fmt.Errorf("directory %q already exists", resolved))
+			return nil, connect.NewError(connect.CodeAlreadyExists, fmt.Sprintf("directory %q already exists", resolved))
 		}
-		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("path %q exists and is not a directory", resolved))
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Sprintf("path %q exists and is not a directory", resolved))
 	}
 	if err := os.MkdirAll(resolved, 0o755); err != nil {
 		return nil, mapFSError(err)
@@ -80,15 +81,15 @@ func (h *filesystemHandler) MakeDir(_ context.Context, req *connect.Request[fspb
 	if err != nil {
 		return nil, mapFSError(err)
 	}
-	return connect.NewResponse(&fspb.MakeDirResponse{Entry: entry}), nil
+	return &fspb.MakeDirResponse{Entry: entry}, nil
 }
 
-func (h *filesystemHandler) Move(_ context.Context, req *connect.Request[fspb.MoveRequest]) (*connect.Response[fspb.MoveResponse], error) {
-	if err := h.server.validateRPCUser(req.Header()); err != nil {
+func (h *filesystemHandler) Move(ctx context.Context, req *fspb.MoveRequest) (*fspb.MoveResponse, error) {
+	if err := h.server.validateRPCUser(ctx); err != nil {
 		return nil, err
 	}
-	src := h.server.resolvePath(req.Msg.GetSource())
-	dst := h.server.resolvePath(req.Msg.GetDestination())
+	src := h.server.resolvePath(req.GetSource())
+	dst := h.server.resolvePath(req.GetDestination())
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return nil, mapFSError(err)
 	}
@@ -100,22 +101,22 @@ func (h *filesystemHandler) Move(_ context.Context, req *connect.Request[fspb.Mo
 	if err != nil {
 		return nil, mapFSError(err)
 	}
-	return connect.NewResponse(&fspb.MoveResponse{Entry: entry}), nil
+	return &fspb.MoveResponse{Entry: entry}, nil
 }
 
-func (h *filesystemHandler) ListDir(_ context.Context, req *connect.Request[fspb.ListDirRequest]) (*connect.Response[fspb.ListDirResponse], error) {
-	if err := h.server.validateRPCUser(req.Header()); err != nil {
+func (h *filesystemHandler) ListDir(ctx context.Context, req *fspb.ListDirRequest) (*fspb.ListDirResponse, error) {
+	if err := h.server.validateRPCUser(ctx); err != nil {
 		return nil, err
 	}
-	root := h.server.resolvePath(req.Msg.GetPath())
+	root := h.server.resolvePath(req.GetPath())
 	info, err := os.Stat(root)
 	if err != nil {
 		return nil, mapFSError(err)
 	}
 	if !info.IsDir() {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("path %q is not a directory", root))
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Sprintf("path %q is not a directory", root))
 	}
-	maxDepth := int(req.Msg.GetDepth())
+	maxDepth := int(req.GetDepth())
 	if maxDepth <= 0 {
 		maxDepth = 1
 	}
@@ -124,7 +125,7 @@ func (h *filesystemHandler) ListDir(_ context.Context, req *connect.Request[fspb
 	if err := h.walkDepth(root, 1, maxDepth, &entries); err != nil {
 		return nil, mapFSError(err)
 	}
-	return connect.NewResponse(&fspb.ListDirResponse{Entries: entries}), nil
+	return &fspb.ListDirResponse{Entries: entries}, nil
 }
 
 func (h *filesystemHandler) walkDepth(dir string, currentDepth, maxDepth int, out *[]*fspb.EntryInfo) error {
@@ -151,11 +152,11 @@ func (h *filesystemHandler) walkDepth(dir string, currentDepth, maxDepth int, ou
 	return nil
 }
 
-func (h *filesystemHandler) Remove(_ context.Context, req *connect.Request[fspb.RemoveRequest]) (*connect.Response[fspb.RemoveResponse], error) {
-	if err := h.server.validateRPCUser(req.Header()); err != nil {
+func (h *filesystemHandler) Remove(ctx context.Context, req *fspb.RemoveRequest) (*fspb.RemoveResponse, error) {
+	if err := h.server.validateRPCUser(ctx); err != nil {
 		return nil, err
 	}
-	resolved := h.server.resolvePath(req.Msg.GetPath())
+	resolved := h.server.resolvePath(req.GetPath())
 	if _, err := os.Lstat(resolved); err != nil {
 		return nil, mapFSError(err)
 	}
@@ -163,15 +164,15 @@ func (h *filesystemHandler) Remove(_ context.Context, req *connect.Request[fspb.
 		return nil, mapFSError(err)
 	}
 	h.server.deleteFileMetadata(resolved)
-	return connect.NewResponse(&fspb.RemoveResponse{}), nil
+	return &fspb.RemoveResponse{}, nil
 }
 
-func (h *filesystemHandler) WatchDir(ctx context.Context, req *connect.Request[fspb.WatchDirRequest], stream *connect.ServerStream[fspb.WatchDirResponse]) error {
-	if err := h.server.validateRPCUser(req.Header()); err != nil {
+func (h *filesystemHandler) WatchDir(ctx context.Context, req *fspb.WatchDirRequest, stream filesystemconnect.FilesystemWatchDirServerStream) error {
+	if err := h.server.validateRPCUser(ctx); err != nil {
 		return err
 	}
-	basePath := h.server.resolvePath(req.Msg.GetPath())
-	watcher, err := openFSWatcher(basePath, req.Msg.GetRecursive())
+	basePath := h.server.resolvePath(req.GetPath())
+	watcher, err := openFSWatcher(basePath, req.GetRecursive())
 	if err != nil {
 		return mapFSError(err)
 	}
@@ -200,17 +201,17 @@ func (h *filesystemHandler) WatchDir(ctx context.Context, req *connect.Request[f
 			if !ok {
 				return nil
 			}
-			return connect.NewError(connect.CodeInternal, err)
+			return connect.NewError(connect.CodeInternal, err.Error())
 		case ev, ok := <-watcher.Events:
 			if !ok {
 				return nil
 			}
-			if req.Msg.GetRecursive() && ev.Has(fsnotify.Create) {
+			if req.GetRecursive() && ev.Has(fsnotify.Create) {
 				if info, statErr := os.Stat(ev.Name); statErr == nil && info.IsDir() {
 					_ = addWatchRecursive(watcher, ev.Name)
 				}
 			}
-			pbEv := h.server.toFilesystemEvent(basePath, ev, req.Msg.GetIncludeEntry())
+			pbEv := h.server.toFilesystemEvent(basePath, ev, req.GetIncludeEntry())
 			if pbEv == nil {
 				continue
 			}
@@ -223,12 +224,12 @@ func (h *filesystemHandler) WatchDir(ctx context.Context, req *connect.Request[f
 	}
 }
 
-func (h *filesystemHandler) CreateWatcher(_ context.Context, req *connect.Request[fspb.CreateWatcherRequest]) (*connect.Response[fspb.CreateWatcherResponse], error) {
-	if err := h.server.validateRPCUser(req.Header()); err != nil {
+func (h *filesystemHandler) CreateWatcher(ctx context.Context, req *fspb.CreateWatcherRequest) (*fspb.CreateWatcherResponse, error) {
+	if err := h.server.validateRPCUser(ctx); err != nil {
 		return nil, err
 	}
-	basePath := h.server.resolvePath(req.Msg.GetPath())
-	watcher, err := openFSWatcher(basePath, req.Msg.GetRecursive())
+	basePath := h.server.resolvePath(req.GetPath())
+	watcher, err := openFSWatcher(basePath, req.GetRecursive())
 	if err != nil {
 		return nil, mapFSError(err)
 	}
@@ -236,8 +237,8 @@ func (h *filesystemHandler) CreateWatcher(_ context.Context, req *connect.Reques
 	mw := &managedWatcher{
 		watcher:      watcher,
 		basePath:     basePath,
-		recursive:    req.Msg.GetRecursive(),
-		includeEntry: req.Msg.GetIncludeEntry(),
+		recursive:    req.GetRecursive(),
+		includeEntry: req.GetIncludeEntry(),
 		done:         make(chan struct{}),
 	}
 
@@ -248,40 +249,40 @@ func (h *filesystemHandler) CreateWatcher(_ context.Context, req *connect.Reques
 	h.server.watcherMu.Unlock()
 
 	go h.server.pumpWatcher(mw)
-	return connect.NewResponse(&fspb.CreateWatcherResponse{WatcherId: id}), nil
+	return &fspb.CreateWatcherResponse{WatcherId: id}, nil
 }
 
-func (h *filesystemHandler) GetWatcherEvents(_ context.Context, req *connect.Request[fspb.GetWatcherEventsRequest]) (*connect.Response[fspb.GetWatcherEventsResponse], error) {
-	if err := h.server.validateRPCUser(req.Header()); err != nil {
+func (h *filesystemHandler) GetWatcherEvents(ctx context.Context, req *fspb.GetWatcherEventsRequest) (*fspb.GetWatcherEventsResponse, error) {
+	if err := h.server.validateRPCUser(ctx); err != nil {
 		return nil, err
 	}
 	h.server.watcherMu.Lock()
-	mw := h.server.watchers[req.Msg.GetWatcherId()]
+	mw := h.server.watchers[req.GetWatcherId()]
 	h.server.watcherMu.Unlock()
 	if mw == nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("watcher %q not found", req.Msg.GetWatcherId()))
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Sprintf("watcher %q not found", req.GetWatcherId()))
 	}
 	mw.mu.Lock()
 	events := mw.events
 	mw.events = nil
 	mw.mu.Unlock()
-	return connect.NewResponse(&fspb.GetWatcherEventsResponse{Events: events}), nil
+	return &fspb.GetWatcherEventsResponse{Events: events}, nil
 }
 
-func (h *filesystemHandler) RemoveWatcher(_ context.Context, req *connect.Request[fspb.RemoveWatcherRequest]) (*connect.Response[fspb.RemoveWatcherResponse], error) {
-	if err := h.server.validateRPCUser(req.Header()); err != nil {
+func (h *filesystemHandler) RemoveWatcher(ctx context.Context, req *fspb.RemoveWatcherRequest) (*fspb.RemoveWatcherResponse, error) {
+	if err := h.server.validateRPCUser(ctx); err != nil {
 		return nil, err
 	}
 	h.server.watcherMu.Lock()
-	mw := h.server.watchers[req.Msg.GetWatcherId()]
-	delete(h.server.watchers, req.Msg.GetWatcherId())
+	mw := h.server.watchers[req.GetWatcherId()]
+	delete(h.server.watchers, req.GetWatcherId())
 	h.server.watcherMu.Unlock()
 	if mw == nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("watcher %q not found", req.Msg.GetWatcherId()))
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Sprintf("watcher %q not found", req.GetWatcherId()))
 	}
 	_ = mw.watcher.Close()
 	<-mw.done
-	return connect.NewResponse(&fspb.RemoveWatcherResponse{}), nil
+	return &fspb.RemoveWatcherResponse{}, nil
 }
 
 func (s *Server) pumpWatcher(mw *managedWatcher) {
@@ -441,16 +442,16 @@ func mapFSError(err error) error {
 	}
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		return connect.NewError(connect.CodeNotFound, err)
+		return connect.NewError(connect.CodeNotFound, err.Error())
 	case errors.Is(err, os.ErrPermission):
-		return connect.NewError(connect.CodePermissionDenied, err)
+		return connect.NewError(connect.CodePermissionDenied, err.Error())
 	case errors.Is(err, os.ErrExist):
-		return connect.NewError(connect.CodeAlreadyExists, err)
+		return connect.NewError(connect.CodeAlreadyExists, err.Error())
 	case errors.Is(err, syscall.ENOSPC):
-		return connect.NewError(connect.CodeResourceExhausted, err)
+		return connect.NewError(connect.CodeResourceExhausted, err.Error())
 	case strings.Contains(err.Error(), "is not a directory"):
-		return connect.NewError(connect.CodeFailedPrecondition, err)
+		return connect.NewError(connect.CodeFailedPrecondition, err.Error())
 	default:
-		return connect.NewError(connect.CodeInternal, err)
+		return connect.NewError(connect.CodeInternal, err.Error())
 	}
 }

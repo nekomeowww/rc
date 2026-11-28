@@ -32,7 +32,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 
 	"github.com/nekomeowww/rc/internal/datad/pki"
 	execdws "github.com/nekomeowww/rc/internal/datad/sandbox/protocol/execd/ws"
@@ -105,8 +105,6 @@ func NewServer(supervisor *rckube.Supervisor, homeDir, workspaceDir, runtimeUser
 	}
 
 	e := echo.New()
-	e.HideBanner = true
-	e.HidePort = true
 	e.Use(s.activityMiddleware)
 
 	e.GET("/ping", s.handlePing)
@@ -188,7 +186,7 @@ func (s *Server) ServeListener(ctx context.Context, listener net.Listener, cfg C
 }
 
 func (s *Server) activityMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
-	return func(c echo.Context) error {
+	return func(c *echo.Context) error {
 		c.Response().Header().Set(execd.VersionHeader, execd.Version)
 		isPing := c.Request().Method == http.MethodGet && c.Request().URL.Path == "/ping"
 		if !isPing && s.supervisor != nil {
@@ -201,7 +199,7 @@ func (s *Server) activityMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 	}
 }
 
-func (s *Server) handlePing(c echo.Context) error {
+func (s *Server) handlePing(c *echo.Context) error {
 	return c.NoContent(http.StatusOK)
 }
 

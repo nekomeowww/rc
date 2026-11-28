@@ -18,6 +18,7 @@ package gateway_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -31,7 +32,8 @@ import (
 	"testing"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -208,27 +210,32 @@ func TestGatewayRoutingAuthRotationAndStreaming(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 
 	// Streaming ConnectRPC Process.Start through the gateway with rotated token.
-	procClient := processconnect.NewProcessClient(http.DefaultClient, wsBase)
+	procClient := processconnect.NewProcessClient(connect.NewClient(connecthttp.NewTransport(http.DefaultClient, wsBase)))
 	shellCmd, shellArgs := "/bin/sh", []string{"-c", "echo streamed-through-gateway"}
 	if runtime.GOOS == "windows" {
 		shellCmd, shellArgs = "cmd.exe", []string{"/C", "echo streamed-through-gateway"}
 	}
-	startReq := connect.NewRequest(&procpb.StartRequest{
+	startCtx, callInfo := connect.NewClientContext(context.Background())
+	callInfo.RequestHeader().Set("X-Access-Token", "rotated-token-987654321098765432109876543210")
+	stream, err := procClient.Start(startCtx, &procpb.StartRequest{
 		Process: &procpb.ProcessConfig{
 			Cmd:  shellCmd,
 			Args: shellArgs,
 		},
 	})
-	startReq.Header().Set("X-Access-Token", "rotated-token-987654321098765432109876543210")
-	stream, err := procClient.Start(context.Background(), startReq)
 	require.NoError(t, err)
+	defer func() { _ = stream.Close() }()
 	var out strings.Builder
-	for stream.Receive() {
-		if d := stream.Msg().GetEvent().GetData(); d != nil {
+	for {
+		msg, recvErr := stream.Receive()
+		if errors.Is(recvErr, io.EOF) {
+			break
+		}
+		require.NoError(t, recvErr)
+		if d := msg.GetEvent().GetData(); d != nil {
 			out.Write(d.GetStdout())
 		}
 	}
-	require.NoError(t, stream.Err())
 	assert.Contains(t, out.String(), "streamed-through-gateway")
 
 	// Primary execd route through the same gateway with X-EXECD-ACCESS-TOKEN over mTLS.

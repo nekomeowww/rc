@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 
 	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/rckube"
@@ -39,8 +39,8 @@ const (
 	codeCommandNotFound = "COMMAND_NOT_FOUND"
 )
 
-func (s *Server) handleRunCommand(c echo.Context) error {
-	w := c.Response().Writer
+func (s *Server) handleRunCommand(c *echo.Context) error {
+	w := c.Response()
 	r := c.Request()
 
 	var req execd.RunCommandRequest
@@ -218,7 +218,7 @@ func (s *Server) handleRunCommand(c echo.Context) error {
 	}
 }
 
-func (s *Server) handleInterruptCommand(c echo.Context) error {
+func (s *Server) handleInterruptCommand(c *echo.Context) error {
 	id := strings.TrimSpace(c.QueryParam("id"))
 	if id == "" {
 		return c.JSON(http.StatusBadRequest, execd.ErrorResponse{
@@ -241,7 +241,7 @@ func (s *Server) handleInterruptCommand(c echo.Context) error {
 	return c.NoContent(http.StatusOK)
 }
 
-func (s *Server) handleCommandStatus(c echo.Context) error {
+func (s *Server) handleCommandStatus(c *echo.Context) error {
 	id := strings.TrimSpace(c.Param("id"))
 	if id == "" {
 		return c.JSON(http.StatusBadRequest, execd.ErrorResponse{
@@ -291,7 +291,7 @@ func (s *Server) handleCommandStatus(c echo.Context) error {
 	return c.JSON(http.StatusOK, resp)
 }
 
-func (s *Server) handleCommandLogs(c echo.Context) error {
+func (s *Server) handleCommandLogs(c *echo.Context) error {
 	id := strings.TrimSpace(c.Param("id"))
 	if id == "" {
 		return c.JSON(http.StatusBadRequest, execd.ErrorResponse{

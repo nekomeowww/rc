@@ -34,8 +34,9 @@ import (
 	"sync"
 	"time"
 
-	"connectrpc.com/connect"
-	"github.com/labstack/echo/v4"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
+	"github.com/labstack/echo/v5"
 
 	"github.com/nekomeowww/rc/apis/sdk/go/envd/filesystem/filesystemconnect"
 	"github.com/nekomeowww/rc/apis/sdk/go/envd/process/processconnect"
@@ -100,25 +101,26 @@ func NewServer(supervisor *rckube.Supervisor, homeDir, runtimeUser string) *Serv
 	}
 
 	e := echo.New()
-	e.HideBanner = true
-	e.HidePort = true
 	e.Use(s.activityMiddleware)
 
-	e.GET("/health", func(c echo.Context) error {
+	e.GET("/health", func(c *echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	})
-	e.POST("/init", func(c echo.Context) error {
-		envd.WriteJSONError(c.Response().Writer, http.StatusNotFound, "endpoint not implemented")
+	e.POST("/init", func(c *echo.Context) error {
+		envd.WriteJSONError(c.Response(), http.StatusNotFound, "endpoint not implemented")
 		return nil
 	})
 	e.GET("/files", echo.WrapHandler(http.HandlerFunc(s.handleDownloadFile)))
 	e.POST("/files", echo.WrapHandler(http.HandlerFunc(s.handleUploadFiles)))
 
-	fsPath, fsHandler := filesystemconnect.NewFilesystemHandler(&filesystemHandler{server: s})
-	e.Any(fsPath+"*", echo.WrapHandler(fsHandler))
+	connectServer := connect.NewServer()
+	filesystemconnect.RegisterFilesystemHandler(connectServer, &filesystemHandler{server: s})
+	processconnect.RegisterProcessHandler(connectServer, &processHandler{server: s})
+	connectMux := http.NewServeMux()
+	connecthttp.Mount(connectMux, connectServer)
 
-	procPath, procHandler := processconnect.NewProcessHandler(&processHandler{server: s})
-	e.Any(procPath+"*", echo.WrapHandler(procHandler))
+	e.Any("/"+filesystemconnect.FilesystemName+"/*", echo.WrapHandler(connectMux))
+	e.Any("/"+processconnect.ProcessName+"/*", echo.WrapHandler(connectMux))
 
 	s.handler = e
 	return s
@@ -181,7 +183,7 @@ func (s *Server) ServeListener(ctx context.Context, listener net.Listener, cfg C
 }
 
 func (s *Server) activityMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
-	return func(c echo.Context) error {
+	return func(c *echo.Context) error {
 		c.Response().Header().Set(envd.VersionHeader, envd.Version)
 		isHealth := c.Request().Method == http.MethodGet && c.Request().URL.Path == "/health"
 		if !isHealth && s.supervisor != nil {
@@ -211,8 +213,12 @@ func (s *Server) validateUser(requested string) error {
 }
 
 // validateRPCUser extracts and validates the Basic auth user from ConnectRPC headers.
-func (s *Server) validateRPCUser(header http.Header) error {
-	auth := header.Get("Authorization")
+func (s *Server) validateRPCUser(ctx context.Context) error {
+	info, ok := connect.CallInfoForServerContext(ctx)
+	if !ok {
+		return nil
+	}
+	auth := info.RequestHeader().Get("Authorization")
 	if auth == "" {
 		return nil
 	}
@@ -221,11 +227,11 @@ func (s *Server) validateRPCUser(header http.Header) error {
 	}
 	decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Basic "))
 	if err != nil {
-		return connect.NewError(connect.CodePermissionDenied, errors.New("invalid Authorization header"))
+		return connect.NewError(connect.CodePermissionDenied, "invalid Authorization header")
 	}
 	username, _, _ := strings.Cut(string(decoded), ":")
 	if err := s.validateUser(username); err != nil {
-		return connect.NewError(connect.CodePermissionDenied, err)
+		return connect.NewError(connect.CodePermissionDenied, err.Error())
 	}
 	return nil
 }

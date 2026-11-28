@@ -31,13 +31,13 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 
 	"github.com/nekomeowww/rc/pkg/execd"
 )
 
-func (s *Server) handleFilesInfo(c echo.Context) error {
-	w, r := c.Response().Writer, c.Request()
+func (s *Server) handleFilesInfo(c *echo.Context) error {
+	w, r := c.Response(), c.Request()
 	paths := r.URL.Query()["path"]
 	if len(paths) == 0 {
 		execd.WriteError(w, http.StatusBadRequest, "MISSING_QUERY_PARAMETER", "at least one path query parameter is required")
@@ -60,8 +60,8 @@ func (s *Server) handleFilesInfo(c echo.Context) error {
 	return c.JSON(http.StatusOK, result)
 }
 
-func (s *Server) handleRemoveFiles(c echo.Context) error {
-	w, r := c.Response().Writer, c.Request()
+func (s *Server) handleRemoveFiles(c *echo.Context) error {
+	w, r := c.Response(), c.Request()
 	paths := r.URL.Query()["path"]
 	if len(paths) == 0 {
 		execd.WriteError(w, http.StatusBadRequest, "MISSING_QUERY_PARAMETER", "at least one path query parameter is required")
@@ -89,8 +89,8 @@ func (s *Server) handleRemoveFiles(c echo.Context) error {
 	return c.NoContent(http.StatusOK)
 }
 
-func (s *Server) handleChmodFiles(c echo.Context) error {
-	w, r := c.Response().Writer, c.Request()
+func (s *Server) handleChmodFiles(c *echo.Context) error {
+	w, r := c.Response(), c.Request()
 	var body map[string]execd.Permission
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		execd.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST_BODY", err.Error())
@@ -115,8 +115,8 @@ func (s *Server) handleChmodFiles(c echo.Context) error {
 	return c.NoContent(http.StatusOK)
 }
 
-func (s *Server) handleRenameFiles(c echo.Context) error {
-	w, r := c.Response().Writer, c.Request()
+func (s *Server) handleRenameFiles(c *echo.Context) error {
+	w, r := c.Response(), c.Request()
 	var items []execd.RenameFileItem
 	if err := json.NewDecoder(r.Body).Decode(&items); err != nil {
 		execd.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST_BODY", err.Error())
@@ -143,8 +143,8 @@ func (s *Server) handleRenameFiles(c echo.Context) error {
 	return c.NoContent(http.StatusOK)
 }
 
-func (s *Server) handleSearchFiles(c echo.Context) error {
-	w := c.Response().Writer
+func (s *Server) handleSearchFiles(c *echo.Context) error {
+	w := c.Response()
 	rawPath := strings.TrimSpace(c.QueryParam("path"))
 	if rawPath == "" {
 		execd.WriteError(w, http.StatusBadRequest, "MISSING_QUERY_PARAMETER", "path query parameter is required")
@@ -198,8 +198,8 @@ func (s *Server) handleSearchFiles(c echo.Context) error {
 	return c.JSON(http.StatusOK, matches)
 }
 
-func (s *Server) handleReplaceContent(c echo.Context) error {
-	w, r := c.Response().Writer, c.Request()
+func (s *Server) handleReplaceContent(c *echo.Context) error {
+	w, r := c.Response(), c.Request()
 	var body map[string]execd.ReplaceFileContentItem
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		execd.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST_BODY", err.Error())
@@ -246,8 +246,8 @@ func (s *Server) handleReplaceContent(c echo.Context) error {
 	return c.NoContent(http.StatusOK)
 }
 
-func (s *Server) handleUploadFiles(c echo.Context) error {
-	w, r := c.Response().Writer, c.Request()
+func (s *Server) handleUploadFiles(c *echo.Context) error {
+	w, r := c.Response(), c.Request()
 	reader, err := r.MultipartReader()
 	if err != nil {
 		execd.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST_BODY", fmt.Sprintf("expected multipart/form-data: %v", err))
@@ -322,8 +322,8 @@ func (s *Server) handleUploadFiles(c echo.Context) error {
 	return c.NoContent(http.StatusOK)
 }
 
-func (s *Server) handleDownloadFile(c echo.Context) error {
-	w, r := c.Response().Writer, c.Request()
+func (s *Server) handleDownloadFile(c *echo.Context) error {
+	w, r := c.Response(), c.Request()
 	rawPath := strings.TrimSpace(c.QueryParam("path"))
 	if rawPath == "" {
 		execd.WriteError(w, http.StatusBadRequest, "MISSING_QUERY_PARAMETER", "path query parameter is required")
@@ -408,8 +408,8 @@ func (s *Server) handleDownloadFile(c echo.Context) error {
 	return nil
 }
 
-func (s *Server) handleListDirectory(c echo.Context) error {
-	w := c.Response().Writer
+func (s *Server) handleListDirectory(c *echo.Context) error {
+	w := c.Response()
 	rawPath := strings.TrimSpace(c.QueryParam("path"))
 	if rawPath == "" {
 		execd.WriteError(w, http.StatusBadRequest, "MISSING_QUERY_PARAMETER", "path query parameter is required")
@@ -480,8 +480,8 @@ func (s *Server) listRecursive(dir string, currentDepth, maxDepth int, out *[]ex
 	return nil
 }
 
-func (s *Server) handleMakeDirs(c echo.Context) error {
-	w, r := c.Response().Writer, c.Request()
+func (s *Server) handleMakeDirs(c *echo.Context) error {
+	w, r := c.Response(), c.Request()
 	var body map[string]execd.Permission
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		execd.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST_BODY", err.Error())
@@ -502,8 +502,8 @@ func (s *Server) handleMakeDirs(c echo.Context) error {
 	return c.NoContent(http.StatusOK)
 }
 
-func (s *Server) handleRemoveDirs(c echo.Context) error {
-	w, r := c.Response().Writer, c.Request()
+func (s *Server) handleRemoveDirs(c *echo.Context) error {
+	w, r := c.Response(), c.Request()
 	paths := r.URL.Query()["path"]
 	if len(paths) == 0 {
 		execd.WriteError(w, http.StatusBadRequest, "MISSING_QUERY_PARAMETER", "at least one path query parameter is required")

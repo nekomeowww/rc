@@ -20,11 +20,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 
 	procpb "github.com/nekomeowww/rc/apis/sdk/go/envd/process"
+	"github.com/nekomeowww/rc/apis/sdk/go/envd/process/processconnect"
 	processruntime "github.com/nekomeowww/rc/internal/execution"
 	"github.com/nekomeowww/rc/internal/rckube"
 )
@@ -33,8 +35,8 @@ type processHandler struct {
 	server *Server
 }
 
-func (h *processHandler) List(_ context.Context, req *connect.Request[procpb.ListRequest]) (*connect.Response[procpb.ListResponse], error) {
-	if err := h.server.validateRPCUser(req.Header()); err != nil {
+func (h *processHandler) List(ctx context.Context, _ *procpb.ListRequest) (*procpb.ListResponse, error) {
+	if err := h.server.validateRPCUser(ctx); err != nil {
 		return nil, err
 	}
 	infos := h.server.supervisor.ListDataPlaneProcesses()
@@ -61,16 +63,16 @@ func (h *processHandler) List(_ context.Context, req *connect.Request[procpb.Lis
 			},
 		})
 	}
-	return connect.NewResponse(&procpb.ListResponse{Processes: processes}), nil
+	return &procpb.ListResponse{Processes: processes}, nil
 }
 
-func (h *processHandler) Start(ctx context.Context, req *connect.Request[procpb.StartRequest], stream *connect.ServerStream[procpb.StartResponse]) error {
-	if err := h.server.validateRPCUser(req.Header()); err != nil {
+func (h *processHandler) Start(ctx context.Context, req *procpb.StartRequest, stream processconnect.ProcessStartServerStream) error {
+	if err := h.server.validateRPCUser(ctx); err != nil {
 		return err
 	}
-	procCfg := req.Msg.GetProcess()
+	procCfg := req.GetProcess()
 	if procCfg == nil || procCfg.GetCmd() == "" {
-		return connect.NewError(connect.CodeInvalidArgument, errors.New("process.cmd is required"))
+		return connect.NewError(connect.CodeInvalidArgument, "process.cmd is required")
 	}
 
 	cwd := h.server.homeDir
@@ -79,8 +81,8 @@ func (h *processHandler) Start(ctx context.Context, req *connect.Request[procpb.
 	}
 
 	stdinEnabled := true
-	if req.Msg.Stdin != nil {
-		stdinEnabled = req.Msg.GetStdin()
+	if req.Stdin != nil {
+		stdinEnabled = req.GetStdin()
 	}
 
 	cfg := rckube.DataPlaneProcessConfig{
@@ -88,10 +90,10 @@ func (h *processHandler) Start(ctx context.Context, req *connect.Request[procpb.
 		Args:  procCfg.GetArgs(),
 		Envs:  procCfg.GetEnvs(),
 		Cwd:   cwd,
-		Tag:   req.Msg.GetTag(),
+		Tag:   req.GetTag(),
 		Stdin: stdinEnabled,
 	}
-	if ptyCfg := req.Msg.GetPty(); ptyCfg != nil {
+	if ptyCfg := req.GetPty(); ptyCfg != nil {
 		cfg.PTY = true
 		if sz := ptyCfg.GetSize(); sz != nil {
 			cfg.Cols = uint16(sz.GetCols())
@@ -101,7 +103,7 @@ func (h *processHandler) Start(ctx context.Context, req *connect.Request[procpb.
 
 	info, sub, err := h.server.supervisor.StartDataPlaneProcess(ctx, cfg)
 	if err != nil {
-		return connect.NewError(connect.CodeInternal, err)
+		return connect.NewError(connect.CodeInternal, err.Error())
 	}
 	defer sub.Close()
 
@@ -110,11 +112,11 @@ func (h *processHandler) Start(ctx context.Context, req *connect.Request[procpb.
 	})
 }
 
-func (h *processHandler) Connect(ctx context.Context, req *connect.Request[procpb.ConnectRequest], stream *connect.ServerStream[procpb.ConnectResponse]) error {
-	if err := h.server.validateRPCUser(req.Header()); err != nil {
+func (h *processHandler) Connect(ctx context.Context, req *procpb.ConnectRequest, stream processconnect.ProcessConnectServerStream) error {
+	if err := h.server.validateRPCUser(ctx); err != nil {
 		return err
 	}
-	pid, tag, err := parseSelector(req.Msg.GetProcess())
+	pid, tag, err := parseSelector(req.GetProcess())
 	if err != nil {
 		return err
 	}
@@ -129,51 +131,56 @@ func (h *processHandler) Connect(ctx context.Context, req *connect.Request[procp
 	})
 }
 
-func (h *processHandler) Update(_ context.Context, req *connect.Request[procpb.UpdateRequest]) (*connect.Response[procpb.UpdateResponse], error) {
-	if err := h.server.validateRPCUser(req.Header()); err != nil {
+func (h *processHandler) Update(ctx context.Context, req *procpb.UpdateRequest) (*procpb.UpdateResponse, error) {
+	if err := h.server.validateRPCUser(ctx); err != nil {
 		return nil, err
 	}
-	pid, tag, err := parseSelector(req.Msg.GetProcess())
+	pid, tag, err := parseSelector(req.GetProcess())
 	if err != nil {
 		return nil, err
 	}
-	if ptyCfg := req.Msg.GetPty(); ptyCfg != nil && ptyCfg.GetSize() != nil {
+	if ptyCfg := req.GetPty(); ptyCfg != nil && ptyCfg.GetSize() != nil {
 		sz := ptyCfg.GetSize()
 		if err := h.server.supervisor.ResizeDataPlanePTY(pid, tag, uint16(sz.GetCols()), uint16(sz.GetRows())); err != nil {
 			return nil, mapProcessError(err)
 		}
 	}
-	return connect.NewResponse(&procpb.UpdateResponse{}), nil
+	return &procpb.UpdateResponse{}, nil
 }
 
-func (h *processHandler) SendInput(_ context.Context, req *connect.Request[procpb.SendInputRequest]) (*connect.Response[procpb.SendInputResponse], error) {
-	if err := h.server.validateRPCUser(req.Header()); err != nil {
+func (h *processHandler) SendInput(ctx context.Context, req *procpb.SendInputRequest) (*procpb.SendInputResponse, error) {
+	if err := h.server.validateRPCUser(ctx); err != nil {
 		return nil, err
 	}
-	pid, tag, err := parseSelector(req.Msg.GetProcess())
+	pid, tag, err := parseSelector(req.GetProcess())
 	if err != nil {
 		return nil, err
 	}
-	data := extractInputBytes(req.Msg.GetInput())
+	data := extractInputBytes(req.GetInput())
 	if err := h.server.supervisor.SendDataPlaneInput(pid, tag, data); err != nil {
 		return nil, mapProcessError(err)
 	}
-	return connect.NewResponse(&procpb.SendInputResponse{}), nil
+	return &procpb.SendInputResponse{}, nil
 }
 
-func (h *processHandler) StreamInput(_ context.Context, stream *connect.ClientStream[procpb.StreamInputRequest]) (*connect.Response[procpb.StreamInputResponse], error) {
-	if err := h.server.validateRPCUser(stream.RequestHeader()); err != nil {
+func (h *processHandler) StreamInput(ctx context.Context, stream processconnect.ProcessStreamInputServerStream) (*procpb.StreamInputResponse, error) {
+	if err := h.server.validateRPCUser(ctx); err != nil {
 		return nil, err
 	}
 	var pid uint32
 	var tag string
 	selected := false
 
-	for stream.Receive() {
-		msg := stream.Msg()
+	for {
+		msg, err := stream.Receive()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
 		switch ev := msg.Event.(type) {
 		case *procpb.StreamInputRequest_Start:
-			var err error
 			pid, tag, err = parseSelector(ev.Start.GetProcess())
 			if err != nil {
 				return nil, err
@@ -181,7 +188,7 @@ func (h *processHandler) StreamInput(_ context.Context, stream *connect.ClientSt
 			selected = true
 		case *procpb.StreamInputRequest_Data:
 			if !selected {
-				return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("start event must precede data events"))
+				return nil, connect.NewError(connect.CodeInvalidArgument, "start event must precede data events")
 			}
 			data := extractInputBytes(ev.Data.GetInput())
 			if err := h.server.supervisor.SendDataPlaneInput(pid, tag, data); err != nil {
@@ -191,39 +198,36 @@ func (h *processHandler) StreamInput(_ context.Context, stream *connect.ClientSt
 			// No-op keepalive.
 		}
 	}
-	if err := stream.Err(); err != nil {
-		return nil, err
-	}
-	return connect.NewResponse(&procpb.StreamInputResponse{}), nil
+	return &procpb.StreamInputResponse{}, nil
 }
 
-func (h *processHandler) CloseStdin(_ context.Context, req *connect.Request[procpb.CloseStdinRequest]) (*connect.Response[procpb.CloseStdinResponse], error) {
-	if err := h.server.validateRPCUser(req.Header()); err != nil {
+func (h *processHandler) CloseStdin(ctx context.Context, req *procpb.CloseStdinRequest) (*procpb.CloseStdinResponse, error) {
+	if err := h.server.validateRPCUser(ctx); err != nil {
 		return nil, err
 	}
-	pid, tag, err := parseSelector(req.Msg.GetProcess())
+	pid, tag, err := parseSelector(req.GetProcess())
 	if err != nil {
 		return nil, err
 	}
 	if err := h.server.supervisor.CloseDataPlaneStdin(pid, tag); err != nil {
 		return nil, mapProcessError(err)
 	}
-	return connect.NewResponse(&procpb.CloseStdinResponse{}), nil
+	return &procpb.CloseStdinResponse{}, nil
 }
 
-func (h *processHandler) SendSignal(_ context.Context, req *connect.Request[procpb.SendSignalRequest]) (*connect.Response[procpb.SendSignalResponse], error) {
-	if err := h.server.validateRPCUser(req.Header()); err != nil {
+func (h *processHandler) SendSignal(ctx context.Context, req *procpb.SendSignalRequest) (*procpb.SendSignalResponse, error) {
+	if err := h.server.validateRPCUser(ctx); err != nil {
 		return nil, err
 	}
-	pid, tag, err := parseSelector(req.Msg.GetProcess())
+	pid, tag, err := parseSelector(req.GetProcess())
 	if err != nil {
 		return nil, err
 	}
-	force := req.Msg.GetSignal() == procpb.Signal_SIGNAL_SIGKILL
+	force := req.GetSignal() == procpb.Signal_SIGNAL_SIGKILL
 	if err := h.server.supervisor.SendDataPlaneSignal(pid, tag, force); err != nil {
 		return nil, mapProcessError(err)
 	}
-	return connect.NewResponse(&procpb.SendSignalResponse{}), nil
+	return &procpb.SendSignalResponse{}, nil
 }
 
 func streamProcessEvents(ctx context.Context, info rckube.DataPlaneProcessInfo, sub *rckube.DataPlaneSubscription, send func(*procpb.ProcessEvent) error) error {
@@ -318,21 +322,21 @@ func outcomeToEndEvent(outcome rckube.DataPlaneProcessInfo) *procpb.ProcessEvent
 
 func parseSelector(sel *procpb.ProcessSelector) (uint32, string, error) {
 	if sel == nil {
-		return 0, "", connect.NewError(connect.CodeInvalidArgument, errors.New("process selector is required"))
+		return 0, "", connect.NewError(connect.CodeInvalidArgument, "process selector is required")
 	}
 	switch s := sel.Selector.(type) {
 	case *procpb.ProcessSelector_Pid:
 		if s.Pid == 0 {
-			return 0, "", connect.NewError(connect.CodeInvalidArgument, errors.New("pid must be non-zero"))
+			return 0, "", connect.NewError(connect.CodeInvalidArgument, "pid must be non-zero")
 		}
 		return s.Pid, "", nil
 	case *procpb.ProcessSelector_Tag:
 		if s.Tag == "" {
-			return 0, "", connect.NewError(connect.CodeInvalidArgument, errors.New("tag must be non-empty"))
+			return 0, "", connect.NewError(connect.CodeInvalidArgument, "tag must be non-empty")
 		}
 		return 0, s.Tag, nil
 	default:
-		return 0, "", connect.NewError(connect.CodeInvalidArgument, errors.New("process selector must specify pid or tag"))
+		return 0, "", connect.NewError(connect.CodeInvalidArgument, "process selector must specify pid or tag")
 	}
 }
 
@@ -352,7 +356,7 @@ func extractInputBytes(input *procpb.ProcessInput) []byte {
 
 func mapProcessError(err error) error {
 	if errors.Is(err, processruntime.ErrNotFound) {
-		return connect.NewError(connect.CodeNotFound, fmt.Errorf("process not found: %w", err))
+		return connect.NewError(connect.CodeNotFound, fmt.Sprintf("process not found: %v", err))
 	}
-	return connect.NewError(connect.CodeFailedPrecondition, err)
+	return connect.NewError(connect.CodeFailedPrecondition, err.Error())
 }

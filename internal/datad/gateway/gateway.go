@@ -32,7 +32,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 
 	"github.com/nekomeowww/rc/internal/datad/pki"
 	"github.com/nekomeowww/rc/pkg/envd"
@@ -86,11 +86,9 @@ func NewServer(resolver Resolver, certProvider ClientCertProvider) *Server {
 	}
 
 	e := echo.New()
-	e.HideBanner = true
-	e.HidePort = true
 
-	e.GET("/healthz", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
-	e.GET("/readyz", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+	e.GET("/healthz", func(c *echo.Context) error { return c.NoContent(http.StatusOK) })
+	e.GET("/readyz", func(c *echo.Context) error { return c.NoContent(http.StatusOK) })
 
 	ws := e.Group("/namespaces/:namespace/workspaces/:name")
 	ws.Any("/execd", s.proxyHandler(protocolExecd))
@@ -109,8 +107,8 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) proxyHandler(protocol string) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		w, r := c.Response().Writer, c.Request()
+	return func(c *echo.Context) error {
+		w, r := c.Response(), c.Request()
 		namespace := c.Param("namespace")
 		name := c.Param("name")
 		upstreamRemainder := "/" + strings.TrimPrefix(c.Param("*"), "/")

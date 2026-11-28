@@ -23,6 +23,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net"
@@ -34,7 +35,8 @@ import (
 	"testing"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -183,53 +185,53 @@ func TestEnvdFilesRESTAndFilesystemRPC(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rootResp.StatusCode)
 
 	// 4. ConnectRPC Filesystem: Stat, ListDir, MakeDir, Move, Remove, WatchDir.
-	fsClient := filesystemconnect.NewFilesystemClient(client, baseURL)
+	fsClient := filesystemconnect.NewFilesystemClient(connect.NewClient(connecthttp.NewTransport(client, baseURL)))
 	ctx := context.Background()
 
-	statResp, err := fsClient.Stat(ctx, connect.NewRequest(&fspb.StatRequest{Path: "~/nested/hello.txt"}))
+	statResp, err := fsClient.Stat(ctx, &fspb.StatRequest{Path: "~/nested/hello.txt"})
 	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(homeDir, "nested", "hello.txt"), statResp.Msg.Entry.Path)
-	assert.Equal(t, "unit-test", statResp.Msg.Entry.Metadata["source"])
+	assert.Equal(t, filepath.Join(homeDir, "nested", "hello.txt"), statResp.Entry.Path)
+	assert.Equal(t, "unit-test", statResp.Entry.Metadata["source"])
 
 	// Reject root via Basic auth header on ConnectRPC.
-	rootStatReq := connect.NewRequest(&fspb.StatRequest{Path: "~/nested/hello.txt"})
-	rootStatReq.Header().Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("root:")))
-	_, err = fsClient.Stat(ctx, rootStatReq)
+	rootCtx, rootCallInfo := connect.NewClientContext(ctx)
+	rootCallInfo.RequestHeader().Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("root:")))
+	_, err = fsClient.Stat(rootCtx, &fspb.StatRequest{Path: "~/nested/hello.txt"})
 	require.Error(t, err)
 	assert.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
 
-	_, err = fsClient.MakeDir(ctx, connect.NewRequest(&fspb.MakeDirRequest{Path: "watched"}))
+	_, err = fsClient.MakeDir(ctx, &fspb.MakeDirRequest{Path: "watched"})
 	require.NoError(t, err)
 
-	cwResp, err := fsClient.CreateWatcher(ctx, connect.NewRequest(&fspb.CreateWatcherRequest{
+	cwResp, err := fsClient.CreateWatcher(ctx, &fspb.CreateWatcherRequest{
 		Path:         "watched",
 		IncludeEntry: true,
-	}))
+	})
 	require.NoError(t, err)
-	require.NotEmpty(t, cwResp.Msg.WatcherId)
+	require.NotEmpty(t, cwResp.WatcherId)
 
 	require.NoError(t, os.WriteFile(filepath.Join(homeDir, "watched", "ping.txt"), []byte("pong"), 0o644))
 	require.Eventually(t, func() bool {
-		evResp, evErr := fsClient.GetWatcherEvents(ctx, connect.NewRequest(&fspb.GetWatcherEventsRequest{
-			WatcherId: cwResp.Msg.WatcherId,
-		}))
-		return evErr == nil && len(evResp.Msg.Events) > 0
+		evResp, evErr := fsClient.GetWatcherEvents(ctx, &fspb.GetWatcherEventsRequest{
+			WatcherId: cwResp.WatcherId,
+		})
+		return evErr == nil && len(evResp.Events) > 0
 	}, 3*time.Second, 50*time.Millisecond)
 
-	_, err = fsClient.RemoveWatcher(ctx, connect.NewRequest(&fspb.RemoveWatcherRequest{WatcherId: cwResp.Msg.WatcherId}))
+	_, err = fsClient.RemoveWatcher(ctx, &fspb.RemoveWatcherRequest{WatcherId: cwResp.WatcherId})
 	require.NoError(t, err)
 
-	listResp, err := fsClient.ListDir(ctx, connect.NewRequest(&fspb.ListDirRequest{Path: "nested", Depth: 1}))
+	listResp, err := fsClient.ListDir(ctx, &fspb.ListDirRequest{Path: "nested", Depth: 1})
 	require.NoError(t, err)
-	assert.Len(t, listResp.Msg.Entries, 2)
+	assert.Len(t, listResp.Entries, 2)
 
-	_, err = fsClient.Move(ctx, connect.NewRequest(&fspb.MoveRequest{
+	_, err = fsClient.Move(ctx, &fspb.MoveRequest{
 		Source:      "nested/second.txt",
 		Destination: "nested/moved.txt",
-	}))
+	})
 	require.NoError(t, err)
 
-	_, err = fsClient.Remove(ctx, connect.NewRequest(&fspb.RemoveRequest{Path: "nested/moved.txt"}))
+	_, err = fsClient.Remove(ctx, &fspb.RemoveRequest{Path: "nested/moved.txt"})
 	require.NoError(t, err)
 }
 
@@ -238,23 +240,29 @@ func TestEnvdProcessRPCAndActivity(t *testing.T) {
 		t.Skip("uses POSIX shell utilities (/bin/sh, /bin/cat)")
 	}
 	baseURL, client, supervisor, _ := startTestEnvdServer(t)
-	procClient := processconnect.NewProcessClient(client, baseURL)
+	procClient := processconnect.NewProcessClient(connect.NewClient(connecthttp.NewTransport(client, baseURL)))
 	ctx := context.Background()
 
 	// 1. Start process with separate stdout and stderr.
-	stream, err := procClient.Start(ctx, connect.NewRequest(&procpb.StartRequest{
+	stream, err := procClient.Start(ctx, &procpb.StartRequest{
 		Process: &procpb.ProcessConfig{
 			Cmd:  "/bin/sh",
 			Args: []string{"-c", "echo out-line; echo err-line >&2"},
 		},
-	}))
+	})
 	require.NoError(t, err)
+	defer func() { _ = stream.Close() }()
 
 	var stdout, stderr bytes.Buffer
 	var pid uint32
 	var endEvent *procpb.ProcessEvent_EndEvent
-	for stream.Receive() {
-		ev := stream.Msg().GetEvent()
+	for {
+		msg, recvErr := stream.Receive()
+		if errors.Is(recvErr, io.EOF) {
+			break
+		}
+		require.NoError(t, recvErr)
+		ev := msg.GetEvent()
 		switch e := ev.Event.(type) {
 		case *procpb.ProcessEvent_Start:
 			pid = e.Start.Pid
@@ -265,7 +273,6 @@ func TestEnvdProcessRPCAndActivity(t *testing.T) {
 			endEvent = e.End
 		}
 	}
-	require.NoError(t, stream.Err())
 	assert.NotZero(t, pid)
 	assert.Equal(t, "out-line\n", stdout.String())
 	assert.Equal(t, "err-line\n", stderr.String())
@@ -283,62 +290,74 @@ func TestEnvdProcessRPCAndActivity(t *testing.T) {
 	// 2. Interactive stdin + CloseStdin.
 	stdinTrue := true
 	tag := "cat-test"
-	catStream, err := procClient.Start(ctx, connect.NewRequest(&procpb.StartRequest{
+	catStream, err := procClient.Start(ctx, &procpb.StartRequest{
 		Process: &procpb.ProcessConfig{Cmd: "/bin/cat"},
 		Tag:     &tag,
 		Stdin:   &stdinTrue,
-	}))
+	})
 	require.NoError(t, err)
-	require.True(t, catStream.Receive())
-	catPID := catStream.Msg().GetEvent().GetStart().GetPid()
+	defer func() { _ = catStream.Close() }()
+	firstCatMsg, err := catStream.Receive()
+	require.NoError(t, err)
+	catPID := firstCatMsg.GetEvent().GetStart().GetPid()
 	require.NotZero(t, catPID)
 
-	_, err = procClient.SendInput(ctx, connect.NewRequest(&procpb.SendInputRequest{
+	_, err = procClient.SendInput(ctx, &procpb.SendInputRequest{
 		Process: &procpb.ProcessSelector{Selector: &procpb.ProcessSelector_Pid{Pid: catPID}},
 		Input:   &procpb.ProcessInput{Input: &procpb.ProcessInput_Stdin{Stdin: []byte("hello stdin\n")}},
-	}))
+	})
 	require.NoError(t, err)
-	_, err = procClient.CloseStdin(ctx, connect.NewRequest(&procpb.CloseStdinRequest{
+	_, err = procClient.CloseStdin(ctx, &procpb.CloseStdinRequest{
 		Process: &procpb.ProcessSelector{Selector: &procpb.ProcessSelector_Tag{Tag: tag}},
-	}))
+	})
 	require.NoError(t, err)
 
 	var catOut bytes.Buffer
-	for catStream.Receive() {
-		if d := catStream.Msg().GetEvent().GetData(); d != nil {
+	for {
+		msg, recvErr := catStream.Receive()
+		if errors.Is(recvErr, io.EOF) {
+			break
+		}
+		require.NoError(t, recvErr)
+		if d := msg.GetEvent().GetData(); d != nil {
 			catOut.Write(d.GetStdout())
 		}
 	}
-	require.NoError(t, catStream.Err())
 	assert.Equal(t, "hello stdin\n", catOut.String())
 
 	// 3. PTY process + resize + signal.
-	ptyStream, err := procClient.Start(ctx, connect.NewRequest(&procpb.StartRequest{
+	ptyStream, err := procClient.Start(ctx, &procpb.StartRequest{
 		Process: &procpb.ProcessConfig{Cmd: "/bin/sh", Args: []string{"-c", "sleep 30"}},
 		Pty:     &procpb.PTY{Size: &procpb.PTY_Size{Cols: 80, Rows: 24}},
-	}))
+	})
 	require.NoError(t, err)
-	require.True(t, ptyStream.Receive())
-	ptyPID := ptyStream.Msg().GetEvent().GetStart().GetPid()
+	defer func() { _ = ptyStream.Close() }()
+	firstPtyMsg, err := ptyStream.Receive()
+	require.NoError(t, err)
+	ptyPID := firstPtyMsg.GetEvent().GetStart().GetPid()
 	require.NotZero(t, ptyPID)
 
-	listResp, err := procClient.List(ctx, connect.NewRequest(&procpb.ListRequest{}))
+	listResp, err := procClient.List(ctx, &procpb.ListRequest{})
 	require.NoError(t, err)
-	require.Len(t, listResp.Msg.Processes, 1)
-	assert.Equal(t, ptyPID, listResp.Msg.Processes[0].Pid)
+	require.Len(t, listResp.Processes, 1)
+	assert.Equal(t, ptyPID, listResp.Processes[0].Pid)
 
-	_, err = procClient.Update(ctx, connect.NewRequest(&procpb.UpdateRequest{
+	_, err = procClient.Update(ctx, &procpb.UpdateRequest{
 		Process: &procpb.ProcessSelector{Selector: &procpb.ProcessSelector_Pid{Pid: ptyPID}},
 		Pty:     &procpb.PTY{Size: &procpb.PTY_Size{Cols: 120, Rows: 40}},
-	}))
+	})
 	require.NoError(t, err)
 
-	_, err = procClient.SendSignal(ctx, connect.NewRequest(&procpb.SendSignalRequest{
+	_, err = procClient.SendSignal(ctx, &procpb.SendSignalRequest{
 		Process: &procpb.ProcessSelector{Selector: &procpb.ProcessSelector_Pid{Pid: ptyPID}},
 		Signal:  procpb.Signal_SIGNAL_SIGKILL,
-	}))
+	})
 	require.NoError(t, err)
-	for ptyStream.Receive() {
+	for {
+		_, recvErr := ptyStream.Receive()
+		if errors.Is(recvErr, io.EOF) {
+			break
+		}
+		require.NoError(t, recvErr)
 	}
-	require.NoError(t, ptyStream.Err())
 }
